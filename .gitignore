@@ -1,0 +1,10 @@
+# Secrets — never commit the bot token
+.env
+.env.*
+
+node_modules/
+
+# Vercel
+.vercel
+
+.DS_Store

@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/suggest-edit.js": {
+      "runtime": "nodejs22.x",
+      "maxDuration": 15
+    }
+  }
+}
