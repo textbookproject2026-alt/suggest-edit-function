@@ -9,9 +9,14 @@ Zero dependencies — Node 22 with built-in `fetch`, plain ES modules.
 
 ```
 api/suggest-edit.js   the whole function
+test/assertions.test.mjs  abuse-test assertion suite (npm test)
+test/harness.mjs      drives the real handler with fetch stubbed
 vercel.json           maxDuration only
 package.json          pins Node 22 via engines
 ```
+
+Run the suite with `npm test` (Node's built-in runner, no dependencies). It never
+contacts GitHub. `TESTING.md` records the abuse-test pass these assertions came from.
 
 The Node version comes from `engines.node` in `package.json` (plus the project's
 Node setting in the Vercel dashboard). Do **not** add a `runtime` key to
@@ -63,6 +68,7 @@ Fixed by the live front-end. Do not change either side alone.
 | 204    | `OPTIONS` preflight                         | —              |
 | 400    | bad JSON or a failed field check            | yes            |
 | 403    | `Origin` present and not the allowed origin | no             |
+| 415    | `Content-Type` is not `application/json`    | yes            |
 | 405    | any method other than `POST` / `OPTIONS`    | no             |
 | 429    | rate limit exceeded                         | yes            |
 | 500    | `BOT_TOKEN` missing, or an escaped throw    | no             |
@@ -71,6 +77,18 @@ Fixed by the live front-end. Do not change either side alone.
 ---
 
 ## Behaviour notes
+
+**Content-Type.** Only `application/json` is accepted (parameters such as
+`; charset=utf-8` are fine); anything else gets a `415`. This is deliberate:
+`text/plain`, `multipart/form-data` and `application/x-www-form-urlencoded` are CORS
+*simple requests*, which a browser will send cross-origin with no preflight at all.
+Requiring JSON forces a preflight, so the origin allowlist is enforced by the browser
+before the request is ever sent.
+
+**User content in the issue.** `suggestion` and `reasoning` go inside a fence whose
+backtick run is longer than any run in the content, and `name` plus the masked email
+go inside a code span (`inlineCode`). Nothing a reader types can become a heading, a
+link, an image, or an `@mention` that notifies someone. See `TESTING.md`.
 
 **CORS.** Exactly one origin is allowed: `https://bptext2026.xyz`, as
 `ALLOWED_ORIGIN` at the top of `api/suggest-edit.js`. Add the production domain there

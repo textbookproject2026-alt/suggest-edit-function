@@ -98,7 +98,7 @@ would only ever throttle well-formed traffic.
 | | Result |
 | --- | --- |
 | **Before** | `400, 400, 429, 429, 429, 429`. The limiter **already precedes validation** — a `{"bogus":1}` body returned `429`, not a validation `400`. ✅ *no patch needed* |
-| **After** | `400 ×5` then `429`, on a clean instance. ✅ |
+| **After** | `400 ×5` then `429`, on a clean instance — the canonical shape. The `429` now reads `{"error":"rate limit exceeded"}`, no longer replaying the caller's IP. ✅ |
 
 The before-run shows `429` from the third request, not the sixth, because two
 earlier probes in the same hour had already spent two of the five tokens — the
