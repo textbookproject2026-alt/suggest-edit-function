@@ -9,8 +9,15 @@ Zero dependencies — Node 22 with built-in `fetch`, plain ES modules.
 
 ```
 api/suggest-edit.js   the whole function
-vercel.json           Node 22 runtime
+vercel.json           maxDuration only
+package.json          pins Node 22 via engines
 ```
+
+The Node version comes from `engines.node` in `package.json` (plus the project's
+Node setting in the Vercel dashboard). Do **not** add a `runtime` key to
+`vercel.json` — that field is only for versioned community-runtime packages
+(`now-php@1.0.0`), and setting it on a first-party Node function fails the build
+with "Function Runtimes must have a valid version".
 
 ---
 
