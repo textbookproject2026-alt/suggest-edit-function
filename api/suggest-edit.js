@@ -198,6 +198,27 @@ function maskEmail(email) {
   return `${email.slice(0, 1)}***${email.slice(at)}`;
 }
 
+/**
+ * Render user text as a markdown code span, so it is displayed but can never be
+ * markup. GitHub does not linkify @mentions, links or images inside a code span, so
+ * a reader who calls themselves "@octocat" is shown verbatim and notifies nobody.
+ */
+function inlineCode(text) {
+  // A code span cannot cross a line break: fold every whitespace run to one space,
+  // or a newline in `name` would close the span and drop the rest into live markdown.
+  const flat = text.replace(/\s+/g, ' ').trim();
+  if (!flat) return '';
+
+  let longest = 0;
+  for (const run of flat.match(/`+/g) ?? []) longest = Math.max(longest, run.length);
+  const ticks = '`'.repeat(longest + 1);
+
+  // CommonMark strips one leading and one trailing space from a code span, so pad
+  // when the content would otherwise sit flush against a backtick delimiter.
+  const pad = flat.startsWith('`') || flat.endsWith('`') ? ' ' : '';
+  return `${ticks}${pad}${flat}${pad}${ticks}`;
+}
+
 /** Fence long enough that user content cannot break out of the code block. */
 function fence(text) {
   let longest = 0;
@@ -206,7 +227,12 @@ function fence(text) {
 }
 
 function fileUrl(path) {
-  const encoded = path.split('/').map(encodeURIComponent).join('/');
+  // encodeURIComponent leaves ( and ) alone, and an unbalanced ')' would terminate
+  // the markdown link destination early. PATH_RE permits both, so encode them.
+  const encoded = path
+    .split('/')
+    .map((seg) => encodeURIComponent(seg).replace(/\(/g, '%28').replace(/\)/g, '%29'))
+    .join('/');
   return `https://github.com/${REPO_OWNER}/${REPO_NAME}/blob/${REPO_BRANCH}/${encoded}`;
 }
 
@@ -231,7 +257,7 @@ function buildIssueBody({ name, email, suggestion, reasoning, path }) {
     '',
     '---',
     '',
-    `**Submitted by:** ${name} (${maskEmail(email)})`,
+    `**Submitted by:** ${inlineCode(name)} (${inlineCode(maskEmail(email))})`,
     '',
     '_submitted via the suggest-an-edit form_',
   );
@@ -362,6 +388,14 @@ function send(res, status, payload) {
   res.status(status).json(payload);
 }
 
+/** Strictly application/json, with or without parameters ("; charset=utf-8"). */
+function isJsonContentType(req) {
+  const raw = req.headers['content-type'];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof value !== 'string') return false;
+  return value.split(';')[0].trim().toLowerCase() === 'application/json';
+}
+
 function parseBody(req) {
   // Vercel parses application/json for us; tolerate a raw string either way.
   const raw = req.body;
@@ -387,7 +421,9 @@ async function handle(req, res) {
   // so we let it through; CORS is not a security boundary and the rate limit and
   // honeypot below do the actual work. A *mismatched* Origin is refused outright.
   if (origin && origin !== ALLOWED_ORIGIN) {
-    send(res, 403, { error: `origin not allowed: ${origin}` });
+    // Logged, not echoed: `error` should never replay caller-controlled input.
+    console.warn(`origin rejected: ${origin}`);
+    send(res, 403, { error: 'origin not allowed' });
     return;
   }
   // Set before the method guard so even a rejected request is readable by the client.
@@ -396,7 +432,23 @@ async function handle(req, res) {
   // --- Method guard -------------------------------------------------------
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST, OPTIONS');
-    send(res, 405, { error: `method not allowed: ${req.method}` });
+    console.warn(`method rejected: ${req.method}`);
+    send(res, 405, { error: 'method not allowed' });
+    return;
+  }
+
+  // --- Content-Type gate --------------------------------------------------
+  // text/plain, multipart and form encodings are CORS "simple requests": a browser
+  // will send them cross-origin with no preflight at all. Insisting on
+  // application/json forces a preflight, so the origin allowlist is enforced by the
+  // browser before the request is even sent, rather than resting solely on the
+  // Origin check above (which a non-browser client simply omits).
+  if (!isJsonContentType(req)) {
+    console.warn(`unsupported content-type: ${req.headers['content-type'] ?? '<none>'}`);
+    send(res, 415, {
+      error: 'unsupported content-type',
+      userMessage: 'Something went wrong sending your suggestion. Please try again.',
+    });
     return;
   }
 
@@ -430,7 +482,7 @@ async function handle(req, res) {
   if (isRateLimited(ip, Date.now())) {
     console.warn(`rate limit: ip=${ip} exceeded ${RATE_LIMIT_MAX}/hour`);
     send(res, 429, {
-      error: `rate limit exceeded for ip ${ip}`,
+      error: 'rate limit exceeded',
       userMessage: "You're sending suggestions too quickly — try again in a little while.",
     });
     return;

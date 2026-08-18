@@ -4,5 +4,8 @@
   "type": "module",
   "engines": {
     "node": "22.x"
+  },
+  "scripts": {
+    "test": "node --test test/assertions.test.mjs"
   }
 }
