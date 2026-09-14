@@ -93,9 +93,10 @@ link, an image, or an `@mention` that notifies someone. See `TESTING.md`.
 **CORS.** Exactly one origin is allowed: `https://confused4now.org`, as
 `ALLOWED_ORIGIN` at the top of `api/suggest-edit.js`. (Until the 2026-09-14 domain
 cutover this was the staging domain, `https://bptext2026.xyz`.) `OPTIONS` gets 204
-plus the CORS headers; a POST carrying a different `Origin` gets 403. A request with **no** `Origin` header (curl, server-to-server) is
-allowed through — CORS is a browser mechanism, not a security boundary, and it is the
-rate limit and honeypot that do the real work here.
+plus the CORS headers; a POST carrying a different `Origin` gets 403. A request with
+**no** `Origin` header (curl, server-to-server) is allowed through — CORS is a browser
+mechanism, not a security boundary, and it is the rate limit and honeypot that do the
+real work here.
 
 **Everything is re-validated server-side.** The front-end validates too, but that is
 advisory only: anyone can POST here directly. `path` must match
