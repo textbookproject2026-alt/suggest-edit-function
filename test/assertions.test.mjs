@@ -40,7 +40,7 @@ test('accepts application/json with parameters and odd casing', async () => {
 test('the content-type gate does not break the OPTIONS preflight', async () => {
   const r = await call({ method: 'OPTIONS', contentType: null });
   assert.equal(r.status, 204);
-  assert.equal(r.headers['access-control-allow-origin'], 'https://bptext2026.xyz');
+  assert.equal(r.headers['access-control-allow-origin'], 'https://confused4now.org');
 });
 
 // ---------------------------------------------------------------------------
@@ -269,7 +269,7 @@ test('a mismatched Origin is refused without echoing it back', async () => {
 });
 
 test('the allowed origin still gets through', async () => {
-  const r = await call({ origin: 'https://bptext2026.xyz', body: { ...VALID } });
+  const r = await call({ origin: 'https://confused4now.org', body: { ...VALID } });
   assert.equal(r.status, 201);
 });
 

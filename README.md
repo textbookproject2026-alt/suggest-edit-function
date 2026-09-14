@@ -90,10 +90,10 @@ backtick run is longer than any run in the content, and `name` plus the masked e
 go inside a code span (`inlineCode`). Nothing a reader types can become a heading, a
 link, an image, or an `@mention` that notifies someone. See `TESTING.md`.
 
-**CORS.** Exactly one origin is allowed: `https://bptext2026.xyz`, as
-`ALLOWED_ORIGIN` at the top of `api/suggest-edit.js`. Add the production domain there
-at cutover. `OPTIONS` gets 204 plus the CORS headers; a POST carrying a different
-`Origin` gets 403. A request with **no** `Origin` header (curl, server-to-server) is
+**CORS.** Exactly one origin is allowed: `https://confused4now.org`, as
+`ALLOWED_ORIGIN` at the top of `api/suggest-edit.js`. (Until the 2026-09-14 domain
+cutover this was the staging domain, `https://bptext2026.xyz`.) `OPTIONS` gets 204
+plus the CORS headers; a POST carrying a different `Origin` gets 403. A request with **no** `Origin` header (curl, server-to-server) is
 allowed through — CORS is a browser mechanism, not a security boundary, and it is the
 rate limit and honeypot that do the real work here.
 
@@ -186,12 +186,12 @@ sends one.
 URL=http://localhost:3000/api/suggest-edit
 
 # preflight -> 204
-curl -i -X OPTIONS "$URL" -H "Origin: https://bptext2026.xyz"
+curl -i -X OPTIONS "$URL" -H "Origin: https://confused4now.org"
 
 # happy path -> 201 { issueUrl }
 curl -i -X POST "$URL" \
   -H 'Content-Type: application/json' \
-  -H 'Origin: https://bptext2026.xyz' \
+  -H 'Origin: https://confused4now.org' \
   -d '{"name":"Ada","email":"ada@example.com","path":"chapters/01-intro.md",
        "suggestion":"Typo in paragraph two: \"recieve\" -> \"receive\".",
        "reasoning":"Spelling.","website":""}'
@@ -199,11 +199,11 @@ curl -i -X POST "$URL" \
 # honeypot -> 201, no issue filed
 curl -i -X POST "$URL" \
   -H 'Content-Type: application/json' \
-  -H 'Origin: https://bptext2026.xyz' \
+  -H 'Origin: https://confused4now.org' \
   -d '{"name":"Bot","email":"b@b.com","path":"a.md","suggestion":"buy","website":"http://spam"}'
 
 # wrong method -> 405
-curl -i "$URL" -H "Origin: https://bptext2026.xyz"
+curl -i "$URL" -H "Origin: https://confused4now.org"
 
 # wrong origin -> 403
 curl -i -X POST "$URL" -H 'Content-Type: application/json' \

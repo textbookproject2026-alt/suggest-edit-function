@@ -21,10 +21,10 @@
 // Configuration
 // ---------------------------------------------------------------------------
 
-// Exactly one browser origin may call this endpoint.
-// TODO: add the production domain here at cutover (keep the staging one until the
-// front-end has fully moved, then drop it).
-const ALLOWED_ORIGIN = 'https://bptext2026.xyz';
+// Exactly one browser origin may call this endpoint: the production domain.
+// The staging domain (bptext2026.xyz) was dropped at the 2026-09-14 cutover —
+// Obsidian Publish serves one custom domain per site, so it no longer serves the book.
+const ALLOWED_ORIGIN = 'https://confused4now.org';
 
 const REPO_OWNER = 'textbookproject2026-alt';
 const REPO_NAME = 'textbook';
