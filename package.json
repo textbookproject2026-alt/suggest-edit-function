@@ -6,6 +6,8 @@
     "node": "22.x"
   },
   "scripts": {
-    "test": "node --test test/assertions.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "registry:bundle": "node scripts/bundle-registry.mjs",
+    "vercel-build": "node scripts/bundle-registry.mjs && npm test"
   }
 }

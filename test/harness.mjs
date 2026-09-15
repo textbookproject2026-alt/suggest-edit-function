@@ -9,16 +9,56 @@ process.env.BOT_TOKEN ??= 'test-token';
 export let lastIssue = null;
 export function resetIssue() { lastIssue = null; }
 
+/** Every outbound request, in order: { method, url, headers, body }. */
+export const requests = [];
+
+/**
+ * Optional override for POST /app/installations/:id/access_tokens.
+ * @type {null | ((url: string, opts: object) => object)}
+ */
+let tokenExchange = null;
+export function stubTokenExchange(fn) { tokenExchange = fn; }
+
 globalThis.fetch = async (url, opts = {}) => {
-  if (opts.method === 'POST' && String(url).endsWith('/issues')) {
+  url = String(url);
+  requests.push({ method: opts.method ?? 'GET', url, headers: opts.headers ?? {},
+                  body: opts.body ? JSON.parse(opts.body) : undefined });
+
+  if (opts.method === 'POST' && /\/app\/installations\/[^/]+\/access_tokens$/.test(url)) {
+    if (!tokenExchange) throw new Error(`unexpected token exchange: ${url}`);
+    return tokenExchange(url, opts);
+  }
+  if (opts.method === 'POST' && url.endsWith('/issues')) {
     lastIssue = JSON.parse(opts.body);
-    return { ok: true, status: 201, json: async () => ({ html_url: 'https://example.invalid/issues/1' }) };
+    const repositoryUrl = url.slice(0, -'/issues'.length);
+    return { ok: true, status: 201,
+             json: async () => ({ html_url: 'https://example.invalid/issues/1', repository_url: repositoryUrl }) };
   }
   // Label lookups: pretend both labels already exist.
   return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
 };
 
 export const { default: handler } = await import('../api/suggest-edit.js');
+
+let instance = 0;
+/**
+ * A fresh copy of the handler module, loaded with `env` as its environment. Module
+ * state (credential config, token cache, limiter) is per copy. Keys set to undefined
+ * are removed for the load.
+ */
+export async function loadHandler(env) {
+  const saved = { ...process.env };
+  for (const [k, v] of Object.entries(env)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  try {
+    return (await import(`../api/suggest-edit.js?instance=${++instance}`)).default;
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+}
 
 function mockRes() {
   return {
@@ -38,9 +78,10 @@ export function freshIp() { return `10.0.${Math.floor(ipCounter / 250)}.${(ipCou
 /**
  * @param {object} o
  * @param {string} [o.ip]  reuse an IP to exercise the rate limiter deliberately
+ * @param {Function} [o.using]  a handler from loadHandler(); defaults to the shared one
  */
 export async function call({ method = 'POST', contentType = 'application/json',
-                             body, origin, ip = freshIp(), raw } = {}) {
+                             body, origin, ip = freshIp(), raw, using = handler } = {}) {
   resetIssue();
   const headers = { 'x-forwarded-for': ip };
   if (contentType !== null) headers['content-type'] = contentType;
@@ -49,7 +90,7 @@ export async function call({ method = 'POST', contentType = 'application/json',
   const req = { method, headers, socket: { remoteAddress: ip },
                 body: raw !== undefined ? raw : body };
   const res = mockRes();
-  await handler(req, res);
+  await using(req, res);
   return { status: res.statusCode, payload: res.payload, headers: res.headers, issue: lastIssue };
 }
 

@@ -1,22 +1,30 @@
 # suggest-edit-function
 
-Vercel serverless function behind the textbook's **suggest an edit** form. It takes a
-reader's suggestion and files it as a GitHub issue on
-[`textbookproject2026-alt/textbook`](https://github.com/textbookproject2026-alt/textbook/issues)
-as the bot account.
+Vercel serverless function behind the textbooks' **suggest an edit** form. It takes a
+reader's suggestion, works out which book it is for from the request's `Origin`, and
+files it as a GitHub issue on that book's content repo, authenticated as a GitHub App.
+Which books exist, and where each one's issues go, comes from the
+[textbook registry](https://github.com/textbookproject2026-alt/textbook-registry), baked
+in at build time. No book is hardcoded here.
 
-Zero dependencies — Node 22 with built-in `fetch`, plain ES modules.
+Zero dependencies — Node 22 with built-in `fetch` and `node:crypto`, plain ES modules.
 
 ```
-api/suggest-edit.js   the whole function
-test/assertions.test.mjs  abuse-test assertion suite (npm test)
-test/harness.mjs      drives the real handler with fetch stubbed
-vercel.json           maxDuration only
-package.json          pins Node 22 via engines
+api/suggest-edit.js            the handler
+lib/registry.mjs               registry validation and Origin -> book resolution
+lib/github-app.mjs             App JWT (RS256 via node:crypto) and installation tokens
+registry/bundled.mjs           GENERATED registry snapshot, pinned to a registry commit
+scripts/bundle-registry.mjs    writes registry/bundled.mjs (the Vercel build step)
+test/assertions.test.mjs       abuse-test assertion suite
+test/registry.test.mjs         book resolution
+test/github-app.test.mjs       App credential path, token exchange stubbed
+test/harness.mjs               drives the real handler with fetch stubbed
+vercel.json                    maxDuration only
+package.json                   pins Node 22 via engines; test and build scripts
 ```
 
 Run the suite with `npm test` (Node's built-in runner, no dependencies). It never
-contacts GitHub. `TESTING.md` records the abuse-test pass these assertions came from.
+contacts GitHub. `TESTING.md` records the abuse-test pass the original assertions came from.
 
 The Node version comes from `engines.node` in `package.json` (plus the project's
 Node setting in the Vercel dashboard). Do **not** add a `runtime` key to
@@ -48,7 +56,7 @@ Fixed by the live front-end. Do not change either side alone.
 **201** — issue filed:
 
 ```json
-{ "issueUrl": "https://github.com/textbookproject2026-alt/textbook/issues/42" }
+{ "issueUrl": "https://github.com/<book content repo>/issues/42" }
 ```
 
 **4xx / 5xx** — failure:
@@ -67,12 +75,15 @@ Fixed by the live front-end. Do not change either side alone.
 | 201    | issue created, **or** honeypot tripped      | —              |
 | 204    | `OPTIONS` preflight                         | —              |
 | 400    | bad JSON or a failed field check            | yes            |
-| 403    | `Origin` present and not the allowed origin | no             |
+| 403    | `Origin` is not a registered book (see below) | no           |
 | 415    | `Content-Type` is not `application/json`    | yes            |
 | 405    | any method other than `POST` / `OPTIONS`    | no             |
 | 429    | rate limit exceeded                         | yes            |
-| 500    | `BOT_TOKEN` missing, or an escaped throw    | no             |
-| 502    | GitHub call failed or timed out             | no             |
+| 500    | no GitHub credential configured, or an escaped throw | no    |
+| 502    | GitHub call failed or timed out, or no App token could be minted | no |
+
+Every response carries `X-Registry-Version: <registry commit SHA>`, the registry
+snapshot this deployment was built with.
 
 ---
 
@@ -90,13 +101,34 @@ backtick run is longer than any run in the content, and `name` plus the masked e
 go inside a code span (`inlineCode`). Nothing a reader types can become a heading, a
 link, an image, or an `@mention` that notifies someone. See `TESTING.md`.
 
-**CORS.** Exactly one origin is allowed: `https://confused4now.org`, as
-`ALLOWED_ORIGIN` at the top of `api/suggest-edit.js`. (Until the 2026-09-14 domain
-cutover this was the staging domain, `https://bptext2026.xyz`.) `OPTIONS` gets 204
-plus the CORS headers; a POST carrying a different `Origin` gets 403. A request with
-**no** `Origin` header (curl, server-to-server) is allowed through — CORS is a browser
-mechanism, not a security boundary, and it is the rate limit and honeypot that do the
-real work here.
+**How a book is resolved.** Before anything else, preflight included, the `Origin`
+header is looked up in the bundled registry. It resolves only if it is **exactly**
+`https://` + a book's `site.domain`, for a book whose `status` is `preview` or `live`.
+There is no suffix, prefix or wildcard match, no case folding and no `www.` folding, so
+`http://confused4now.org`, `https://www.confused4now.org` and
+`https://confused4now.org.evil.example` all fail. A book's `legacy_origins` are never
+accepted. Once resolved, everything book-specific comes from that registry entry: the
+issue goes to `content.repo`, the file link uses `content.live_branch`, the honeypot's
+`issueUrl` is that repo's issues index, `Access-Control-Allow-Origin` is the
+registry-derived origin (never the raw header), and log lines end in `book=<slug>`.
+After filing, the function checks that GitHub's `repository_url` matches the book's
+repo and logs `ROUTING:` at error level if it doesn't (the reader still gets 201).
+
+**Unknown origin.** An `Origin` that resolves to no book gets **403
+`{ "error": "origin not allowed" }` with no CORS headers**, for `OPTIONS` as well as
+`POST`, so a browser never sends the real request. It is never mapped to another book
+or to a default. The same 403 applies to a registered book with
+`suggest_edit.enabled: false`. The origin is logged
+(`origin rejected: <origin> (unregistered)`), never echoed.
+
+**No `Origin` (temporary).** A request with **no** `Origin` header (curl,
+server-to-server) is still allowed through and filed against the registry's **only**
+book. CORS is a browser mechanism, not a security boundary, and it is the rate limit and
+honeypot that do the real work here. This is behind `ALLOW_ORIGINLESS_SOLE_BOOK` and
+only works while the registry holds exactly one book. With more it gets 403
+`{ "error": "origin required" }`, and the test suite (which runs in the build) fails, so
+a second book cannot deploy until the flag is removed. Removing it, so that every
+request must carry a registered `Origin`, is its own deploy (migration step 2b).
 
 **Everything is re-validated server-side.** The front-end validates too, but that is
 advisory only: anyone can POST here directly. `path` must match
@@ -116,43 +148,101 @@ against casual form-mashing, not a control. Real hardening (shared KV/Redis coun
 plus edge-level limits) is **Day 28**.
 
 **Labels.** `suggested-edit` and `needs-triage` are checked with a `GET` and created
-via the API if missing (the bot has Write). A label failure is non-fatal — a missing
+via the API if missing (Issues: write covers labels). A label failure is non-fatal — a missing
 label is cosmetic next to a lost suggestion.
 
 **Timeouts and leaks.** The issue call is aborted at 8s via `AbortController`; the two
-label checks share a separate 3s budget, so a hung GitHub costs at most ~11s and the
-function returns its own 502 rather than tripping the platform's `maxDuration` (15s).
-The whole handler is wrapped so nothing can put a stack trace — or the token — into a
-response. `BOT_TOKEN` is only ever read into an `Authorization` header; it is never
-logged or echoed.
+label checks share a separate 3s budget, and minting an App token has its own 3s, so a
+hung GitHub costs at most ~14s and the function returns its own 502 rather than
+tripping the platform's `maxDuration` (15s). The whole handler is wrapped so nothing
+can put a stack trace — or a credential — into a response. The private key, the App
+JWT, installation tokens and `BOT_TOKEN` only ever go into an `Authorization` header;
+they are never logged or echoed.
 
 ---
 
 ## Environment
 
-| Variable    | Required | Description                                                                                             |
-| ----------- | -------- | ------------------------------------------------------------------------------------------------------- |
-| `BOT_TOKEN` | yes      | GitHub token for the bot account, with **Write** access to issues and labels on `textbook`. Never logged. |
+| Variable                     | Required | Description |
+| ---------------------------- | -------- | ----------- |
+| `GITHUB_APP_ID`              | yes      | The GitHub App's numeric **App ID** (App settings → General → About). Not the Client ID. |
+| `GITHUB_APP_INSTALLATION_ID` | yes      | Numeric ID of the App's installation on the account that owns the books' repos. It is the number at the end of the installation's settings URL: `github.com/organizations/<org>/settings/installations/<id>`. |
+| `GITHUB_APP_PRIVATE_KEY`     | yes      | The App's private key, **base64-encoded** (see below). |
+| `BOT_TOKEN`                  | temporary | The old personal access token. **A fallback for the App rollout only**, to be deleted along with its code once `credential=app` is proven in production. |
 
-A fine-grained personal access token needs, on `textbookproject2026-alt/textbook`:
+**The App.** Permissions **Issues: Read and write** and **Metadata: Read-only**, nothing
+else. No webhook. Install it on **only selected repositories**: each registered book's
+content repo, never "All repositories". Every request mints an installation token
+downscoped to the one resolved repository and `issues: write`.
 
-- **Issues:** Read and write
-- **Metadata:** Read-only (required alongside Issues)
-
-Set it in Vercel:
+**The private key must be base64-encoded.** GitHub gives you a multi-line `.pem` file,
+and Vercel env vars mangle the newlines in a raw PEM. Encode the whole file on one line:
 
 ```bash
-vercel env add BOT_TOKEN production
-vercel env add BOT_TOKEN preview
+base64 -i textbook-suggestions.2026-09-15.private-key.pem | tr -d '\n' | pbcopy   # macOS
+base64 -w0 textbook-suggestions.2026-09-15.private-key.pem                         # Linux
 ```
 
-Locally, put it in `.env` (git-ignored — `.env*` never gets committed):
+and paste that as `GITHUB_APP_PRIVATE_KEY`. It is decoded at runtime. A raw PEM, invalid
+base64, or something that does not decode to an RSA private key is rejected with a
+message naming the problem (never the key).
 
-```
-BOT_TOKEN=github_pat_...
+**Startup checks.** All credential variables are checked once per cold start, and the
+result is logged loudly:
+
+| Config | Log at startup | Each submission |
+| ------ | -------------- | --------------- |
+| App vars valid | `config: credential=app (app <id>, installation <id>)` | App token. Logs `credential=app (minted …)` or `(cached …)` |
+| App vars missing, partial or malformed, `BOT_TOKEN` set | `config: GitHub App NOT usable — <what is wrong>` (error level) | `BOT_TOKEN`. Logs `credential=bot_token (fallback; …)` (warn) |
+| No usable App and no `BOT_TOKEN` | `config: FATAL no GitHub credential — …` (error level) | 500 `bot credentials not configured` |
+
+If the App is configured but minting a token fails at request time (the App isn't
+installed on that repo, the key was revoked, GitHub is down), the function falls back to
+`BOT_TOKEN` when it is set, logging the reason. Without `BOT_TOKEN` it returns 502
+`github: credential unavailable` and files nothing. **To prove the App is live, look
+for `credential=app` and no `credential=bot_token` in `vercel logs`.**
+
+**Token caching.** Installation tokens last an hour. Each warm instance caches the
+token per repository and reuses it until it has less than 5 minutes left. A 401 from
+GitHub drops it, and a cold start begins with an empty cache.
+
+Set them in Vercel (production; a preview deployment should get a separate test App
+installed only on a scratch repo):
+
+```bash
+vercel env add GITHUB_APP_ID production
+vercel env add GITHUB_APP_INSTALLATION_ID production
+vercel env add GITHUB_APP_PRIVATE_KEY production
 ```
 
-Rotate the token by replacing the Vercel env var and redeploying; no code change.
+Mark `GITHUB_APP_PRIVATE_KEY` as **Sensitive** in the Vercel dashboard (Settings →
+Environment Variables).
+
+Locally, put them in `.env` (git-ignored — `.env*` never gets committed).
+
+Rotate the key by generating a new one in the App settings, replacing
+`GITHUB_APP_PRIVATE_KEY`, redeploying, then deleting the old key in GitHub; no code change.
+
+---
+
+## The registry
+
+`registry/bundled.mjs` is a snapshot of `registry.json` from
+`textbookproject2026-alt/textbook-registry`, pinned to a commit SHA. The function never
+fetches the registry at runtime, so a cold start costs nothing extra and cannot fail on
+it. The build step (`vercel-build`) resolves the registry's `main` to a SHA, fetches
+`registry.json` at that SHA, validates it, rewrites the snapshot, and then runs
+`npm test`. If any step fails, the deploy fails and the previous deployment stays live.
+Vercel instant rollback restores code and registry together.
+
+- **A registry change takes effect on the next deploy** of this project. The registry's
+  CI should call a Vercel deploy hook after each merge.
+- **Pin a registry commit** by setting `REGISTRY_REF=<40-char sha>` (or a branch name) as
+  a build env var.
+- **Refresh the committed snapshot** locally with `npm run registry:bundle`. The
+  committed copy is what `npm test` runs against. Production always rebuilds it.
+- The handler validates the snapshot again at load and refuses to start on anything
+  ambiguous: duplicate slugs, repos or domains, or a domain that is also a legacy origin.
 
 ---
 
@@ -168,7 +258,8 @@ vercel --prod       # production
 ```
 
 Pushing to `main` on a Vercel-connected repo deploys production automatically; other
-branches get preview deploys. There is no build step and nothing to install.
+branches get preview deploys. The build step is `npm run vercel-build` (bundle the
+registry, then run the tests). There is nothing to install.
 
 Run it locally:
 
@@ -209,8 +300,14 @@ curl -i "$URL" -H "Origin: https://confused4now.org"
 # wrong origin -> 403
 curl -i -X POST "$URL" -H 'Content-Type: application/json' \
   -H 'Origin: https://evil.example' -d '{}'
+
+# unregistered or look-alike origin -> 403, no CORS headers
+curl -i -X OPTIONS "$URL" -H 'Origin: https://www.confused4now.org'
+
+# which registry this deployment was built with
+curl -sI -X OPTIONS "$URL" -H 'Origin: https://confused4now.org' | grep -i x-registry-version
 ```
 
 Watch the logs with `vercel logs <deployment-url>` — validation rejections, honeypot
-hits, rate-limit trips, and GitHub failures all land there with the detail the
-response withholds.
+hits, rate-limit trips, the credential path (`credential=app` / `credential=bot_token`),
+and GitHub failures all land there with the detail the response withholds.

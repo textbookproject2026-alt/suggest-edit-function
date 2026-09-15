@@ -1,8 +1,10 @@
 /**
  * POST /api/suggest-edit
  *
- * Receives a reader's suggested edit from the textbook front-end and files it as a
- * GitHub issue on textbookproject2026-alt/textbook as the bot account.
+ * Receives a reader's suggested edit from a textbook's front-end and files it as a
+ * GitHub issue on that book's content repo. The book is resolved from the request's
+ * Origin against the textbook registry, which is baked in at build time
+ * (registry/bundled.mjs); nothing about any book is hardcoded here.
  *
  * Contract (fixed by the live front-end — do not deviate):
  *   POST JSON { name, email, suggestion, reasoning, path, website }
@@ -14,24 +16,35 @@
  *   `userMessage` is optional safe plain text (<= 200 chars) the client may show
  *                 verbatim. Omitted when the client already has fixed copy.
  *
- * Zero dependencies: Node 22 built-in fetch, plain ES modules.
+ * Zero dependencies: Node 22 built-in fetch and node:crypto, plain ES modules.
  */
+
+import BUNDLE from '../registry/bundled.mjs';
+import { validateRegistry, createResolver, canonicalOrigin } from '../lib/registry.mjs';
+import { readCredentialConfig, createInstallationTokenSource } from '../lib/github-app.mjs';
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
-// Exactly one browser origin may call this endpoint: the production domain.
-// The staging domain (bptext2026.xyz) was dropped at the 2026-09-14 cutover —
-// Obsidian Publish serves one custom domain per site, so it no longer serves the book.
-const ALLOWED_ORIGIN = 'https://confused4now.org';
+// Checked again at load even though the build validated it: a registry this function
+// cannot route unambiguously must stop it starting, not be half-used.
+const REGISTRY = validateRegistry(BUNDLE.registry);
+const RESOLVER = createResolver(REGISTRY);
+console.log(`registry: ${BUNDLE.sha} (${REGISTRY.books.length} book(s))`);
 
-const REPO_OWNER = 'textbookproject2026-alt';
-const REPO_NAME = 'textbook';
-const REPO_BRANCH = 'main';
+// TEMPORARY (DESIGN §5 step 2 -> 2b). A request with no Origin (curl, server-to-server)
+// is still accepted, and is filed against the registry's only book. With more than one
+// book there is no such book, so it is refused; test/registry.test.mjs also fails the
+// build if this is still true once a second book is registered. Step 2b deletes it.
+const ALLOW_ORIGINLESS_SOLE_BOOK = true;
 
 const GITHUB_API = 'https://api.github.com';
-const REPO_ISSUES_URL = `https://github.com/${REPO_OWNER}/${REPO_NAME}/issues`;
+const GITHUB_HEADERS = {
+  Accept: 'application/vnd.github+json',
+  'X-GitHub-Api-Version': '2022-11-28',
+  'User-Agent': 'suggest-edit-function',
+};
 
 const LABELS = ['suggested-edit', 'needs-triage'];
 const LABEL_DEFAULTS = {
@@ -50,10 +63,76 @@ const MAX_PATH = 300;
 // past its maxDuration and the reader would see a platform timeout, not our 502.
 const GITHUB_TIMEOUT_MS = 8000;
 const LABEL_BUDGET_MS = 3000;
+// Minting an installation token on a cold cache: 3s + 3s + 8s stays under maxDuration (15s).
+const TOKEN_EXCHANGE_TIMEOUT_MS = 3000;
 
 // Rate limit: 5 submissions per hour per IP.
 const RATE_LIMIT_MAX = 5;
 const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
+
+// ---------------------------------------------------------------------------
+// Credentials
+// ---------------------------------------------------------------------------
+
+/**
+ * Read once per cold start and reported loudly. The GitHub App is the credential.
+ * BOT_TOKEN is a TEMPORARY fallback so the form stays up while the App is rolled
+ * out: it is used when the App variables are absent or malformed, or when minting
+ * an App token fails. Every request logs which path it took. Remove BOT_TOKEN (the
+ * variable and this fallback) once `credential=app` is proven in production.
+ */
+const CREDENTIALS = readCredentialConfig(process.env);
+const TOKEN_SOURCE = CREDENTIALS.app
+  ? createInstallationTokenSource({
+      app: CREDENTIALS.app,
+      api: GITHUB_API,
+      headers: GITHUB_HEADERS,
+      timeoutMs: TOKEN_EXCHANGE_TIMEOUT_MS,
+    })
+  : null;
+
+if (CREDENTIALS.app) {
+  console.log(
+    `config: credential=app (app ${CREDENTIALS.app.appId}, installation ${CREDENTIALS.app.installationId})` +
+      (CREDENTIALS.botToken ? '; BOT_TOKEN fallback is also set' : ''),
+  );
+} else if (CREDENTIALS.botToken) {
+  console.error(`config: GitHub App NOT usable — ${CREDENTIALS.appProblem}. Using the BOT_TOKEN fallback for every request.`);
+} else {
+  console.error(`config: FATAL no GitHub credential — ${CREDENTIALS.appProblem}, and BOT_TOKEN is not set. Every submission will fail.`);
+}
+
+/**
+ * @returns {Promise<{ ok: true, kind: 'app' | 'bot_token', token: string }
+ *                  | { ok: false, status: number, error: string }>}
+ */
+async function acquireCredential(book, tag) {
+  const repo = book.content.repo;
+  let fallbackReason = `app not configured: ${CREDENTIALS.appProblem}`;
+
+  if (TOKEN_SOURCE) {
+    try {
+      const { token, cached } = await TOKEN_SOURCE.get(repo);
+      console.log(`credential=app (${cached ? 'cached' : 'minted'} installation token for ${repo}) ${tag}`);
+      return { ok: true, kind: 'app', token };
+    } catch (err) {
+      if (!CREDENTIALS.botToken) {
+        console.error(`credential: app token unavailable for ${repo} — ${err.message}; no fallback ${tag}`);
+        return { ok: false, status: 502, error: 'github: credential unavailable' };
+      }
+      console.error(`credential: app token unavailable for ${repo} — ${err.message} ${tag}`);
+      fallbackReason = `app token unavailable: ${err.message}`;
+    }
+  }
+
+  if (CREDENTIALS.botToken) {
+    console.warn(`credential=bot_token (fallback; ${fallbackReason}) ${tag}`);
+    return { ok: true, kind: 'bot_token', token: CREDENTIALS.botToken };
+  }
+
+  console.error(`config: no GitHub credential configured ${tag}`);
+  return { ok: false, status: 500, error: 'bot credentials not configured' };
+}
 
 // ---------------------------------------------------------------------------
 // Rate limiting (best-effort only)
@@ -226,20 +305,20 @@ function fence(text) {
   return '`'.repeat(Math.max(3, longest + 1));
 }
 
-function fileUrl(path) {
+function fileUrl(book, path) {
   // encodeURIComponent leaves ( and ) alone, and an unbalanced ')' would terminate
   // the markdown link destination early. PATH_RE permits both, so encode them.
   const encoded = path
     .split('/')
     .map((seg) => encodeURIComponent(seg).replace(/\(/g, '%28').replace(/\)/g, '%29'))
     .join('/');
-  return `https://github.com/${REPO_OWNER}/${REPO_NAME}/blob/${REPO_BRANCH}/${encoded}`;
+  return `https://github.com/${book.content.repo}/blob/${book.content.live_branch}/${encoded}`;
 }
 
-function buildIssueBody({ name, email, suggestion, reasoning, path }) {
+function buildIssueBody(book, { name, email, suggestion, reasoning, path }) {
   const f = fence(suggestion);
   const parts = [
-    `**File:** [\`${path}\`](${fileUrl(path)})`,
+    `**File:** [\`${path}\`](${fileUrl(book, path)})`,
     '',
     '### Suggested edit',
     '',
@@ -273,7 +352,7 @@ function buildIssueBody({ name, email, suggestion, reasoning, path }) {
  * fetch against the GitHub REST API with an 8s abort.
  * The token goes in the Authorization header and is never logged or returned.
  */
-async function githubFetch(pathname, { method = 'GET', body, timeoutMs = GITHUB_TIMEOUT_MS } = {}) {
+async function githubFetch(pathname, { token, method = 'GET', body, timeoutMs = GITHUB_TIMEOUT_MS } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -282,10 +361,8 @@ async function githubFetch(pathname, { method = 'GET', body, timeoutMs = GITHUB_
       method,
       signal: controller.signal,
       headers: {
-        Authorization: `Bearer ${process.env.BOT_TOKEN}`,
-        Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-        'User-Agent': 'suggest-edit-function',
+        Authorization: `Bearer ${token}`,
+        ...GITHUB_HEADERS,
         ...(body ? { 'Content-Type': 'application/json' } : {}),
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
@@ -301,11 +378,12 @@ async function githubFetch(pathname, { method = 'GET', body, timeoutMs = GITHUB_
 
 /**
  * Make sure both labels exist before we reference them on a new issue.
- * The bot has Write, so it may create them. Non-fatal: if this fails we still try
+ * Creating a label needs only Issues: write, which both credentials have. Non-fatal: if this fails we still try
  * the issue — a missing label is cosmetic next to a lost suggestion. The whole pass
  * shares LABEL_BUDGET_MS so it cannot eat the issue call's time.
  */
-async function ensureLabels() {
+async function ensureLabels(book, token) {
+  const repo = book.content.repo;
   const deadline = Date.now() + LABEL_BUDGET_MS;
   const remaining = () => deadline - Date.now();
 
@@ -316,8 +394,8 @@ async function ensureLabels() {
     }
     try {
       const existing = await githubFetch(
-        `/repos/${REPO_OWNER}/${REPO_NAME}/labels/${encodeURIComponent(label)}`,
-        { timeoutMs: remaining() },
+        `/repos/${repo}/labels/${encodeURIComponent(label)}`,
+        { token, timeoutMs: remaining() },
       );
       if (existing.ok) continue;
       if (existing.status !== 404) {
@@ -329,7 +407,8 @@ async function ensureLabels() {
         console.warn(`ensureLabels: out of budget, not creating "${label}"`);
         continue;
       }
-      const created = await githubFetch(`/repos/${REPO_OWNER}/${REPO_NAME}/labels`, {
+      const created = await githubFetch(`/repos/${repo}/labels`, {
+        token,
         method: 'POST',
         body: { name: label, ...LABEL_DEFAULTS[label] },
         timeoutMs: remaining(),
@@ -345,12 +424,13 @@ async function ensureLabels() {
 }
 
 /** @returns {Promise<string>} the html_url of the new issue. */
-async function createIssue(data) {
-  const res = await githubFetch(`/repos/${REPO_OWNER}/${REPO_NAME}/issues`, {
+async function createIssue(book, token, data) {
+  const res = await githubFetch(`/repos/${book.content.repo}/issues`, {
+    token,
     method: 'POST',
     body: {
       title: `Suggested edit: ${data.path}`,
-      body: buildIssueBody(data),
+      body: buildIssueBody(book, data),
       labels: LABELS,
     },
   });
@@ -364,11 +444,21 @@ async function createIssue(data) {
       detail = '<unreadable>';
     }
     console.error(`createIssue: GitHub returned ${res.status} — ${detail}`);
-    throw new Error(`github issue creation failed (status ${res.status})`);
+    const err = new Error(`github issue creation failed (status ${res.status})`);
+    err.status = res.status;
+    throw err;
   }
 
   const issue = await res.json();
   if (!issue?.html_url) throw new Error('github issue creation returned no url');
+
+  // Post-condition (DESIGN §3a.8): the issue must have landed on the resolved book's
+  // repo. A mismatch is a routing bug. The issue exists and the reader did nothing
+  // wrong, so they still get their 201; the log is how the bug gets caught.
+  const expected = `${GITHUB_API}/repos/${book.content.repo}`.toLowerCase();
+  if (String(issue.repository_url).toLowerCase() !== expected) {
+    console.error(`ROUTING: issue ${issue.html_url} landed on ${issue.repository_url}, expected ${expected} (book=${book.slug})`);
+  }
   return issue.html_url;
 }
 
@@ -376,8 +466,9 @@ async function createIssue(data) {
 // Handler
 // ---------------------------------------------------------------------------
 
-function corsHeaders(res) {
-  res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
+/** `origin` is always the registry-derived origin of the resolved book, never the raw header. */
+function corsHeaders(res, origin) {
+  res.setHeader('Access-Control-Allow-Origin', origin);
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   res.setHeader('Access-Control-Max-Age', '86400');
@@ -406,33 +497,59 @@ function parseBody(req) {
   return JSON.parse(text); // caller turns a throw into a 400
 }
 
+/**
+ * Which book is this request for? Exactly one, or a refusal (DESIGN §3a). There is
+ * no default book: an Origin that is not a registered book's canonical origin is
+ * refused, never mapped to some other book.
+ *
+ * @returns {{ ok: true, book: object } | { ok: false, error: string, log: string }}
+ */
+function resolveBook(origin) {
+  if (!origin) {
+    // A missing Origin is not a cross-origin browser request (curl, server-to-server).
+    // CORS is not a security boundary and the rate limit and honeypot below do the
+    // actual work, so it is let through, for now, but only while there is exactly
+    // one book it could mean. See ALLOW_ORIGINLESS_SOLE_BOOK.
+    const book = ALLOW_ORIGINLESS_SOLE_BOOK ? RESOLVER.soleBook() : null;
+    if (book) return { ok: true, book };
+    return { ok: false, error: 'origin required', log: 'origin missing' };
+  }
+
+  const result = RESOLVER.resolve(origin);
+  if (result.ok) return result;
+  // Logged, not echoed: `error` should never replay caller-controlled input.
+  return { ok: false, error: 'origin not allowed', log: `origin rejected: ${origin} (${result.reason})` };
+}
+
 async function handle(req, res) {
-  const origin = req.headers.origin;
+  res.setHeader('X-Registry-Version', BUNDLE.sha);
+
+  // --- Resolve the book ---------------------------------------------------
+  // Before everything else, preflight included: an unknown origin gets a 403 with no
+  // CORS headers, so a browser never sends the real request.
+  const resolution = resolveBook(req.headers.origin);
+  if (!resolution.ok) {
+    console.warn(resolution.log);
+    send(res, 403, { error: resolution.error });
+    return;
+  }
+  const { book } = resolution;
+  const tag = `book=${book.slug}`;
 
   // --- CORS preflight -----------------------------------------------------
   if (req.method === 'OPTIONS') {
-    corsHeaders(res);
+    corsHeaders(res, canonicalOrigin(book));
     res.status(204).end();
     return;
   }
 
-  // --- Origin check -------------------------------------------------------
-  // A missing Origin is not a cross-origin browser request (curl, server-to-server),
-  // so we let it through; CORS is not a security boundary and the rate limit and
-  // honeypot below do the actual work. A *mismatched* Origin is refused outright.
-  if (origin && origin !== ALLOWED_ORIGIN) {
-    // Logged, not echoed: `error` should never replay caller-controlled input.
-    console.warn(`origin rejected: ${origin}`);
-    send(res, 403, { error: 'origin not allowed' });
-    return;
-  }
   // Set before the method guard so even a rejected request is readable by the client.
-  corsHeaders(res);
+  corsHeaders(res, canonicalOrigin(book));
 
   // --- Method guard -------------------------------------------------------
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST, OPTIONS');
-    console.warn(`method rejected: ${req.method}`);
+    console.warn(`method rejected: ${req.method} ${tag}`);
     send(res, 405, { error: 'method not allowed' });
     return;
   }
@@ -444,7 +561,7 @@ async function handle(req, res) {
   // browser before the request is even sent, rather than resting solely on the
   // Origin check above (which a non-browser client simply omits).
   if (!isJsonContentType(req)) {
-    console.warn(`unsupported content-type: ${req.headers['content-type'] ?? '<none>'}`);
+    console.warn(`unsupported content-type: ${req.headers['content-type'] ?? '<none>'} ${tag}`);
     send(res, 415, {
       error: 'unsupported content-type',
       userMessage: 'Something went wrong sending your suggestion. Please try again.',
@@ -471,16 +588,16 @@ async function handle(req, res) {
   // `website` is a hidden field no human ever fills in. If it has anything in it we
   // drop the submission on the floor and hand back a success shape anyway: a bot is
   // never told it was caught, or it learns to fix its input. issueUrl points at the
-  // repo's issues index so the field is populated with something real and harmless.
+  // resolved book's issues index so the field is populated with something real and harmless.
   if (asString(body.website)) {
-    console.warn(`honeypot: discarded submission from ip=${ip}`);
-    send(res, 201, { issueUrl: REPO_ISSUES_URL });
+    console.warn(`honeypot: discarded submission from ip=${ip} ${tag}`);
+    send(res, 201, { issueUrl: `https://github.com/${book.content.repo}/issues` });
     return;
   }
 
   // --- Rate limit ---------------------------------------------------------
   if (isRateLimited(ip, Date.now())) {
-    console.warn(`rate limit: ip=${ip} exceeded ${RATE_LIMIT_MAX}/hour`);
+    console.warn(`rate limit: ip=${ip} exceeded ${RATE_LIMIT_MAX}/hour ${tag}`);
     send(res, 429, {
       error: 'rate limit exceeded',
       userMessage: "You're sending suggestions too quickly — try again in a little while.",
@@ -491,27 +608,30 @@ async function handle(req, res) {
   // --- Validation ---------------------------------------------------------
   const result = validate(body);
   if (!result.ok) {
-    console.warn(`${result.error} (ip=${ip})`);
+    console.warn(`${result.error} (ip=${ip}) ${tag}`);
     send(res, 400, { error: result.error, userMessage: result.userMessage });
     return;
   }
 
-  // --- Config check -------------------------------------------------------
-  if (!process.env.BOT_TOKEN) {
-    console.error('config: BOT_TOKEN is not set');
-    send(res, 500, { error: 'bot credentials not configured' });
+  // --- Credential ---------------------------------------------------------
+  const credential = await acquireCredential(book, tag);
+  if (!credential.ok) {
+    // No userMessage: the client shows its own fixed copy for these failures.
+    send(res, credential.status, { error: credential.error });
     return;
   }
 
   // --- File the issue -----------------------------------------------------
   try {
-    await ensureLabels();
-    const issueUrl = await createIssue(result.data);
-    console.log(`created issue for "${result.data.path}" — ${issueUrl}`);
+    await ensureLabels(book, credential.token);
+    const issueUrl = await createIssue(book, credential.token, result.data);
+    console.log(`created issue for "${result.data.path}" — ${issueUrl} (credential=${credential.kind}) ${tag}`);
     send(res, 201, { issueUrl });
   } catch (err) {
+    // A revoked or expired App token must not stay cached for the rest of the instance.
+    if (err.status === 401 && credential.kind === 'app') TOKEN_SOURCE.invalidate(book.content.repo);
     // Message is our own normalised text, never an upstream body or a stack.
-    console.error(`github: ${err.message}`);
+    console.error(`github: ${err.message} ${tag}`);
     // No userMessage: the client shows its own fixed copy for upstream failures.
     send(res, 502, { error: `github: ${err.message}` });
   }
