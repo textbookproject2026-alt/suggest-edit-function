@@ -5,7 +5,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { call, VALID, requests } from './harness.mjs';
+import { generateKeyPairSync } from 'node:crypto';
+import { call, VALID, requests, loadHandler, stubTokenExchange } from './harness.mjs';
 import BUNDLE from '../registry/bundled.mjs';
 import { validateRegistry, createResolver } from '../lib/registry.mjs';
 
@@ -76,6 +77,44 @@ test('table: every registered book\'s origin files on that book\'s repo', async 
 
     const honey = await call({ origin, body: { ...VALID, website: 'x' } });
     assert.equal(honey.payload.issueUrl, `https://github.com/${b.content.repo}/issues`);
+  }
+});
+
+test('table: with App credentials, the token is minted for that book\'s repo and every other call targets it', async () => {
+  // The mint call is POST /app/installations/:id/access_tokens: it is not under
+  // /repos/, and names the repository in its body. Check that body, don't exclude it.
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs1', format: 'pem' } });
+  const h = await loadHandler({
+    GITHUB_APP_ID: '123456', GITHUB_APP_INSTALLATION_ID: '7890',
+    GITHUB_APP_PRIVATE_KEY: Buffer.from(privateKey).toString('base64'), BOT_TOKEN: undefined,
+  });
+
+  try {
+    for (const b of ROUTABLE) {
+      const [owner] = b.content.repo.split('/');
+      stubTokenExchange((url, opts) => ({
+        ok: true, status: 201,
+        json: async () => ({
+          token: `ghs_${b.slug}`, expires_at: new Date(Date.now() + 3600e3).toISOString(),
+          repositories: JSON.parse(opts.body).repositories.map((name) => ({ full_name: `${owner}/${name}` })),
+        }),
+      }));
+
+      requests.length = 0;
+      const r = await call({ using: h, origin: `https://${b.site.domain}`, body: { ...VALID } });
+      assert.equal(r.status, 201, b.slug);
+
+      const [mint, ...rest] = requests;
+      assert.equal(mint.url, 'https://api.github.com/app/installations/7890/access_tokens', `${b.slug}: mint first`);
+      assert.deepEqual(mint.body.repositories, [b.content.repo.split('/')[1]], `${b.slug}: token scoped to its repo`);
+      assert.ok(rest.length >= 1);
+      for (const q of rest) {
+        assert.ok(q.url.startsWith(`https://api.github.com/repos/${b.content.repo}/`), `${b.slug}: ${q.method} ${q.url}`);
+        assert.equal(q.headers.Authorization, `Bearer ghs_${b.slug}`, `${b.slug}: must use the minted token, not a fallback`);
+      }
+    }
+  } finally {
+    stubTokenExchange(null);
   }
 });
 

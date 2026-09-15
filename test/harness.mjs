@@ -3,7 +3,12 @@
  * assertions exercise the shipped code path (content-type gate, honeypot, limiter,
  * validation, issue body) without ever touching GitHub.
  */
-process.env.BOT_TOKEN ??= 'test-token';
+// The shared handler reads its credentials at import, so pin them: the Vercel build runs
+// this suite with the project's real GITHUB_APP_* and BOT_TOKEN in the environment, and
+// the shared handler must behave the same there as on a laptop (PAT only). Tests that
+// want the App path load their own copy with loadHandler().
+for (const name of ['GITHUB_APP_ID', 'GITHUB_APP_INSTALLATION_ID', 'GITHUB_APP_PRIVATE_KEY']) delete process.env[name];
+process.env.BOT_TOKEN = 'test-token';
 
 /** Captured body of the last POST /issues the handler attempted, or null. */
 export let lastIssue = null;
