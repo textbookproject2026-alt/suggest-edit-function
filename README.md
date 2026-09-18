@@ -75,7 +75,7 @@ Fixed by the live front-end. Do not change either side alone.
 | 201    | issue created, **or** honeypot tripped      | —              |
 | 204    | `OPTIONS` preflight                         | —              |
 | 400    | bad JSON or a failed field check            | yes            |
-| 403    | `Origin` is not a registered book (see below) | no           |
+| 403    | `Origin` missing, or not a registered book (see below) | no  |
 | 415    | `Content-Type` is not `application/json`    | yes            |
 | 405    | any method other than `POST` / `OPTIONS`    | no             |
 | 429    | rate limit exceeded                         | yes            |
@@ -121,14 +121,16 @@ or to a default. The same 403 applies to a registered book with
 `suggest_edit.enabled: false`. The origin is logged
 (`origin rejected: <origin> (unregistered)`), never echoed.
 
-**No `Origin` (temporary).** A request with **no** `Origin` header (curl,
-server-to-server) is still allowed through and filed against the registry's **only**
-book. CORS is a browser mechanism, not a security boundary, and it is the rate limit and
-honeypot that do the real work here. This is behind `ALLOW_ORIGINLESS_SOLE_BOOK` and
-only works while the registry holds exactly one book. With more it gets 403
-`{ "error": "origin required" }`, and the test suite (which runs in the build) fails, so
-a second book cannot deploy until the flag is removed. Removing it, so that every
-request must carry a registered `Origin`, is its own deploy (migration step 2b).
+**No `Origin`: refused (behaviour change, migration step 2b).** A request with no
+`Origin` header, or an empty one, gets **403 `{ "error": "origin required" }`** with no
+CORS headers, for every method, and nothing is filed. The log line is `origin missing`.
+Until this change such a request was filed against the registry's only book (the
+`ALLOW_ORIGINLESS_SOLE_BOOK` flag). With more than one book there is no book to
+default to, so the flag is gone. **curl and server-to-server callers stop working
+unless they send a registered book's `Origin`**, as the smoke tests below do. The change
+is a commit of its own, so it can be reverted alone; a revert is only safe while the
+registry holds a single book. This is not a security boundary (a non-browser client can
+send any `Origin`); the rate limit and honeypot still do that work.
 
 **Everything is re-validated server-side.** The front-end validates too, but that is
 advisory only: anyone can POST here directly. `path` must match
@@ -284,7 +286,7 @@ vercel dev          # http://localhost:3000/api/suggest-edit
 ## Smoke tests
 
 Against a preview or local URL. Note the `Origin` header — a real browser always
-sends one.
+sends one, and a request without it gets 403 `origin required`.
 
 ```bash
 URL=http://localhost:3000/api/suggest-edit
@@ -312,6 +314,9 @@ curl -i "$URL" -H "Origin: https://confused4now.org"
 # wrong origin -> 403
 curl -i -X POST "$URL" -H 'Content-Type: application/json' \
   -H 'Origin: https://evil.example' -d '{}'
+
+# no Origin -> 403 origin required
+curl -i -X POST "$URL" -H 'Content-Type: application/json' -d '{}'
 
 # unregistered or look-alike origin -> 403, no CORS headers
 curl -i -X OPTIONS "$URL" -H 'Origin: https://www.confused4now.org'

@@ -61,6 +61,15 @@ globalThis.fetch = async (url, opts = {}) => {
 };
 
 export const { default: handler } = await import('../api/suggest-edit.js');
+const { default: BUNDLE } = await import('../registry/bundled.mjs');
+
+/**
+ * The Origin every call sends unless told otherwise: the first bundled book that takes
+ * suggestions. A request without an Origin is refused, so tests about something else
+ * (validation, the limiter, the honeypot) must carry one.
+ */
+export const DEFAULT_ORIGIN = `https://${BUNDLE.registry.books.find(
+  (b) => b.status !== 'retired' && b.site.domain && b.suggest_edit.enabled).site.domain}`;
 
 let instance = 0;
 /**
@@ -99,15 +108,16 @@ export function freshIp() { return `10.0.${Math.floor(ipCounter / 250)}.${(ipCou
 
 /**
  * @param {object} o
+ * @param {string | null} [o.origin]  defaults to DEFAULT_ORIGIN; null sends no Origin header
  * @param {string} [o.ip]  reuse an IP to exercise the rate limiter deliberately
  * @param {Function} [o.using]  a handler from loadHandler(); defaults to the shared one
  */
 export async function call({ method = 'POST', contentType = 'application/json',
-                             body, origin, ip = freshIp(), raw, using = handler } = {}) {
+                             body, origin = DEFAULT_ORIGIN, ip = freshIp(), raw, using = handler } = {}) {
   resetIssue();
   const headers = { 'x-forwarded-for': ip };
   if (contentType !== null) headers['content-type'] = contentType;
-  if (origin) headers.origin = origin;
+  if (origin !== null) headers.origin = origin;
 
   const req = { method, headers, socket: { remoteAddress: ip },
                 body: raw !== undefined ? raw : body };

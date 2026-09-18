@@ -42,17 +42,60 @@ test('the bundled registry is valid and has at least one routable book', () => {
   assert.ok(ROUTABLE.length >= 1);
 });
 
-test('the temporary no-Origin fallback cannot outlive a single-book registry', () => {
-  // DESIGN §5 step 2: the only default that exists must be impossible to leave in
-  // place. This runs in the Vercel build, so registering a second book fails the
-  // deploy until step 2b removes the flag.
+test('the no-Origin fallback is gone for good', () => {
+  // DESIGN step 2b. With more than one book there is no book to default to, so a
+  // request with no Origin must never be filed. Keep the flag from coming back.
   const source = readFileSync(new URL('../api/suggest-edit.js', import.meta.url), 'utf8');
-  const flag = source.match(/^const ALLOW_ORIGINLESS_SOLE_BOOK = (true|false);$/m);
-  assert.ok(flag, 'flag declaration not found');
-  if (flag[1] === 'true') {
-    assert.equal(REGISTRY.books.length, 1,
-      'ALLOW_ORIGINLESS_SOLE_BOOK must be removed (DESIGN step 2b) before a second book is registered');
+  assert.doesNotMatch(source, /ALLOW_ORIGINLESS|soleBook/);
+  assert.equal('soleBook' in createResolver(registryOf(book('a', 'a.example'))), false);
+});
+
+test('no Origin, or an empty one, gets 403 origin required, no CORS headers, and no GitHub call', async () => {
+  // Deliberate (DESIGN step 2b): curl and server-to-server callers must send the
+  // book's Origin. Holds even while the registry has a single book.
+  for (const origin of [null, '']) {
+    for (const method of ['OPTIONS', 'POST', 'GET']) {
+      for (const body of [{ ...VALID }, { ...VALID, website: 'x' }]) {
+        requests.length = 0;
+        const logs = captureLogs();
+        let r;
+        try {
+          r = await call({ method, origin, body });
+        } finally {
+          logs.restore();
+        }
+        const what = `${method} origin=${JSON.stringify(origin)} honeypot=${Boolean(body.website)}`;
+        assert.equal(r.status, 403, what);
+        assert.deepEqual(r.payload, { error: 'origin required' }, what);
+        assert.equal(r.headers['access-control-allow-origin'], undefined, `${what} must get no CORS`);
+        assert.equal(r.headers['x-registry-version'], BUNDLE.sha, what);
+        assert.equal(r.issue, null, what);
+        assert.equal(requests.length, 0, `${what} must not reach GitHub`);
+        assert.deepEqual(logs.lines, ['warn: origin missing'], what);
+      }
+    }
   }
+});
+
+test('no Origin is refused on the App credential path too, before anything is minted', async () => {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs1', format: 'pem' } });
+  const h = await loadHandler({
+    GITHUB_APP_ID: '123456', GITHUB_APP_INSTALLATION_ID: undefined,
+    GITHUB_APP_PRIVATE_KEY: Buffer.from(privateKey).toString('base64'), BOT_TOKEN: undefined,
+  });
+  stubInstallationLookup(null);
+  stubTokenExchange(null); // either call would throw
+  requests.length = 0;
+  const logs = captureLogs();
+  let r;
+  try {
+    r = await call({ using: h, origin: null, body: { ...VALID } });
+  } finally {
+    logs.restore();
+  }
+  assert.equal(r.status, 403);
+  assert.deepEqual(r.payload, { error: 'origin required' });
+  assert.equal(requests.length, 0);
 });
 
 test('table: every registered book\'s origin files on that book\'s repo', async () => {
@@ -218,11 +261,11 @@ test('a correctly routed issue logs no routing error', async () => {
 // Resolver and loader, against synthetic registries
 // ---------------------------------------------------------------------------
 
-test('two books: each origin maps to its own repo, and there is no sole book for a missing Origin', () => {
+test('two books: each origin maps to its own repo, and a missing Origin maps to neither', () => {
   const r = createResolver(validateRegistry(registryOf(book('alpha', 'alpha.example'), book('beta', 'beta.example'))));
   assert.equal(r.resolve('https://alpha.example').book.content.repo, 'org/alpha');
   assert.equal(r.resolve('https://beta.example').book.content.repo, 'org/beta');
-  assert.equal(r.soleBook(), null, 'with two books a missing Origin must resolve to nothing');
+  assert.deepEqual(r.resolve(''), { ok: false, reason: 'unregistered' });
   assert.deepEqual(r.resolve('https://gamma.example'), { ok: false, reason: 'unregistered' });
   assert.deepEqual(r.resolve(undefined), { ok: false, reason: 'unregistered' });
   assert.deepEqual(r.resolve('__proto__'), { ok: false, reason: 'unregistered' });
@@ -238,14 +281,6 @@ test('statuses: retired resolves nowhere, preview with a domain resolves, disabl
   assert.deepEqual(r.resolve('https://old.example'), { ok: false, reason: 'unregistered' });
   assert.equal(r.resolve('https://new.example').book.slug, 'new');
   assert.deepEqual(r.resolve('https://off.example'), { ok: false, reason: 'suggest_edit disabled for off' });
-});
-
-test('the sole-book fallback needs that one book to be routable', () => {
-  assert.equal(createResolver(registryOf(book('a', 'a.example'))).soleBook().slug, 'a');
-  assert.equal(createResolver(registryOf(book('a', 'a.example', { status: 'retired' }))).soleBook(), null);
-  assert.equal(createResolver(registryOf(book('a', 'a.example', { suggest_edit: { enabled: false } }))).soleBook(), null);
-  assert.equal(createResolver(registryOf(book('a', null, { status: 'preview' }))).soleBook(), null);
-  assert.equal(createResolver(registryOf()).soleBook(), null);
 });
 
 test('the loader refuses registries it cannot route unambiguously', () => {

@@ -33,12 +33,6 @@ const REGISTRY = validateRegistry(BUNDLE.registry);
 const RESOLVER = createResolver(REGISTRY);
 console.log(`registry: ${BUNDLE.sha} (${REGISTRY.books.length} book(s))`);
 
-// TEMPORARY (DESIGN §5 step 2 -> 2b). A request with no Origin (curl, server-to-server)
-// is still accepted, and is filed against the registry's only book. With more than one
-// book there is no such book, so it is refused; test/registry.test.mjs also fails the
-// build if this is still true once a second book is registered. Step 2b deletes it.
-const ALLOW_ORIGINLESS_SOLE_BOOK = true;
-
 const GITHUB_API = 'https://api.github.com';
 const GITHUB_HEADERS = {
   Accept: 'application/vnd.github+json',
@@ -515,12 +509,8 @@ function parseBody(req) {
  */
 function resolveBook(origin) {
   if (!origin) {
-    // A missing Origin is not a cross-origin browser request (curl, server-to-server).
-    // CORS is not a security boundary and the rate limit and honeypot below do the
-    // actual work, so it is let through, for now, but only while there is exactly
-    // one book it could mean. See ALLOW_ORIGINLESS_SOLE_BOOK.
-    const book = ALLOW_ORIGINLESS_SOLE_BOOK ? RESOLVER.soleBook() : null;
-    if (book) return { ok: true, book };
+    // No Origin means no book to file against (curl, server-to-server): with more than
+    // one book there is nothing to default to, so it is refused (DESIGN step 2b).
     return { ok: false, error: 'origin required', log: 'origin missing' };
   }
 
