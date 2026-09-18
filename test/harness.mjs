@@ -24,6 +24,18 @@ export const requests = [];
 let tokenExchange = null;
 export function stubTokenExchange(fn) { tokenExchange = fn; }
 
+/**
+ * Optional override for GET /repos/:owner/:repo/installation. Receives "owner/repo".
+ * @type {null | ((repo: string, url: string, opts: object) => object)}
+ */
+let installationLookup = null;
+export function stubInstallationLookup(fn) { installationLookup = fn; }
+
+/** An installation lookup answering `id` for every repository. */
+export const installedAs = (id) => () => ({ ok: true, status: 200, json: async () => ({ id }) });
+/** GitHub's answer for a repository the App is not installed on. */
+export const notInstalled = () => ({ ok: false, status: 404, text: async () => '{"message":"Not Found"}' });
+
 globalThis.fetch = async (url, opts = {}) => {
   url = String(url);
   requests.push({ method: opts.method ?? 'GET', url, headers: opts.headers ?? {},
@@ -32,6 +44,11 @@ globalThis.fetch = async (url, opts = {}) => {
   if (opts.method === 'POST' && /\/app\/installations\/[^/]+\/access_tokens$/.test(url)) {
     if (!tokenExchange) throw new Error(`unexpected token exchange: ${url}`);
     return tokenExchange(url, opts);
+  }
+  const lookup = (opts.method ?? 'GET') === 'GET' && url.match(/\/repos\/([^/]+\/[^/]+)\/installation$/);
+  if (lookup) {
+    if (!installationLookup) throw new Error(`unexpected installation lookup: ${url}`);
+    return installationLookup(lookup[1], url, opts);
   }
   if (opts.method === 'POST' && url.endsWith('/issues')) {
     lastIssue = JSON.parse(opts.body);

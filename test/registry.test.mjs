@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { generateKeyPairSync } from 'node:crypto';
-import { call, VALID, requests, loadHandler, stubTokenExchange } from './harness.mjs';
+import { call, VALID, requests, loadHandler, stubTokenExchange, stubInstallationLookup } from './harness.mjs';
 import BUNDLE from '../registry/bundled.mjs';
 import { validateRegistry, createResolver } from '../lib/registry.mjs';
 
@@ -80,18 +80,22 @@ test('table: every registered book\'s origin files on that book\'s repo', async 
   }
 });
 
-test('table: with App credentials, the token is minted for that book\'s repo and every other call targets it', async () => {
-  // The mint call is POST /app/installations/:id/access_tokens: it is not under
-  // /repos/, and names the repository in its body. Check that body, don't exclude it.
+test('table: with App credentials, each book\'s installation is looked up, the token minted for its repo, and every other call targets it', async () => {
+  // The lookup is GET /repos/<repo>/installation, authenticated as the App. The mint
+  // call is POST /app/installations/:id/access_tokens: it is not under /repos/, and
+  // names the repository in its body. Check both, don't exclude them.
   const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs1', format: 'pem' } });
   const h = await loadHandler({
-    GITHUB_APP_ID: '123456', GITHUB_APP_INSTALLATION_ID: '7890',
+    GITHUB_APP_ID: '123456', GITHUB_APP_INSTALLATION_ID: undefined,
     GITHUB_APP_PRIVATE_KEY: Buffer.from(privateKey).toString('base64'), BOT_TOKEN: undefined,
   });
 
   try {
-    for (const b of ROUTABLE) {
+    for (const [i, b] of ROUTABLE.entries()) {
       const [owner] = b.content.repo.split('/');
+      // A different installation per book, as when each maintainer owns their repo.
+      const installation = 9000 + i;
+      stubInstallationLookup((repo) => ({ ok: true, status: 200, json: async () => ({ id: repo === b.content.repo ? installation : -1 }) }));
       stubTokenExchange((url, opts) => ({
         ok: true, status: 201,
         json: async () => ({
@@ -104,8 +108,9 @@ test('table: with App credentials, the token is minted for that book\'s repo and
       const r = await call({ using: h, origin: `https://${b.site.domain}`, body: { ...VALID } });
       assert.equal(r.status, 201, b.slug);
 
-      const [mint, ...rest] = requests;
-      assert.equal(mint.url, 'https://api.github.com/app/installations/7890/access_tokens', `${b.slug}: mint first`);
+      const [lookup, mint, ...rest] = requests;
+      assert.equal(lookup.url, `https://api.github.com/repos/${b.content.repo}/installation`, `${b.slug}: lookup first`);
+      assert.equal(mint.url, `https://api.github.com/app/installations/${installation}/access_tokens`, `${b.slug}: then mint`);
       assert.deepEqual(mint.body.repositories, [b.content.repo.split('/')[1]], `${b.slug}: token scoped to its repo`);
       assert.ok(rest.length >= 1);
       for (const q of rest) {
@@ -115,6 +120,7 @@ test('table: with App credentials, the token is minted for that book\'s repo and
     }
   } finally {
     stubTokenExchange(null);
+    stubInstallationLookup(null);
   }
 });
 
