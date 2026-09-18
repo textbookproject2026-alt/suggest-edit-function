@@ -250,9 +250,14 @@ it. The build step (`vercel-build`) resolves the registry's `main` to a SHA, fet
 Vercel instant rollback restores code and registry together.
 
 - **A registry change takes effect on the next deploy** of this project. The registry's
-  CI should call a Vercel deploy hook after each merge.
+  `deploy.yml` calls this project's Vercel deploy hook after every merge to its `main`,
+  then polls `X-Registry-Version` and fails the registry's run if production hasn't
+  caught up within ten minutes. It also checks every six hours. The hook lives in the
+  registry repo's `SUGGEST_EDIT_DEPLOY_HOOK` secret (see its README, "Delivery to
+  services").
 - **Pin a registry commit** by setting `REGISTRY_REF=<40-char sha>` (or a branch name) as
-  a build env var.
+  a build env var. While a pin is set, registry merges still trigger rebuilds but can't
+  change what is served, so the registry's deploy check goes red until the pin is removed.
 - **Refresh the committed snapshot** locally with `npm run registry:bundle`. The
   committed copy is what `npm test` runs against. Production always rebuilds it.
 - The handler validates the snapshot again at load and refuses to start on anything
