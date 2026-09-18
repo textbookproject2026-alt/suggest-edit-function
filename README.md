@@ -75,12 +75,12 @@ Fixed by the live front-end. Do not change either side alone.
 | 201    | issue created, **or** honeypot tripped      | —              |
 | 204    | `OPTIONS` preflight                         | —              |
 | 400    | bad JSON or a failed field check            | yes            |
-| 403    | `Origin` is not a registered book (see below) | no           |
+| 403    | `Origin` missing, or not a registered book (see below) | no  |
 | 415    | `Content-Type` is not `application/json`    | yes            |
 | 405    | any method other than `POST` / `OPTIONS`    | no             |
 | 429    | rate limit exceeded                         | yes            |
 | 500    | no GitHub credential configured, or an escaped throw | no    |
-| 502    | GitHub call failed or timed out, or no App token could be minted | no |
+| 502    | GitHub call failed or timed out, no App token could be minted, or the App isn't installed on the book's repo | no |
 
 Every response carries `X-Registry-Version: <registry commit SHA>`, the registry
 snapshot this deployment was built with.
@@ -121,14 +121,16 @@ or to a default. The same 403 applies to a registered book with
 `suggest_edit.enabled: false`. The origin is logged
 (`origin rejected: <origin> (unregistered)`), never echoed.
 
-**No `Origin` (temporary).** A request with **no** `Origin` header (curl,
-server-to-server) is still allowed through and filed against the registry's **only**
-book. CORS is a browser mechanism, not a security boundary, and it is the rate limit and
-honeypot that do the real work here. This is behind `ALLOW_ORIGINLESS_SOLE_BOOK` and
-only works while the registry holds exactly one book. With more it gets 403
-`{ "error": "origin required" }`, and the test suite (which runs in the build) fails, so
-a second book cannot deploy until the flag is removed. Removing it, so that every
-request must carry a registered `Origin`, is its own deploy (migration step 2b).
+**No `Origin`: refused (behaviour change, migration step 2b).** A request with no
+`Origin` header, or an empty one, gets **403 `{ "error": "origin required" }`** with no
+CORS headers, for every method, and nothing is filed. The log line is `origin missing`.
+Until this change such a request was filed against the registry's only book (the
+`ALLOW_ORIGINLESS_SOLE_BOOK` flag). With more than one book there is no book to
+default to, so the flag is gone. **curl and server-to-server callers stop working
+unless they send a registered book's `Origin`**, as the smoke tests below do. The change
+is a commit of its own, so it can be reverted alone; a revert is only safe while the
+registry holds a single book. This is not a security boundary (a non-browser client can
+send any `Origin`); the rate limit and honeypot still do that work.
 
 **Everything is re-validated server-side.** The front-end validates too, but that is
 advisory only: anyone can POST here directly. `path` must match
@@ -152,7 +154,8 @@ via the API if missing (Issues: write covers labels). A label failure is non-fat
 label is cosmetic next to a lost suggestion.
 
 **Timeouts and leaks.** The issue call is aborted at 8s via `AbortController`; the two
-label checks share a separate 3s budget, and minting an App token has its own 3s, so a
+label checks share a separate 3s budget, and minting an App token (installation lookup
+plus exchange) has its own 3s, so a
 hung GitHub costs at most ~14s and the function returns its own 502 rather than
 tripping the platform's `maxDuration` (15s). The whole handler is wrapped so nothing
 can put a stack trace — or a credential — into a response. The private key, the App
@@ -166,14 +169,23 @@ they are never logged or echoed.
 | Variable                     | Required | Description |
 | ---------------------------- | -------- | ----------- |
 | `GITHUB_APP_ID`              | yes      | The GitHub App's numeric **App ID** (App settings → General → About). Not the Client ID. |
-| `GITHUB_APP_INSTALLATION_ID` | yes      | Numeric ID of the App's installation on the account that owns the books' repos. It is the number at the end of the installation's settings URL: `github.com/organizations/<org>/settings/installations/<id>`. |
+| `GITHUB_APP_INSTALLATION_ID` | **no longer read** | The installation is now looked up per repository. If it is still set, startup logs a warning asking for it to be deleted. |
 | `GITHUB_APP_PRIVATE_KEY`     | yes      | The App's private key, **base64-encoded** (see below). |
 | `BOT_TOKEN`                  | temporary | The old personal access token. **A fallback for the App rollout only**, to be deleted along with its code once `credential=app` is proven in production. |
 
 **The App.** Permissions **Issues: Read and write** and **Metadata: Read-only**, nothing
 else. No webhook. Install it on **only selected repositories**: each registered book's
-content repo, never "All repositories". Every request mints an installation token
-downscoped to the one resolved repository and `issues: write`.
+content repo, never "All repositories". A book's repo may belong to any GitHub account,
+so each maintainer installs the App on their own repo; the App must be **public** (App
+settings → Advanced → "Make public") for accounts other than its owner to install it.
+
+**The installation is found per repository.** For a book's `content.repo`, the function
+calls `GET /repos/{owner}/{repo}/installation` as the App (JWT), then mints a token from
+that installation downscoped to the one repository and `issues: write`, and refuses the
+token unless GitHub granted exactly that repository. A repo the App isn't installed on
+(GitHub answers 404) gets 502 `{ "error": "github: the app isn't installed on that
+repository" }`, and the log names the repo:
+`credential: app token unavailable for <repo> — the app isn't installed on <repo>`.
 
 **The private key must be base64-encoded.** GitHub gives you a multi-line `.pem` file,
 and Vercel env vars mangle the newlines in a raw PEM. Encode the whole file on one line:
@@ -192,26 +204,28 @@ result is logged loudly:
 
 | Config | Log at startup | Each submission |
 | ------ | -------------- | --------------- |
-| App vars valid | `config: credential=app (app <id>, installation <id>)` | App token. Logs `credential=app (minted …)` or `(cached …)` |
+| App vars valid | `config: credential=app (app <id>, installation looked up per repository)` | App token. Logs `credential=app (minted … for <repo>, installation <id>)` or `(cached …)` |
 | App vars missing, partial or malformed, `BOT_TOKEN` set | `config: GitHub App NOT usable — <what is wrong>` (error level) | `BOT_TOKEN`. Logs `credential=bot_token (fallback; …)` (warn) |
 | No usable App and no `BOT_TOKEN` | `config: FATAL no GitHub credential — …` (error level) | 500 `bot credentials not configured` |
 
 If the App is configured but minting a token fails at request time (the App isn't
 installed on that repo, the key was revoked, GitHub is down), the function falls back to
-`BOT_TOKEN` when it is set, logging the reason. Without `BOT_TOKEN` it returns 502
-`github: credential unavailable` and files nothing. **To prove the App is live, look
+`BOT_TOKEN` when it is set, logging the reason. Without `BOT_TOKEN` it returns 502 and
+files nothing: `github: the app isn't installed on that repository` when that is the
+cause, `github: credential unavailable` otherwise. **To prove the App is live, look
 for `credential=app` and no `credential=bot_token` in `vercel logs`.**
 
-**Token caching.** Installation tokens last an hour. Each warm instance caches the
-token per repository and reuses it until it has less than 5 minutes left. A 401 from
-GitHub drops it, and a cold start begins with an empty cache.
+**Caching.** Installation tokens last an hour. Each warm instance caches the
+installation ID and the token per repository, and reuses the token until it has less
+than 5 minutes left. A 401 from GitHub drops both, and so does a failed exchange (the
+App may have been reinstalled under a new ID). "Not installed" is never cached, so
+installing the App works from the next request. A cold start begins empty.
 
 Set them in Vercel (production; a preview deployment should get a separate test App
 installed only on a scratch repo):
 
 ```bash
 vercel env add GITHUB_APP_ID production
-vercel env add GITHUB_APP_INSTALLATION_ID production
 vercel env add GITHUB_APP_PRIVATE_KEY production
 ```
 
@@ -236,9 +250,14 @@ it. The build step (`vercel-build`) resolves the registry's `main` to a SHA, fet
 Vercel instant rollback restores code and registry together.
 
 - **A registry change takes effect on the next deploy** of this project. The registry's
-  CI should call a Vercel deploy hook after each merge.
+  `deploy.yml` calls this project's Vercel deploy hook after every merge to its `main`,
+  then polls `X-Registry-Version` and fails the registry's run if production hasn't
+  caught up within ten minutes. It also checks every six hours. The hook lives in the
+  registry repo's `SUGGEST_EDIT_DEPLOY_HOOK` secret (see its README, "Delivery to
+  services").
 - **Pin a registry commit** by setting `REGISTRY_REF=<40-char sha>` (or a branch name) as
-  a build env var.
+  a build env var. While a pin is set, registry merges still trigger rebuilds but can't
+  change what is served, so the registry's deploy check goes red until the pin is removed.
 - **Refresh the committed snapshot** locally with `npm run registry:bundle`. The
   committed copy is what `npm test` runs against. Production always rebuilds it.
 - The handler validates the snapshot again at load and refuses to start on anything
@@ -272,7 +291,7 @@ vercel dev          # http://localhost:3000/api/suggest-edit
 ## Smoke tests
 
 Against a preview or local URL. Note the `Origin` header — a real browser always
-sends one.
+sends one, and a request without it gets 403 `origin required`.
 
 ```bash
 URL=http://localhost:3000/api/suggest-edit
@@ -300,6 +319,9 @@ curl -i "$URL" -H "Origin: https://confused4now.org"
 # wrong origin -> 403
 curl -i -X POST "$URL" -H 'Content-Type: application/json' \
   -H 'Origin: https://evil.example' -d '{}'
+
+# no Origin -> 403 origin required
+curl -i -X POST "$URL" -H 'Content-Type: application/json' -d '{}'
 
 # unregistered or look-alike origin -> 403, no CORS headers
 curl -i -X OPTIONS "$URL" -H 'Origin: https://www.confused4now.org'

@@ -33,12 +33,6 @@ const REGISTRY = validateRegistry(BUNDLE.registry);
 const RESOLVER = createResolver(REGISTRY);
 console.log(`registry: ${BUNDLE.sha} (${REGISTRY.books.length} book(s))`);
 
-// TEMPORARY (DESIGN §5 step 2 -> 2b). A request with no Origin (curl, server-to-server)
-// is still accepted, and is filed against the registry's only book. With more than one
-// book there is no such book, so it is refused; test/registry.test.mjs also fails the
-// build if this is still true once a second book is registered. Step 2b deletes it.
-const ALLOW_ORIGINLESS_SOLE_BOOK = true;
-
 const GITHUB_API = 'https://api.github.com';
 const GITHUB_HEADERS = {
   Accept: 'application/vnd.github+json',
@@ -63,7 +57,8 @@ const MAX_PATH = 300;
 // past its maxDuration and the reader would see a platform timeout, not our 502.
 const GITHUB_TIMEOUT_MS = 8000;
 const LABEL_BUDGET_MS = 3000;
-// Minting an installation token on a cold cache: 3s + 3s + 8s stays under maxDuration (15s).
+// Minting an installation token on a cold cache (installation lookup and exchange share
+// this budget): 3s + 3s + 8s stays under maxDuration (15s).
 const TOKEN_EXCHANGE_TIMEOUT_MS = 3000;
 
 // Rate limit: 5 submissions per hour per IP.
@@ -93,13 +88,16 @@ const TOKEN_SOURCE = CREDENTIALS.app
 
 if (CREDENTIALS.app) {
   console.log(
-    `config: credential=app (app ${CREDENTIALS.app.appId}, installation ${CREDENTIALS.app.installationId})` +
+    `config: credential=app (app ${CREDENTIALS.app.appId}, installation looked up per repository)` +
       (CREDENTIALS.botToken ? '; BOT_TOKEN fallback is also set' : ''),
   );
 } else if (CREDENTIALS.botToken) {
   console.error(`config: GitHub App NOT usable — ${CREDENTIALS.appProblem}. Using the BOT_TOKEN fallback for every request.`);
 } else {
   console.error(`config: FATAL no GitHub credential — ${CREDENTIALS.appProblem}, and BOT_TOKEN is not set. Every submission will fail.`);
+}
+for (const name of CREDENTIALS.retired) {
+  console.warn(`config: ${name} is set but no longer read (the installation is looked up per repository); delete it`);
 }
 
 /**
@@ -112,13 +110,18 @@ async function acquireCredential(book, tag) {
 
   if (TOKEN_SOURCE) {
     try {
-      const { token, cached } = await TOKEN_SOURCE.get(repo);
-      console.log(`credential=app (${cached ? 'cached' : 'minted'} installation token for ${repo}) ${tag}`);
+      const { token, cached, installationId } = await TOKEN_SOURCE.get(repo);
+      console.log(`credential=app (${cached ? 'cached' : 'minted'} installation token for ${repo}, installation ${installationId}) ${tag}`);
       return { ok: true, kind: 'app', token };
     } catch (err) {
       if (!CREDENTIALS.botToken) {
         console.error(`credential: app token unavailable for ${repo} — ${err.message}; no fallback ${tag}`);
-        return { ok: false, status: 502, error: 'github: credential unavailable' };
+        // The reader sees `error`, so the repository is named only in the log line above.
+        return {
+          ok: false,
+          status: 502,
+          error: err.code === 'not_installed' ? "github: the app isn't installed on that repository" : 'github: credential unavailable',
+        };
       }
       console.error(`credential: app token unavailable for ${repo} — ${err.message} ${tag}`);
       fallbackReason = `app token unavailable: ${err.message}`;
@@ -506,12 +509,8 @@ function parseBody(req) {
  */
 function resolveBook(origin) {
   if (!origin) {
-    // A missing Origin is not a cross-origin browser request (curl, server-to-server).
-    // CORS is not a security boundary and the rate limit and honeypot below do the
-    // actual work, so it is let through, for now, but only while there is exactly
-    // one book it could mean. See ALLOW_ORIGINLESS_SOLE_BOOK.
-    const book = ALLOW_ORIGINLESS_SOLE_BOOK ? RESOLVER.soleBook() : null;
-    if (book) return { ok: true, book };
+    // No Origin means no book to file against (curl, server-to-server): with more than
+    // one book there is nothing to default to, so it is refused (DESIGN step 2b).
     return { ok: false, error: 'origin required', log: 'origin missing' };
   }
 
