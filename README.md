@@ -105,11 +105,12 @@ link, an image, or an `@mention` that notifies someone. See `TESTING.md`.
 header is looked up in the bundled registry. It resolves only if it is **exactly**
 `https://` + a book's `site.domain`, for a book whose `status` is `preview` or `live`.
 There is no suffix, prefix or wildcard match, no case folding and no `www.` folding, so
-`http://confused4now.org`, `https://www.confused4now.org` and
-`https://confused4now.org.evil.example` all fail. A book's `legacy_origins` are never
-accepted. Once resolved, everything book-specific comes from that registry entry: the
-issue goes to `content.repo`, the file link uses `content.live_branch`, the honeypot's
-`issueUrl` is that repo's issues index, `Access-Control-Allow-Origin` is the
+for `social-research-methods.confused4now.org` the `http://` form, the `www.` form and
+`https://social-research-methods.confused4now.org.evil.example` all fail — as does the
+platform portal at `https://confused4now.org`, which is nobody's `site.domain`. A book's
+`legacy_origins` are never accepted. Once resolved, everything book-specific comes from
+that registry entry: the issue goes to `content.repo`, the file link uses
+`content.live_branch`, the honeypot's `issueUrl` is that repo's issues index, `Access-Control-Allow-Origin` is the
 registry-derived origin (never the raw header), and log lines end in `book=<slug>`.
 After filing, the function checks that GitHub's `repository_url` matches the book's
 repo and logs `ROUTING:` at error level if it doesn't (the reader still gets 201).
@@ -297,12 +298,12 @@ sends one, and a request without it gets 403 `origin required`.
 URL=http://localhost:3000/api/suggest-edit
 
 # preflight -> 204
-curl -i -X OPTIONS "$URL" -H "Origin: https://confused4now.org"
+curl -i -X OPTIONS "$URL" -H "Origin: https://social-research-methods.confused4now.org"
 
 # happy path -> 201 { issueUrl }
 curl -i -X POST "$URL" \
   -H 'Content-Type: application/json' \
-  -H 'Origin: https://confused4now.org' \
+  -H 'Origin: https://social-research-methods.confused4now.org' \
   -d '{"name":"Ada","email":"ada@example.com","path":"chapters/01-intro.md",
        "suggestion":"Typo in paragraph two: \"recieve\" -> \"receive\".",
        "reasoning":"Spelling.","website":""}'
@@ -310,11 +311,11 @@ curl -i -X POST "$URL" \
 # honeypot -> 201, no issue filed
 curl -i -X POST "$URL" \
   -H 'Content-Type: application/json' \
-  -H 'Origin: https://confused4now.org' \
+  -H 'Origin: https://social-research-methods.confused4now.org' \
   -d '{"name":"Bot","email":"b@b.com","path":"a.md","suggestion":"buy","website":"http://spam"}'
 
 # wrong method -> 405
-curl -i "$URL" -H "Origin: https://confused4now.org"
+curl -i "$URL" -H "Origin: https://social-research-methods.confused4now.org"
 
 # wrong origin -> 403
 curl -i -X POST "$URL" -H 'Content-Type: application/json' \
@@ -324,10 +325,10 @@ curl -i -X POST "$URL" -H 'Content-Type: application/json' \
 curl -i -X POST "$URL" -H 'Content-Type: application/json' -d '{}'
 
 # unregistered or look-alike origin -> 403, no CORS headers
-curl -i -X OPTIONS "$URL" -H 'Origin: https://www.confused4now.org'
+curl -i -X OPTIONS "$URL" -H 'Origin: https://www.social-research-methods.confused4now.org'
 
 # which registry this deployment was built with
-curl -sI -X OPTIONS "$URL" -H 'Origin: https://confused4now.org' | grep -i x-registry-version
+curl -sI -X OPTIONS "$URL" -H 'Origin: https://social-research-methods.confused4now.org' | grep -i x-registry-version
 ```
 
 Watch the logs with `vercel logs <deployment-url>` — validation rejections, honeypot
