@@ -125,6 +125,23 @@ GitHub-style editor on the book's own page. This is its back end.
 
 ---
 
+## Book requests (`/api/request-book`)
+
+The portal's *Publish your textbook here* form. Accepted only from the portal
+(`https://<platform.portal.domain>`, and `<portal project>.pages.dev` with its
+previews). It commits any manuscript files (.docx/.md, at most 5, 3 MB in total)
+to `requests/<reference>/` on the **private** requests repo and files an issue
+there labelled `book-request` + `needs-review`, ending in a JSON block that
+book-requests' `provision` workflow reads when the issue is labelled `approved`.
+Files first, then the issue; a failed upload still files the request and tells
+the requester. Honeypot `website`; 3 requests per IP per hour (best-effort, as
+below).
+
+- `REQUESTS_REPO` (optional): `owner/name` of the requests repo. Default
+  `textbookproject2026-alt/book-requests`.
+- The App must be installed on that repo. Tokens are downscoped to it, with
+  `issues` + `contents` write.
+
 ## Behaviour notes
 
 **Content-Type.** Only `application/json` is accepted (parameters such as

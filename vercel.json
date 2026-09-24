@@ -9,6 +9,9 @@
     },
     "api/github-auth.js": {
       "maxDuration": 15
+    },
+    "api/request-book.js": {
+      "maxDuration": 30
     }
   }
 }
