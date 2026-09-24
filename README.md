@@ -10,7 +10,11 @@ in at build time. No book is hardcoded here.
 Zero dependencies — Node 22 with built-in `fetch` and `node:crypto`, plain ES modules.
 
 ```
-api/suggest-edit.js            the handler
+api/suggest-edit.js            suggest an edit: reader text -> issue
+api/propose-edit.js            the in-site editor: reader edit -> PR into drafts
+api/github-auth.js             "Sign in with GitHub" popup for the editor
+lib/common.mjs                 what the endpoints share (fetch, credential, limiter, helpers)
+lib/identity.mjs               signed identity tokens (sign-in without keeping GitHub tokens)
 lib/registry.mjs               registry validation and Origin -> book resolution
 lib/github-app.mjs             App JWT (RS256 via node:crypto) and installation tokens
 registry/bundled.mjs           GENERATED registry snapshot, pinned to a registry commit
@@ -19,6 +23,7 @@ test/assertions.test.mjs       abuse-test assertion suite
 test/registry.test.mjs         book resolution
 test/github-app.test.mjs       App credential path, token exchange stubbed
 test/harness.mjs               drives the real handler with fetch stubbed
+test/propose-edit.test.mjs     propose-edit and github-auth against an in-memory GitHub
 vercel.json                    maxDuration only
 package.json                   pins Node 22 via engines; test and build scripts
 ```
@@ -84,6 +89,39 @@ Fixed by the live front-end. Do not change either side alone.
 
 Every response carries `X-Registry-Version: <registry commit SHA>`, the registry
 snapshot this deployment was built with.
+
+---
+
+## The in-site editor (`/api/propose-edit`, `/api/github-auth`)
+
+The edit-on-github plugin's **Edit this page** button and the per-paragraph pencil open a
+GitHub-style editor on the book's own page. This is its back end.
+
+- `GET /api/propose-edit?path=<repo path>` returns `{ path, branch, sha, content, signIn }`:
+  the page's source on the book's `content.drafts_branch` (falling back to `live_branch`
+  when the registry names none), LF line endings, and the blob sha the edit is based on.
+- `POST /api/propose-edit` with `mode: "page"` (`content`) or `mode: "paragraph"`
+  (`startLine`, `original`, `replacement`, optional `paragraph`), plus `path`, `baseSha`,
+  `title`, `description`, and either `identity` or `name` + `email` (+ `website`, the
+  honeypot). It branches `proposed-edits/<page>-<time>-<rand>` from the drafts head,
+  commits the one file, opens a PR into drafts labelled `proposed-edit` + `needs-triage`,
+  and answers `201 { prUrl }`.
+- **If drafts moved under the reader** (page mode: the blob sha differs; paragraph mode:
+  the paragraph no longer occurs exactly once), nothing is committed. Their change is
+  filed as an issue with a diff and the answer is `201 { issueUrl, fallback: true }`.
+  Nothing a reader types is lost.
+- **Attribution.** Anonymous: the App authors the commit; the reader's name and masked
+  email appear in the PR body only, never in git history. Signed in: the commit's author
+  is the reader's `<id>+<login>@users.noreply.github.com`, so it counts on their GitHub
+  profile and the contributors page, and the PR body @-mentions them so they follow it.
+- **Sign-in** (`/api/github-auth`) is an OAuth App with **no scopes**. The popup comes back
+  to this function, which asks GitHub who the reader is, **revokes the GitHub token
+  immediately**, and posts a signed identity token (8 hours, bound to the book's origin)
+  to the opener at the registry origin only. A nonce cookie ties the callback to the
+  browser that started it.
+- Limits: 5 proposals and 60 source reads per hour per IP (per instance, as suggest-edit);
+  400,000 characters per page, 20,000 per paragraph; one shared 20s GitHub budget per
+  request (`maxDuration` 25s).
 
 ---
 
@@ -172,10 +210,17 @@ they are never logged or echoed.
 | `GITHUB_APP_ID`              | yes      | The GitHub App's numeric **App ID** (App settings → General → About). Not the Client ID. |
 | `GITHUB_APP_INSTALLATION_ID` | **no longer read** | The installation is now looked up per repository. If it is still set, startup logs a warning asking for it to be deleted. |
 | `GITHUB_APP_PRIVATE_KEY`     | yes      | The App's private key, **base64-encoded** (see below). |
+| `GITHUB_OAUTH_CLIENT_ID`     | for sign-in | The **OAuth App** (not the GitHub App) used only for "Sign in with GitHub" in the editor. |
+| `GITHUB_OAUTH_CLIENT_SECRET` | for sign-in | Its client secret. Mark **Sensitive**. |
+| `IDENTITY_SECRET`            | for sign-in | 32+ random characters; signs the identity tokens. Rotating it signs everyone out. |
+| `GITHUB_OAUTH_REDIRECT_URI`  | no | Defaults to `https://<request host>/api/github-auth`. Set it if the OAuth App's callback URL differs. |
 | `BOT_TOKEN`                  | temporary | The old personal access token. **A fallback for the App rollout only**, to be deleted along with its code once `credential=app` is proven in production. |
 
-**The App.** Permissions **Issues: Read and write** and **Metadata: Read-only**, nothing
-else. No webhook. Install it on **only selected repositories**: each registered book's
+**The App.** Permissions **Issues: Read and write**, **Contents: Read and write**,
+**Pull requests: Read and write** and **Metadata: Read-only**, nothing else. (Contents and
+Pull requests arrived with the in-site editor. Each installation must accept the new
+permissions before propose-edit works on that repo; suggest-edit's tokens stay
+downscoped to `issues: write` regardless.) No webhook. Install it on **only selected repositories**: each registered book's
 content repo, never "All repositories". A book's repo may belong to any GitHub account,
 so each maintainer installs the App on their own repo; the App must be **public** (App
 settings → Advanced → "Make public") for accounts other than its owner to install it.

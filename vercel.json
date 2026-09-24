@@ -3,6 +3,12 @@
   "functions": {
     "api/suggest-edit.js": {
       "maxDuration": 15
+    },
+    "api/propose-edit.js": {
+      "maxDuration": 25
+    },
+    "api/github-auth.js": {
+      "maxDuration": 15
     }
   }
 }
