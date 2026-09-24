@@ -306,3 +306,17 @@ test('sign-in callback: posts an identity to the book origin only, and revokes G
   const stolen = await call({ method: 'GET', handle: auth, origin: null, url: `/api/github-auth?code=abc&state=${encodeURIComponent(state)}` });
   assert.equal(stolen.statusCode, 400);
 });
+
+test('setup problems tell the reader plainly: no drafts branch, and no usable credential', async () => {
+  resetGitHub();
+  const saved = globalThis.fetch;
+  globalThis.fetch = async (url, opts) =>
+    String(url).includes('/git/ref/heads/') ? json(404, { message: 'Not Found' }) : saved(url, opts);
+  try {
+    const r = await call({ method: 'GET', url: `/api/propose-edit?path=${PATH}` });
+    assert.equal(r.statusCode, 502);
+    assert.match(r.payload.userMessage, /no drafts branch/);
+  } finally {
+    globalThis.fetch = saved;
+  }
+});

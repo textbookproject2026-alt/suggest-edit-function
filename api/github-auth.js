@@ -22,7 +22,7 @@
  */
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import BUNDLE from '../registry/bundled.mjs';
-import { validateRegistry, createResolver, canonicalOrigin } from '../lib/registry.mjs';
+import { validateRegistry, createResolver } from '../lib/registry.mjs';
 import { GITHUB_API, GITHUB_HEADERS, resolveBook } from '../lib/common.mjs';
 import { issueIdentity, readIdentitySecret, sign, verify } from '../lib/identity.mjs';
 
@@ -112,7 +112,9 @@ function start(req, res, origin) {
     page(res, 403, { text: 'This sign-in link is not for a book on this platform.' });
     return;
   }
-  const bookOrigin = canonicalOrigin(resolved.book);
+  // The page's own origin (its domain or one of its Pages previews): the popup
+  // reports back to exactly the page that opened it.
+  const bookOrigin = resolved.origin;
   const n = randomBytes(16).toString('base64url');
   const state = sign(SECRET, { k: 'state', o: bookOrigin, n, e: Date.now() + STATE_TTL_MS });
   res.setHeader(

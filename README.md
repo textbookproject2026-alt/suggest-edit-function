@@ -140,16 +140,31 @@ go inside a code span (`inlineCode`). Nothing a reader types can become a headin
 link, an image, or an `@mention` that notifies someone. See `TESTING.md`.
 
 **How a book is resolved.** Before anything else, preflight included, the `Origin`
-header is looked up in the bundled registry. It resolves only if it is **exactly**
-`https://` + a book's `site.domain`, for a book whose `status` is `preview` or `live`.
-There is no suffix, prefix or wildcard match, no case folding and no `www.` folding, so
-for `social-research-methods.confused4now.org` the `http://` form, the `www.` form and
-`https://social-research-methods.confused4now.org.evil.example` all fail — as does the
-platform portal at `https://confused4now.org`, which is nobody's `site.domain`. A book's
-`legacy_origins` are never accepted. Once resolved, everything book-specific comes from
-that registry entry: the issue goes to `content.repo`, the file link uses
-`content.live_branch`, the honeypot's `issueUrl` is that repo's issues index, `Access-Control-Allow-Origin` is the
-registry-derived origin (never the raw header), and log lines end in `book=<slug>`.
+header is looked up in the bundled registry, for books whose `status` is `preview` or
+`live`. It resolves when it is **exactly** one of:
+
+- `https://` + the book's `site.domain` (its public address), or
+- one of the platform's own Cloudflare Pages deployments of the book:
+  `https://<project>.pages.dev`, or `https://<label>.<project>.pages.dev` for a branch
+  preview such as `drafts` or a single deployment, where `<project>` is the book's
+  `site.host.project` and the book is built by the shared builder
+  (`site.host.builder: "quartz-book"`) or hosted on Cloudflare Pages
+  (`site.host.provider: "cloudflare-pages"`).
+
+The Pages rule is what makes every book's previews work without per-book setup. Book
+one's builder deploy, for example, lives at `social-research-methods.pages.dev` while
+its domain is still on Obsidian Publish. Only the platform's Pages account can serve
+pages under a project's `pages.dev` name, so they're as trustworthy as the domain; two
+books claiming one project is refused at load. Otherwise there is no suffix, prefix or
+wildcard match, no case folding, no ports and no `www.` folding: the `http://` form,
+the `www.` form, `https://social-research-methods.confused4now.org.evil.example`,
+`https://evil-social-research-methods.pages.dev` and `a.b.<project>.pages.dev` all
+fail, as does the platform portal at `https://confused4now.org`, which is nobody's
+`site.domain`. A book's `legacy_origins` are never accepted. Once resolved, everything
+book-specific comes from that registry entry: the issue goes to `content.repo`, the
+file link uses `content.live_branch`, the honeypot's `issueUrl` is that repo's issues
+index, `Access-Control-Allow-Origin` is the request's origin *as matched* above (never an
+unmatched header), and log lines end in `book=<slug>`.
 After filing, the function checks that GitHub's `repository_url` matches the book's
 repo and logs `ROUTING:` at error level if it doesn't (the reader still gets 201).
 
@@ -307,7 +322,8 @@ Vercel instant rollback restores code and registry together.
 - **Refresh the committed snapshot** locally with `npm run registry:bundle`. The
   committed copy is what `npm test` runs against. Production always rebuilds it.
 - The handler validates the snapshot again at load and refuses to start on anything
-  ambiguous: duplicate slugs, repos or domains, or a domain that is also a legacy origin.
+  ambiguous: duplicate slugs, repos, domains or Pages projects, or a domain that is
+  also a legacy origin.
 
 ---
 

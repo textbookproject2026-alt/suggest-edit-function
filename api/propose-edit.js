@@ -37,7 +37,7 @@
  */
 import { randomBytes } from 'node:crypto';
 import BUNDLE from '../registry/bundled.mjs';
-import { validateRegistry, createResolver, canonicalOrigin } from '../lib/registry.mjs';
+import { validateRegistry, createResolver } from '../lib/registry.mjs';
 import {
   EMAIL_RE, asString, clientIp, corsHeaders, createCredentials, createRateLimiter, detailOf,
   ensureLabels, fence, fileUrl, githubFetch, inlineCode, isJsonContentType, isSafePath, maskEmail,
@@ -80,6 +80,13 @@ const writeLimited = createRateLimiter(5, 60 * 60 * 1000);
 const readLimited = createRateLimiter(60, 60 * 60 * 1000);
 
 const GENERIC = 'Something went wrong sending your edit. Please try again.';
+// Setup problems a book owner has to fix (the App not installed, or its permissions
+// not yet approved, on that book's repo): the reader is told plainly and pointed at
+// the form that still works, instead of a generic "couldn't load".
+const NOT_SET_UP =
+  "Editing isn't switched on for this book yet. Please use “Suggest an edit” instead.";
+const NO_BRANCH =
+  "This book isn't set up to take edits yet (it has no drafts branch). Please use “Suggest an edit” instead.";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -117,7 +124,11 @@ async function fail(what, res) {
 async function readSource(book, path, token, left) {
   const branch = baseBranch(book);
   const ref = await gh(`/repos/${book.content.repo}/git/ref/heads/${encodePath(branch)}`, token, left);
-  if (!ref.ok) throw await fail(`read ${branch} ref`, ref);
+  if (!ref.ok) {
+    const err = await fail(`read ${branch} ref`, ref);
+    if (ref.status === 404) err.userMessage = NO_BRANCH;
+    throw err;
+  }
   const commit = (await ref.json())?.object?.sha;
   if (typeof commit !== 'string') throw new Error('branch ref returned no sha');
 
@@ -399,7 +410,7 @@ async function handleGet(req, res, book, tag) {
   }
   const credential = await CREDENTIALS.acquire(book, tag);
   if (!credential.ok) {
-    send(res, credential.status, { error: credential.error });
+    send(res, credential.status, { error: credential.error, userMessage: NOT_SET_UP });
     return;
   }
   try {
@@ -417,11 +428,11 @@ async function handleGet(req, res, book, tag) {
   } catch (err) {
     if (err.status === 401) CREDENTIALS.refused(book, credential);
     console.error(`read: ${err.message} ${tag}`);
-    send(res, 502, { error: `github: ${err.message}` });
+    send(res, 502, { error: `github: ${err.message}`, ...(err.userMessage ? { userMessage: err.userMessage } : {}) });
   }
 }
 
-async function handlePost(req, res, book, tag) {
+async function handlePost(req, res, book, origin, tag) {
   if (!isJsonContentType(req)) {
     send(res, 415, { error: 'unsupported content-type', userMessage: GENERIC });
     return;
@@ -451,7 +462,7 @@ async function handlePost(req, res, book, tag) {
     return;
   }
 
-  const result = validate(body, canonicalOrigin(book));
+  const result = validate(body, origin);
   if (!result.ok) {
     console.warn(`${result.error} (ip=${ip}) ${tag}`);
     send(res, result.status, { error: result.error, userMessage: result.userMessage });
@@ -461,7 +472,7 @@ async function handlePost(req, res, book, tag) {
 
   const credential = await CREDENTIALS.acquire(book, tag);
   if (!credential.ok) {
-    send(res, credential.status, { error: credential.error });
+    send(res, credential.status, { error: credential.error, userMessage: NOT_SET_UP });
     return;
   }
 
@@ -501,7 +512,7 @@ async function handlePost(req, res, book, tag) {
   } catch (err) {
     if (err.status === 401) CREDENTIALS.refused(book, credential);
     console.error(`github: ${err.message} ${tag}`);
-    send(res, 502, { error: `github: ${err.message}` });
+    send(res, 502, { error: `github: ${err.message}`, ...(err.userMessage ? { userMessage: err.userMessage } : {}) });
   }
 }
 
@@ -513,16 +524,16 @@ async function handle(req, res) {
     send(res, 403, { error: resolution.error });
     return;
   }
-  const { book } = resolution;
+  const { book, origin } = resolution;
   const tag = `book=${book.slug}`;
-  corsHeaders(res, canonicalOrigin(book), 'GET, POST, OPTIONS');
+  corsHeaders(res, origin, 'GET, POST, OPTIONS');
 
   if (req.method === 'OPTIONS') {
     res.status(204).end();
     return;
   }
   if (req.method === 'GET') return handleGet(req, res, book, tag);
-  if (req.method === 'POST') return handlePost(req, res, book, tag);
+  if (req.method === 'POST') return handlePost(req, res, book, origin, tag);
   res.setHeader('Allow', 'GET, POST, OPTIONS');
   send(res, 405, { error: 'method not allowed' });
 }

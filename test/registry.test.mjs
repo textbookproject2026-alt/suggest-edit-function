@@ -302,3 +302,81 @@ test('the loader refuses registries it cannot route unambiguously', () => {
   ];
   for (const [registry, pattern] of cases) assert.throws(() => validateRegistry(registry), pattern);
 });
+
+// ---------------------------------------------------------------------------
+// Pages previews: every book's own Cloudflare Pages deployments resolve to it
+// ---------------------------------------------------------------------------
+
+const onPages = (slug, domain, project, extra = {}) =>
+  book(slug, domain, { site: { domain, legacy_origins: [], host: { kind: 'static', provider: 'cloudflare-pages', project, ...extra } } });
+
+test('previews: <project>.pages.dev and <branch>.<project>.pages.dev resolve to the book, echoing that origin', () => {
+  const r = createResolver(validateRegistry(registryOf(
+    onPages('alpha', 'alpha.example', 'alpha-book'),
+    // Its domain still served elsewhere (book one on Publish), but the builder deploys it.
+    book('beta', 'beta.example', { site: { domain: 'beta.example', legacy_origins: [], host: { kind: 'obsidian-publish', builder: 'quartz-book', project: 'beta-book' } } }),
+    // No domain yet: reachable only from its Pages address.
+    { ...onPages('gamma', null, 'gamma-book'), status: 'preview' },
+  )));
+  for (const [origin, slug] of [
+    ['https://alpha.example', 'alpha'],
+    ['https://alpha-book.pages.dev', 'alpha'],
+    ['https://drafts.alpha-book.pages.dev', 'alpha'],
+    ['https://3f2a91c0.alpha-book.pages.dev', 'alpha'],
+    ['https://beta-book.pages.dev', 'beta'],
+    ['https://drafts.beta-book.pages.dev', 'beta'],
+    ['https://gamma-book.pages.dev', 'gamma'],
+  ]) {
+    const res = r.resolve(origin);
+    assert.equal(res.ok && res.book.slug, slug, origin);
+    assert.equal(res.origin, origin, `${origin} is echoed as itself`);
+  }
+});
+
+test('previews: look-alikes, other projects, deeper labels, http and ports are refused', () => {
+  const r = createResolver(validateRegistry(registryOf(onPages('alpha', 'alpha.example', 'alpha-book'))));
+  for (const origin of [
+    'https://alpha-book.pages.dev.evil.example',
+    'https://evil-alpha-book.pages.dev',
+    'https://other-book.pages.dev',
+    'https://a.b.alpha-book.pages.dev',
+    'http://alpha-book.pages.dev',
+    'https://alpha-book.pages.dev:443',
+    'https://ALPHA-BOOK.pages.dev',
+    'https://alpha-book.pages.dev/',
+    'https://-x.alpha-book.pages.dev',
+  ]) {
+    assert.deepEqual(r.resolve(origin), { ok: false, reason: 'unregistered' }, origin);
+  }
+});
+
+test('previews: a book without a Pages project, a retired book, and suggest-edit off get nothing', () => {
+  const r = createResolver(validateRegistry(registryOf(
+    book('plain', 'plain.example', { site: { domain: 'plain.example', legacy_origins: [], host: { kind: 'obsidian-publish' } } }),
+    { ...onPages('old', 'old.example', 'old-book'), status: 'retired' },
+    { ...onPages('off', 'off.example', 'off-book'), suggest_edit: { enabled: false } },
+  )));
+  assert.deepEqual(r.resolve('https://plain.pages.dev'), { ok: false, reason: 'unregistered' });
+  assert.deepEqual(r.resolve('https://old-book.pages.dev'), { ok: false, reason: 'unregistered' });
+  assert.deepEqual(r.resolve('https://off-book.pages.dev'), { ok: false, reason: 'suggest_edit disabled for off' });
+});
+
+test('previews: two books claiming one Pages project are refused at load', () => {
+  assert.throws(
+    () => validateRegistry(registryOf(onPages('a', 'a.example', 'shared'), onPages('b', 'b.example', 'shared'))),
+    /duplicate Cloudflare Pages project: shared/,
+  );
+});
+
+test('previews through the real handler: CORS echoes the preview origin, and the issue goes to its book', async () => {
+  const b = REGISTRY.books.find((x) => x.status !== 'retired' && x.suggest_edit.enabled && x.site.host?.project);
+  if (!b) return; // the bundled registry has no Pages-hosted book
+  const origin = `https://drafts.${b.site.host.project}.pages.dev`;
+  const pre = await call({ method: 'OPTIONS', origin });
+  assert.equal(pre.status, 204);
+  assert.equal(pre.headers['access-control-allow-origin'], origin);
+  const r = await call({ origin, body: { ...VALID } });
+  assert.equal(r.status, 201);
+  assert.equal(r.headers['access-control-allow-origin'], origin);
+  assert.ok(requests.some((q) => q.url.startsWith(`https://api.github.com/repos/${b.content.repo}/issues`)));
+});

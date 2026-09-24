@@ -20,7 +20,7 @@
  */
 
 import BUNDLE from '../registry/bundled.mjs';
-import { validateRegistry, createResolver, canonicalOrigin } from '../lib/registry.mjs';
+import { validateRegistry, createResolver } from '../lib/registry.mjs';
 import {
   EMAIL_RE, GITHUB_API, asString, clientIp, corsHeaders, createCredentials, createRateLimiter, ensureLabels,
   fence, fileUrl, githubFetch, inlineCode, isJsonContentType, isSafePath, maskEmail, parseBody,
@@ -229,18 +229,18 @@ async function handle(req, res) {
     send(res, 403, { error: resolution.error });
     return;
   }
-  const { book } = resolution;
+  const { book, origin } = resolution;
   const tag = `book=${book.slug}`;
 
   // --- CORS preflight -----------------------------------------------------
   if (req.method === 'OPTIONS') {
-    corsHeaders(res, canonicalOrigin(book));
+    corsHeaders(res, origin);
     res.status(204).end();
     return;
   }
 
   // Set before the method guard so even a rejected request is readable by the client.
-  corsHeaders(res, canonicalOrigin(book));
+  corsHeaders(res, origin);
 
   // --- Method guard -------------------------------------------------------
   if (req.method !== 'POST') {
