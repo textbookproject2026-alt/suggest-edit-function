@@ -11,7 +11,7 @@
       "maxDuration": 15
     },
     "api/request-book.js": {
-      "maxDuration": 30
+      "maxDuration": 60
     }
   }
 }

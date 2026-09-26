@@ -12,7 +12,7 @@ const { default: BUNDLE } = await import('../registry/bundled.mjs');
 const PORTAL = `https://${BUNDLE.registry.platform.portal.domain}`;
 const REPO = 'textbookproject2026-alt/book-requests';
 
-const gh = { calls: [], issues: [], trees: [], failBlobs: false };
+const gh = { calls: [], issues: [], trees: [], blobs: new Map(), failBlobs: false };
 const json = (status, body) => ({ ok: status < 300, status, json: async () => body, text: async () => JSON.stringify(body) });
 globalThis.fetch = async (url, opts = {}) => {
   url = String(url);
@@ -22,7 +22,17 @@ globalThis.fetch = async (url, opts = {}) => {
   const api = `https://api.github.com/repos/${REPO}`;
   if (!url.startsWith(api)) throw new Error(`unexpected ${method} ${url}`);
   const rest = url.slice(api.length);
-  if (rest === '/git/blobs') return gh.failBlobs ? json(500, {}) : json(201, { sha: `blob${gh.calls.length}` });
+  if (rest === '/git/blobs') {
+    if (gh.failBlobs) return json(500, {});
+    const sha = gh.calls.length.toString(16).padStart(40, '0');
+    gh.blobs.set(sha, body.content);
+    return json(201, { sha });
+  }
+  if (rest.startsWith('/git/blobs/')) {
+    const content = gh.blobs.get(rest.slice('/git/blobs/'.length));
+    // GitHub wraps base64 at 60 columns; the handler must cope.
+    return content === undefined ? json(404, {}) : json(200, { encoding: 'base64', content: content.replace(/.{60}/g, '$&\n') });
+  }
   if (rest === '/git/ref/heads/main') return json(200, { object: { sha: 'p'.repeat(40) } });
   if (rest.startsWith('/git/commits/')) return json(200, { tree: { sha: 't'.repeat(40) } });
   if (rest === '/git/trees') { gh.trees.push(body); return json(201, { sha: 'n'.repeat(40) }); }
@@ -110,8 +120,8 @@ test('validation', async () => {
   await bad({ files: [{ name: 'a.pdf', data: DOCX }] }, /\.docx/);
   await bad({ files: [{ name: 'a.docx', data: Buffer.from('hello').toString('base64') }] }, /Word document/);
   await bad({ files: Array.from({ length: 6 }, (_, i) => ({ name: `${i}.md`, data: 'aGk=' })) }, /at most 5/);
-  const big = Buffer.alloc(3 * 1024 * 1024 + 1, 97).toString('base64');
-  await bad({ files: [{ name: 'a.md', data: big }] }, /3 MB/);
+  const big = Buffer.alloc(20 * 1024 * 1024 + 1, 97).toString('base64');
+  await bad({ files: [{ name: 'a.md', data: big }] }, /20 MB/);
 });
 
 test('the honeypot answers success and files nothing', async () => {
@@ -125,4 +135,53 @@ test('the proposed slug avoids registered slugs and reserved words', () => {
   assert.equal(proposeSlug('Platform Test Book', reg), 'platform-test-book-2');
   assert.equal(proposeSlug('API', reg), 'book-api');
   assert.equal(proposeSlug('Économie politique', reg), 'economie-politique');
+});
+
+const PART = 2.5 * 1024 * 1024;
+async function upload(bytes) {
+  const shas = [];
+  for (let at = 0; at < bytes.length; at += PART) {
+    const r = await call({ body: { part: bytes.subarray(at, at + PART).toString('base64') } });
+    assert.equal(r.statusCode, 201, JSON.stringify(r.payload));
+    assert.match(r.payload.sha, /^[0-9a-f]{40}$/);
+    shas.push(r.payload.sha);
+  }
+  return shas;
+}
+
+test('a file sent in parts is joined into one committed blob', async () => {
+  const bytes = Buffer.concat([Buffer.from('PK\x03\x04', 'binary'), Buffer.alloc(7 * 1024 * 1024, 7)]);
+  const parts = await upload(bytes);
+  assert.equal(parts.length, 3);
+  const r = await call({ body: { ...VALID, files: [{ name: 'Chapter 3.docx', parts }, { name: 'notes.md', data: 'aGk=' }] } });
+  assert.equal(r.statusCode, 201, JSON.stringify(r.payload));
+  const [joined, md] = gh.trees[0].tree;
+  assert.equal(joined.path, `requests/${r.payload.reference}/Chapter 3.docx`);
+  assert.ok(Buffer.from(gh.blobs.get(joined.sha), 'base64').equals(bytes));
+  assert.equal(Buffer.from(gh.blobs.get(md.sha), 'base64').toString(), 'hi');
+  assert.match(gh.issues[0].body, /Chapter 3\.docx.*\(7169 KB\)/);
+});
+
+test('parts: checks on the joined bytes, and on the parts themselves', async () => {
+  const notDocx = await upload(Buffer.from('plain text, not a zip'));
+  let r = await call({ body: { ...VALID, files: [{ name: 'a.docx', parts: notDocx }] } });
+  assert.equal(r.statusCode, 400);
+  assert.match(r.payload.userMessage, /Word document/);
+
+  const tooBig = await upload(Buffer.alloc(10.5 * 1024 * 1024, 97));
+  r = await call({ body: { ...VALID, files: [{ name: 'a.md', parts: tooBig }, { name: 'b.md', parts: tooBig }] } });
+  assert.equal(r.statusCode, 400);
+  assert.match(r.payload.userMessage, /20 MB/);
+
+  assert.equal((await call({ body: { ...VALID, files: [{ name: 'a.md', parts: ['nope'] }] } })).statusCode, 400);
+  assert.equal((await call({ body: { ...VALID, files: [{ name: 'a.md', parts: [] }] } })).statusCode, 400);
+  assert.equal((await call({ body: { part: Buffer.alloc(PART + 3).toString('base64') } })).statusCode, 400);
+  assert.equal((await call({ body: { part: 'not base64!' } })).statusCode, 400);
+});
+
+test('a part that cannot be fetched still files the request, without files', async () => {
+  const r = await call({ body: { ...VALID, files: [{ name: 'a.docx', parts: ['f'.repeat(40)] }] } });
+  assert.equal(r.statusCode, 201);
+  assert.match(r.payload.userMessage, /files didn't/);
+  assert.match(gh.issues[0].body, /The files did not arrive/);
 });
