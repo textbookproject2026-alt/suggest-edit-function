@@ -88,7 +88,14 @@ Fixed by the live front-end. Do not change either side alone.
 | 502    | GitHub call failed or timed out, no App token could be minted, or the App isn't installed on the book's repo | no |
 
 Every response carries `X-Registry-Version: <registry commit SHA>`, the registry
-snapshot this deployment was built with.
+snapshot this deployment was built with. It also carries `X-Function-Version: <this repo's commit SHA>`
+(`VERCEL_GIT_COMMIT_SHA` at build time, `local` elsewhere). A merge here changes only the second.
+`.github/workflows/deployed.yml` runs on every push to `main` and waits up to ten minutes
+for production to send this commit (or a later one) in `X-Function-Version`. It goes red on the
+merge commit if production doesn't. Vercel builds `main` on push by itself. If production is still
+behind after four minutes and the optional secret `SUGGEST_EDIT_DEPLOY_HOOK` is set here, the
+job fires the hook once. The registry's `deploy.yml` still polls `X-Registry-Version` for
+registry changes.
 
 ---
 

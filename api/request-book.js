@@ -355,6 +355,7 @@ const TRY_AGAIN = 'Something went wrong sending your request. Please try again.'
 
 async function handle(req, res) {
   res.setHeader('X-Registry-Version', BUNDLE.sha);
+  res.setHeader('X-Function-Version', BUNDLE.function_sha ?? 'local');
 
   const r = PORTAL.resolve(req.headers.origin);
   if (!r.ok) {

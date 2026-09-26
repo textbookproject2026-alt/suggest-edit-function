@@ -518,6 +518,7 @@ async function handlePost(req, res, book, origin, tag) {
 
 async function handle(req, res) {
   res.setHeader('X-Registry-Version', BUNDLE.sha);
+  res.setHeader('X-Function-Version', BUNDLE.function_sha ?? 'local');
   const resolution = resolveBook(RESOLVER, req.headers.origin);
   if (!resolution.ok) {
     console.warn(resolution.log);
