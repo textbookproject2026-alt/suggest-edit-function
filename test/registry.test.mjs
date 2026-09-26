@@ -205,11 +205,15 @@ test('an unknown origin is logged as unregistered and never falls through to a b
   assert.deepEqual(logs.lines, ['warn: origin rejected: https://someone-else.example (unregistered)']);
 });
 
-test('every response carries X-Registry-Version, refusals included', async () => {
+test('every response carries X-Registry-Version and X-Function-Version, refusals included', async () => {
   const ok = await call({ origin: `https://${ROUTABLE[0].site.domain}`, body: { ...VALID } });
   const refused = await call({ origin: 'https://evil.example', body: {} });
   assert.equal(ok.headers['x-registry-version'], BUNDLE.sha);
   assert.equal(refused.headers['x-registry-version'], BUNDLE.sha);
+  // This repo's commit on Vercel, `local` for a bundle made anywhere else.
+  const fn = BUNDLE.function_sha ?? 'local';
+  assert.equal(ok.headers['x-function-version'], fn);
+  assert.equal(refused.headers['x-function-version'], fn);
 });
 
 test('log lines after resolution carry book=<slug>', async () => {
