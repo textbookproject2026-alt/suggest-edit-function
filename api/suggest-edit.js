@@ -219,6 +219,7 @@ function resolveBook(origin) {
 
 async function handle(req, res) {
   res.setHeader('X-Registry-Version', BUNDLE.sha);
+  res.setHeader('X-Function-Version', BUNDLE.function_sha ?? 'local');
 
   // --- Resolve the book ---------------------------------------------------
   // Before everything else, preflight included: an unknown origin gets a 403 with no

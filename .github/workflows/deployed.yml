@@ -1,0 +1,83 @@
+# Proves every merge to main reaches production, and fails (a red check on the
+# merge commit) if the function isn't serving it within ten minutes. The sibling
+# of textbook-registry's deploy.yml, which does the same for a registry change.
+#
+# The two need different markers. X-Registry-Version is the REGISTRY commit the
+# function was built with, and a merge here leaves it unchanged. X-Function-Version
+# is this repo's commit (VERCEL_GIT_COMMIT_SHA, baked in by
+# scripts/bundle-registry.mjs), and that is what is polled here.
+#
+# Mechanism: the Vercel project is connected to this repo with main as its
+# production branch, so the push itself starts the build. If production is still
+# behind after four minutes and the repository secret SUGGEST_EDIT_DEPLOY_HOOK is
+# set (the same hook URL as in textbook-registry), the hook is fired once, in case
+# Vercel missed the push. Without the secret this job only watches.
+#
+# The endpoint is read from platform.suggest_edit_endpoint in the registry, as
+# deploy.yml does.
+name: deployed
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deployed
+  cancel-in-progress: false
+
+jobs:
+  function:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # a newer merge counts as caught up, which needs history
+          persist-credentials: false
+
+      - name: Wait for production to serve this commit
+        env:
+          SHA: ${{ github.sha }}
+          HOOK: ${{ secrets.SUGGEST_EDIT_DEPLOY_HOOK }}
+        run: |
+          set -euo pipefail
+          url="$(curl -fsS --max-time 20 https://raw.githubusercontent.com/textbookproject2026-alt/textbook-registry/main/registry.json | jq -er '.platform.suggest_edit_endpoint')"
+          # No Origin, so the function refuses with a 403 before doing anything.
+          # Every response carries the header, refusals included.
+          served() {
+            curl -s --max-time 20 -o /dev/null -D - "$url" | tr -d '\r' \
+              | sed -n 's/^[Xx]-[Ff]unction-[Vv]ersion: *//p' | head -1
+          }
+          # This commit, or a later one on main (a newer merge beat us to it).
+          caught_up() {
+            local s="$1"
+            [ -n "$s" ] || return 1
+            [ "$s" = "$SHA" ] && return 0
+            [[ "$s" =~ ^[0-9a-f]{40}$ ]] || return 1
+            git fetch -q origin main
+            git cat-file -e "$s^{commit}" 2>/dev/null && git merge-base --is-ancestor "$SHA" "$s"
+          }
+
+          echo "Waiting up to 10 minutes for $url to serve function $SHA."
+          start=$(date +%s); hooked=""
+          while [ $(( $(date +%s) - start )) -lt 600 ]; do
+            now="$(served || true)"
+            if caught_up "$now"; then
+              echo "$url serves function $now."
+              exit 0
+            fi
+            echo "  still serving ${now:-<no X-Function-Version>}"
+            if [ -z "$hooked" ] && [ $(( $(date +%s) - start )) -ge 240 ] && [ -n "${HOOK:-}" ]; then
+              echo "::warning::Four minutes after the push and still behind, so the deploy hook was fired once. Find out why the push didn't build."
+              curl -fsS -X POST --max-time 30 "$HOOK" > /dev/null
+              hooked=yes
+            fi
+            sleep 20
+          done
+
+          echo "::error::$url is still serving function ${now:-<no X-Function-Version>} ten minutes after the push, not $SHA. Check the Vercel deployment for this commit: a failed build (the tests run in vercel-build) leaves the previous deployment in production."
+          exit 1
