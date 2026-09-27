@@ -68,8 +68,9 @@ const { default: BUNDLE } = await import('../registry/bundled.mjs');
  * suggestions. A request without an Origin is refused, so tests about something else
  * (validation, the limiter, the honeypot) must carry one.
  */
-export const DEFAULT_ORIGIN = `https://${BUNDLE.registry.books.find(
-  (b) => b.status !== 'retired' && b.site.domain && b.suggest_edit.enabled).site.domain}`;
+export const DEFAULT_BOOK = BUNDLE.registry.books.find(
+  (b) => b.status !== 'retired' && b.site.domain && b.suggest_edit.enabled);
+export const DEFAULT_ORIGIN = `https://${DEFAULT_BOOK.site.domain}`;
 
 let instance = 0;
 /**

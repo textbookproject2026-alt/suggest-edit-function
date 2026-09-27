@@ -168,10 +168,17 @@ test('table: with App credentials, each book\'s installation is looked up, the t
 });
 
 test('look-alike, legacy and malformed origins get 403, no CORS headers, and no GitHub call', async () => {
-  const b = ROUTABLE[0];
+  // A book on its own domain: under *.pages.dev, <label>.<project>.pages.dev is a
+  // real preview alias (tested below), not a look-alike.
+  const b = ROUTABLE.find((x) => !x.site.domain.endsWith('.pages.dev')) ?? ROUTABLE[0];
   const d = b.site.domain;
+  // A retired book's address and legacy origins are refused like any other
+  // unregistered origin (book one, since 27 Sep 2026).
+  const retired = REGISTRY.books.filter((x) => x.status === 'retired')
+    .flatMap((x) => [`https://${x.site.domain}`, ...(x.site.legacy_origins ?? [])]);
   const origins = [
-    ...b.site.legacy_origins,
+    ...(b.site.legacy_origins ?? []),
+    ...retired,
     `http://${d}`,
     `https://${d}.evil.example`,
     `https://evil${d}`,
