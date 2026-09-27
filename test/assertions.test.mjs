@@ -5,7 +5,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { call, VALID, freshIp, DEFAULT_ORIGIN } from './harness.mjs';
+import { call, VALID, freshIp, DEFAULT_BOOK, DEFAULT_ORIGIN } from './harness.mjs';
 
 // ---------------------------------------------------------------------------
 // Content-Type gate (415)
@@ -50,7 +50,7 @@ test('the content-type gate does not break the OPTIONS preflight', async () => {
 test('honeypot returns a 201-shaped success but files nothing', async () => {
   const r = await call({ body: { ...VALID, website: 'http://spam.example' } });
   assert.equal(r.status, 201);
-  assert.equal(r.payload.issueUrl, 'https://github.com/textbookproject2026-alt/textbook/issues');
+  assert.equal(r.payload.issueUrl, `https://github.com/${DEFAULT_BOOK.content.repo}/issues`);
   assert.equal(r.issue, null, 'honeypot must not create an issue');
   // A caught bot must not be told it was caught.
   assert.equal(r.payload.error, undefined);

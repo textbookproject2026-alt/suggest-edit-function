@@ -175,9 +175,8 @@ header is looked up in the bundled registry, for books whose `status` is `previe
   (`site.host.builder: "quartz-book"`) or hosted on Cloudflare Pages
   (`site.host.provider: "cloudflare-pages"`).
 
-The Pages rule is what makes every book's previews work without per-book setup. Book
-one's builder deploy, for example, lives at `social-research-methods.pages.dev` while
-its domain is still on Obsidian Publish. Only the platform's Pages account can serve
+The Pages rule is what makes every book's previews work without per-book setup. A
+book's `drafts` build, for example, lives at `drafts.<project>.pages.dev`. Only the platform's Pages account can serve
 pages under a project's `pages.dev` name, so they're as trustworthy as the domain; two
 books claiming one project is refused at load. Otherwise there is no suffix, prefix or
 wildcard match, no case folding, no ports and no `www.` folding: the `http://` form,
@@ -383,12 +382,12 @@ sends one, and a request without it gets 403 `origin required`.
 URL=http://localhost:3000/api/suggest-edit
 
 # preflight -> 204
-curl -i -X OPTIONS "$URL" -H "Origin: https://social-research-methods.confused4now.org"
+curl -i -X OPTIONS "$URL" -H "Origin: https://ontology-for-social-research-a-criti.confused4now.org"
 
 # happy path -> 201 { issueUrl }
 curl -i -X POST "$URL" \
   -H 'Content-Type: application/json' \
-  -H 'Origin: https://social-research-methods.confused4now.org' \
+  -H 'Origin: https://ontology-for-social-research-a-criti.confused4now.org' \
   -d '{"name":"Ada","email":"ada@example.com","path":"chapters/01-intro.md",
        "suggestion":"Typo in paragraph two: \"recieve\" -> \"receive\".",
        "reasoning":"Spelling.","website":""}'
@@ -396,11 +395,11 @@ curl -i -X POST "$URL" \
 # honeypot -> 201, no issue filed
 curl -i -X POST "$URL" \
   -H 'Content-Type: application/json' \
-  -H 'Origin: https://social-research-methods.confused4now.org' \
+  -H 'Origin: https://ontology-for-social-research-a-criti.confused4now.org' \
   -d '{"name":"Bot","email":"b@b.com","path":"a.md","suggestion":"buy","website":"http://spam"}'
 
 # wrong method -> 405
-curl -i "$URL" -H "Origin: https://social-research-methods.confused4now.org"
+curl -i "$URL" -H "Origin: https://ontology-for-social-research-a-criti.confused4now.org"
 
 # wrong origin -> 403
 curl -i -X POST "$URL" -H 'Content-Type: application/json' \
@@ -409,11 +408,14 @@ curl -i -X POST "$URL" -H 'Content-Type: application/json' \
 # no Origin -> 403 origin required
 curl -i -X POST "$URL" -H 'Content-Type: application/json' -d '{}'
 
+# a retired book's origin (book one, since 27 Sep 2026) -> 403, no CORS headers
+curl -i -X OPTIONS "$URL" -H 'Origin: https://social-research-methods.confused4now.org'
+
 # unregistered or look-alike origin -> 403, no CORS headers
-curl -i -X OPTIONS "$URL" -H 'Origin: https://www.social-research-methods.confused4now.org'
+curl -i -X OPTIONS "$URL" -H 'Origin: https://www.ontology-for-social-research-a-criti.confused4now.org'
 
 # which registry this deployment was built with
-curl -sI -X OPTIONS "$URL" -H 'Origin: https://social-research-methods.confused4now.org' | grep -i x-registry-version
+curl -sI -X OPTIONS "$URL" -H 'Origin: https://ontology-for-social-research-a-criti.confused4now.org' | grep -i x-registry-version
 ```
 
 Watch the logs with `vercel logs <deployment-url>` — validation rejections, honeypot
