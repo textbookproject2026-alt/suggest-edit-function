@@ -7,9 +7,12 @@
  *   POST JSON { part }                       one piece of the .docx, base64, at most
  *     -> 201 { receipt }                     2.5 MB decoded (request-book's parts).
  *                                            The receipt is good for this login only.
- *   POST JSON { action: "start", book, name, parts: [receipt, …] }
+ *   POST JSON { action: "start", book, name, parts: [receipt, …], folder?, chapterName? }
  *     -> 201 { id, attempt, base }           name: the Word file's name. Converted
  *                                            against drafts as it is now (`base`).
+ *                                            folder: "chapters" (the default; the
+ *                                            chapter-NN rule names it) or a folder in
+ *                                            it, where chapterName may be chosen.
  *   POST JSON { action: "again", book, id }  convert the same document again, against
  *     -> 201 { id, attempt, base }           drafts as it is now (after a conflict)
  *   GET ?book=<slug>&id=<id>
@@ -29,8 +32,8 @@ import {
 } from '../lib/author.mjs';
 import { asString, createRateLimiter, isJsonContentType, parseBody, send } from '../lib/common.mjs';
 import {
-  MAX_BYTES, MAX_PARTS, PART_BYTES, branchOf, checkOwner, checkedResult, newId, partReceipt, readImport, readReceipt,
-  safeDocxName,
+  IMPORT_DIR, MAX_BYTES, MAX_PARTS, PART_BYTES, branchOf, checkOwner, checkedResult, destination, newId, partReceipt,
+  readImport, readReceipt, safeDocxName, stagedAt,
 } from '../lib/author-import.mjs';
 
 const requestsToken = appCredentials({ contents: 'write' });
@@ -71,23 +74,29 @@ async function handlePart(part, auth, res, used) {
   }
 }
 
-/** One commit on the import's branch holding `files`; a new orphan branch when `parent` is null. */
+/**
+ * One commit on the import's branch holding `files` (paths under import/). A new
+ * import's branch is made from the requests repo's main, so that the push runs
+ * main's import-chapter workflow: a push runs the workflow file of the commit
+ * pushed, and a branch without one would run nothing.
+ */
 async function commitImport(id, token, left, files, parent, message) {
+  const fresh = !parent;
+  if (fresh) parent = (await ghJson(`/repos/${REQUESTS_REPO}/git/ref/heads/main`, token, left))?.object?.sha;
   const blobs = [];
   for (const f of files) {
     const made = await ghJson(`/repos/${REQUESTS_REPO}/git/blobs`, token, left, { method: 'POST', body: { content: f.bytes.toString('base64'), encoding: 'base64' } });
-    blobs.push({ path: f.path, mode: '100644', type: 'blob', sha: made.sha });
+    blobs.push({ path: `${IMPORT_DIR}${f.path}`, mode: '100644', type: 'blob', sha: made.sha });
   }
-  let baseTree;
-  if (parent) baseTree = (await ghJson(`/repos/${REQUESTS_REPO}/git/commits/${parent}`, token, left))?.tree?.sha;
-  const tree = await ghJson(`/repos/${REQUESTS_REPO}/git/trees`, token, left, { method: 'POST', body: { ...(baseTree ? { base_tree: baseTree } : {}), tree: blobs } });
+  const baseTree = (await ghJson(`/repos/${REQUESTS_REPO}/git/commits/${parent}`, token, left))?.tree?.sha;
+  const tree = await ghJson(`/repos/${REQUESTS_REPO}/git/trees`, token, left, { method: 'POST', body: { base_tree: baseTree, tree: blobs } });
   const commit = await ghJson(`/repos/${REQUESTS_REPO}/git/commits`, token, left, {
-    method: 'POST', body: { message, tree: tree.sha, parents: parent ? [parent] : [] },
+    method: 'POST', body: { message, tree: tree.sha, parents: [parent] },
   });
-  if (parent) {
-    await ghJson(`/repos/${REQUESTS_REPO}/git/refs/heads/${encodePath(branchOf(id))}`, token, left, { method: 'PATCH', body: { sha: commit.sha, force: false } });
-  } else {
+  if (fresh) {
     await ghJson(`/repos/${REQUESTS_REPO}/git/refs`, token, left, { method: 'POST', body: { ref: `refs/heads/${branchOf(id)}`, sha: commit.sha } });
+  } else {
+    await ghJson(`/repos/${REQUESTS_REPO}/git/refs/heads/${encodePath(branchOf(id))}`, token, left, { method: 'PATCH', body: { sha: commit.sha, force: false } });
   }
   return commit.sha;
 }
@@ -100,6 +109,7 @@ async function start(body, auth, book, res, used) {
   const { identity } = auth;
   const name = safeDocxName(asString(body.name));
   if (!name) throw new Refusal(400, 'validation: name', 'Only Word documents (.docx) can be brought in.');
+  const where = destination(body.folder, body.chapterName);
   const parts = body.parts;
   if (!Array.isArray(parts) || !parts.length || parts.length > MAX_PARTS) throw new Refusal(400, 'validation: parts', 'The Word document could not be read.');
   const shas = parts.map((r) => readReceipt(IDENTITY_SECRET, r, identity));
@@ -121,9 +131,9 @@ async function start(body, auth, book, res, used) {
   const id = newId();
   const request = {
     version: 1, id, attempt: 1,
-    login: identity.login, user_id: identity.id, name: identity.name,
+    login: identity.login, user_id: identity.id, author_name: identity.name,
     book: book.slug, repo: book.content.repo, drafts_branch: book.content.drafts_branch, base,
-    docx: name, created: new Date().toISOString(),
+    docx: name, ...where, created: new Date().toISOString(),
   };
   await commitImport(id, req.token, left, [
     { path: 'request.json', bytes: requestJson(request) },
@@ -156,8 +166,7 @@ async function status(params, auth, book, res, used) {
   checkOwner(imp, book, auth.identity);
   const file = params.get('file');
   if (file !== null) {
-    const staged = `out/${file}`;
-    const entry = isAuthorPath(file) ? imp.files.get(staged) : null;
+    const entry = isAuthorPath(file) ? imp.files.get(stagedAt(`out/${file}`)) : null;
     if (!entry) throw new Refusal(404, 'staged file not found', "That picture isn't part of this import.");
     if (entry.size > MAX_PREVIEW_FILE) throw new Refusal(413, 'staged file too large', 'That picture is too large to show here.');
     send(res, 200, { path: file, base64: (await blobBytes(REQUESTS_REPO, entry.sha, req.token, left)).toString('base64') });
@@ -173,8 +182,10 @@ async function status(params, auth, book, res, used) {
     send(res, 200, { state: 'failed', attempt, error: result.error || 'The Word document could not be converted.' });
     return;
   }
-  const chapter = result.writes.find((w) => w.path === result.chapter.path);
-  const text = chapter ? (await blobBytes(REQUESTS_REPO, imp.files.get(chapter.staged).sha, req.token, left)).toString('utf8') : '';
+  // The converted chapter, for the preview: staged whether or not the send would
+  // change it (the same Word file brought in again may convert to what drafts has).
+  const preview = imp.files.get(`${IMPORT_DIR}chapter.md`);
+  const text = preview ? (await blobBytes(REQUESTS_REPO, preview.sha, req.token, left)).toString('utf8') : '';
   send(res, 200, { state: 'done', attempt, result, chapter: { path: result.chapter.path, text } });
 }
 

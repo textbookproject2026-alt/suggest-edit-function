@@ -305,15 +305,18 @@ test('import: parts are reassembled into source.docx on the import\'s own branch
   assert.equal(r.payload.base, BASE);
   const branchHead = gh.repo(REQUESTS).refs.get(`author-imports/${r.payload.id}`);
   const files = gh.filesAt(REQUESTS, branchHead);
-  assert.deepEqual([...files.keys()].sort(), ['request.json', 'source.docx']);
-  assert.ok(gh.repo(REQUESTS).blobs.get(files.get('source.docx')).equals(DOCX));
-  const request = JSON.parse(gh.textAt(REQUESTS, branchHead, 'request.json'));
+  assert.deepEqual([...files.keys()].sort(), ['README.md', 'import/request.json', 'import/source.docx']);
+  assert.ok(gh.repo(REQUESTS).blobs.get(files.get('import/source.docx')).equals(DOCX));
+  const request = JSON.parse(gh.textAt(REQUESTS, branchHead, 'import/request.json'));
   assert.equal(request.login, 'brandonandcaroline');
   assert.equal(request.book, BOOK.slug);
   assert.equal(request.base, BASE);
   assert.equal(request.attempt, 1);
   assert.equal(request.docx, 'My Chapter.docx');
-  assert.deepEqual(gh.repo(REQUESTS).commits.get(branchHead).parents, [], 'an orphan branch: nothing else from the repo');
+  assert.equal(request.folder, 'chapters');
+  assert.equal(request.name, null);
+  // Made from the requests repo's main, so the push runs main's import-chapter workflow.
+  assert.deepEqual(gh.repo(REQUESTS).commits.get(branchHead).parents, [gh.repo(REQUESTS).refs.get('main')]);
   assert.equal(gh.repo(REPO).refs.get(DRAFTS), BASE, 'nothing reaches the public book repo');
 });
 
@@ -339,12 +342,13 @@ test('import: a part from someone who is no book\'s author is refused; a non-doc
   assert.equal(n.statusCode, 400);
 });
 
-/** What the import-chapter workflow does: result.json and out/ files on the branch. */
+/** What the import-chapter workflow does: import/result.json, import/chapter.md and import/out/ on the branch. */
 function finishImport(id, result, staged) {
   const branch = `author-imports/${id}`;
-  const request = JSON.parse(gh.textAt(REQUESTS, gh.repo(REQUESTS).refs.get(branch), 'request.json'));
-  const files = { 'result.json': JSON.stringify({ version: 1, id, attempt: request.attempt, book: request.book, base: request.base, login: request.login, ...result }) };
-  for (const [path, content] of Object.entries(staged)) files[`out/${path}`] = content;
+  const request = JSON.parse(gh.textAt(REQUESTS, gh.repo(REQUESTS).refs.get(branch), 'import/request.json'));
+  const files = { 'import/result.json': JSON.stringify({ version: 1, id, attempt: request.attempt, book: request.book, base: request.base, login: request.login, ...result }) };
+  if (result.ok) files['import/chapter.md'] = staged[result.chapter.path] ?? CH3;
+  for (const [path, content] of Object.entries(staged)) files[`import/out/${path}`] = content;
   gh.commitFiles(REQUESTS, branch, files, { message: 'converted' });
 }
 
@@ -427,6 +431,42 @@ test('import: drafts moved — the send is a conflict; "again" converts against 
   assert.equal(again.payload.attempt, 2);
   assert.equal(again.payload.base, moved);
   assert.equal((await status(id)).payload.state, 'working', 'the old attempt\'s result no longer counts');
+});
+
+test('import: replacing a chapter already in drafts needs its own tick (replace: true)', async () => {
+  resetBook();
+  const id = await startedImport();
+  const replacing = {
+    ...GOOD_RESULT,
+    chapter: { path: 'chapters/chapter-03.md', title: 'Chapter 3', new: false, how: 'recorded',
+      replaces: { who: 'someone', lines_differ: { removed: 1, added: 1 } } },
+    writes: [{ path: 'chapters/chapter-03.md', staged: 'out/chapters/chapter-03.md', kind: 'chapter' }],
+    deletes: [], contents_line: null,
+  };
+  finishImport(id, replacing, { 'chapters/chapter-03.md': NEW3 });
+  const done = await status(id);
+  assert.equal(done.payload.chapter.text, NEW3, 'the preview is the converted chapter');
+  const unticked = await call(sendEp, { body: { book: BOOK.slug, base: BASE, import: id } });
+  assert.equal(unticked.statusCode, 409);
+  assert.equal(unticked.payload.error, 'replace not confirmed');
+  assert.equal(gh.repo(REPO).refs.get(DRAFTS), BASE);
+  const ticked = await call(sendEp, { body: { book: BOOK.slug, base: BASE, import: id, replace: true } });
+  assert.equal(ticked.statusCode, 201, JSON.stringify(ticked.payload));
+  assert.equal(gh.textAt(REPO, ticked.payload.sha, 'chapters/chapter-03.md'), NEW3);
+});
+
+test('import: a folder inside chapters/ with a chosen name, as the app allowed; anything else refused', async () => {
+  resetBook();
+  const receipts = await upload(DOCX.subarray(0, 3000));
+  const ok = await call(importEp, { body: { action: 'start', book: BOOK.slug, name: 'Concept.docx', parts: receipts,
+    folder: 'chapters/Definitions', chapterName: 'Critical realism' } });
+  assert.equal(ok.statusCode, 201, JSON.stringify(ok.payload));
+  const request = JSON.parse(gh.textAt(REQUESTS, gh.repo(REQUESTS).refs.get(`author-imports/${ok.payload.id}`), 'import/request.json'));
+  assert.deepEqual([request.folder, request.name], ['chapters/Definitions', 'Critical realism.md']);
+  for (const [folder, chapterName] of [['assets', 'x'], ['chapters/../README', 'x'], ['.github', 'x'], ['chapters/Definitions', 'a/b']]) {
+    const r = await call(importEp, { body: { action: 'start', book: BOOK.slug, name: 'Concept.docx', parts: receipts, folder, chapterName } });
+    assert.equal(r.statusCode, 400, `${folder} ${chapterName}`);
+  }
 });
 
 test('import: a failed conversion is reported in the author\'s words', async () => {

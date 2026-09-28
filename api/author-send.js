@@ -11,6 +11,8 @@
  *     import?: <id>,                  a finished import (api/author-import.js): its
  *                                     staged files and deletions are sent from the
  *                                     private requests repo, never via the browser
+ *     replace?: true,                 required when the import replaces a chapter
+ *                                     already in drafts (the app's second tick)
  *     suggestion?: <number>,          after the commit: thank the reader with a link
  *                                     to it, and close the suggestion
  *     message?: string                one line; a default is made from what is sent
@@ -28,7 +30,7 @@ import {
   ghJson, isAuthorPath, limits, wrap,
 } from '../lib/author.mjs';
 import { asString, isJsonContentType, parseBody, send } from '../lib/common.mjs';
-import { checkOwner, checkedResult, readImport } from '../lib/author-import.mjs';
+import { checkOwner, checkedResult, readImport, stagedAt } from '../lib/author-import.mjs';
 import { ACCEPTED, NEEDS_TRIAGE, checkReply, thanksWithChange } from '../lib/author-console.mjs';
 import { suggestion as readSuggestion } from '../lib/author-console-reads.mjs';
 
@@ -83,7 +85,7 @@ async function importWrites(book, identity, id, left, tag, used) {
   if (!result.ok) throw new Refusal(409, 'import failed', result.error || 'That import could not be converted.');
   const writes = [];
   for (const w of result.writes) {
-    const bytes = await blobBytes(REQUESTS_BOOK.content.repo, imp.files.get(w.staged).sha, req.token, left);
+    const bytes = await blobBytes(REQUESTS_BOOK.content.repo, imp.files.get(stagedAt(w.staged)).sha, req.token, left);
     writes.push({ path: w.path, bytes });
   }
   return { result, writes, deletes: result.deletes ?? [] };
@@ -165,6 +167,10 @@ export default wrap(async (req, res) => {
       importResult = imp.result;
       if (importResult.base !== data.base) {
         throw new Refusal(409, 'import base', 'That import was converted against an earlier drafts area. Convert it again.');
+      }
+      // As the desktop app: replacing a chapter already in drafts needs its own tick.
+      if (importResult.chapter.new === false && body.replace !== true) {
+        throw new Refusal(409, 'replace not confirmed', `A chapter called ${importResult.chapter.path} is already in the drafts area. Tick the box to say it should be replaced. Nothing was sent.`);
       }
       writes = [...imp.writes, ...writes];
       deletes = [...imp.deletes, ...deletes];
