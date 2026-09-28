@@ -84,11 +84,21 @@ const isPartRateLimited = createRateLimiter(3 * MAX_PARTS + 6, 60 * 60 * 1000);
 const slugify = (s) =>
   s.toLowerCase().normalize('NFKD').replace(/\p{M}/gu, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 36).replace(/-+$/, '');
 
+/** The label of each platform page directly under book_parent ("author" for the author site). */
+function pageLabels(registry) {
+  const parent = registry.platform?.portal?.book_parent;
+  if (!parent) return [];
+  return (registry.platform?.pages ?? [])
+    .map((p) => (typeof p?.domain === 'string' && p.domain.endsWith(`.${parent}`) ? p.domain.slice(0, -parent.length - 1) : ''))
+    .filter((label) => label && !label.includes('.'));
+}
+
 /** A free slug to propose. The platform owner can change it before approving. */
 export function proposeSlug(title, registry = REGISTRY) {
   const taken = new Set(registry.books.map((b) => b.slug));
+  const reserved = new Set([...RESERVED_SLUGS, ...pageLabels(registry)]);
   let base = slugify(title);
-  if (base.length < 3 || RESERVED_SLUGS.has(base)) base = `book-${base}`.replace(/-+$/, '');
+  if (base.length < 3 || reserved.has(base)) base = `book-${base}`.replace(/-+$/, '');
   let slug = base;
   for (let n = 2; taken.has(slug); n++) slug = `${base}-${n}`;
   return slug;

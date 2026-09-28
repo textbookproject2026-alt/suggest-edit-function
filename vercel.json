@@ -12,6 +12,18 @@
     },
     "api/request-book.js": {
       "maxDuration": 60
+    },
+    "api/author-read.js": {
+      "maxDuration": 25
+    },
+    "api/author-send.js": {
+      "maxDuration": 60
+    },
+    "api/author-import.js": {
+      "maxDuration": 60
+    },
+    "api/author-act.js": {
+      "maxDuration": 30
     }
   }
 }

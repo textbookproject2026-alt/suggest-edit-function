@@ -1,9 +1,12 @@
 /**
- * GET /api/github-auth — "Sign in with GitHub" for the in-site editor.
+ * GET /api/github-auth — "Sign in with GitHub" for the in-site editor, and for
+ * the platform pages whose registry entry lists the `github-auth` service (the
+ * author site: platform.pages).
  *
- * Runs in a popup the editor opens. Two legs on one URL:
+ * Runs in a popup the page opens. Two legs on one URL:
  *
- *   ?origin=https://<book domain>   start: check the origin against the registry,
+ *   ?origin=https://<book domain>   start: check the origin against the registry
+ *     (or a platform page's)        (a live book, or a platform page with github-auth),
  *                                   set a nonce cookie, redirect to GitHub's consent
  *                                   page with a signed `state` carrying the origin.
  *   ?code=…&state=…                 callback: check state + nonce, exchange the code,
@@ -22,11 +25,26 @@
  */
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import BUNDLE from '../registry/bundled.mjs';
-import { validateRegistry, createResolver } from '../lib/registry.mjs';
+import { validateRegistry, createResolver, createPageResolver } from '../lib/registry.mjs';
 import { GITHUB_API, GITHUB_HEADERS, resolveBook } from '../lib/common.mjs';
 import { issueIdentity, readIdentitySecret, sign, verify } from '../lib/identity.mjs';
 
-const RESOLVER = createResolver(validateRegistry(BUNDLE.registry));
+const REGISTRY = validateRegistry(BUNDLE.registry);
+const RESOLVER = createResolver(REGISTRY);
+const PAGES = createPageResolver(REGISTRY, 'github-auth');
+
+/**
+ * A book's origin, or a platform page's that may sign people in. The identity token
+ * is bound to whichever it is, so one issued to a book is useless on the author site
+ * and the other way round.
+ */
+function resolveOrigin(origin) {
+  const book = resolveBook(RESOLVER, origin);
+  if (book.ok) return book;
+  const page = PAGES.resolve(origin);
+  if (page.ok) return { ok: true, origin: page.origin };
+  return book;
+}
 const CLIENT_ID = (process.env.GITHUB_OAUTH_CLIENT_ID ?? '').trim();
 const CLIENT_SECRET = (process.env.GITHUB_OAUTH_CLIENT_SECRET ?? '').trim();
 const SECRET = readIdentitySecret(process.env);
@@ -106,7 +124,7 @@ async function timedFetch(url, init) {
 }
 
 function start(req, res, origin) {
-  const resolved = resolveBook(RESOLVER, origin);
+  const resolved = resolveOrigin(origin);
   if (!resolved.ok) {
     console.warn(`github-auth: ${resolved.log}`);
     page(res, 403, { text: 'This sign-in link is not for a book on this platform.' });
@@ -144,8 +162,9 @@ async function callback(req, res, params) {
     return;
   }
   const origin = state.o;
-  // Still a live book? (It was when the state was issued; the registry may have moved on.)
-  if (!resolveBook(RESOLVER, origin).ok) {
+  // Still a live book or platform page? (It was when the state was issued; the
+  // registry may have moved on.)
+  if (!resolveOrigin(origin).ok) {
     page(res, 403, { text: 'This book no longer accepts sign-ins.' });
     return;
   }

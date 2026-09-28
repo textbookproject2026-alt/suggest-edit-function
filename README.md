@@ -12,11 +12,20 @@ Zero dependencies — Node 22 with built-in `fetch` and `node:crypto`, plain ES 
 ```
 api/suggest-edit.js            suggest an edit: reader text -> issue
 api/propose-edit.js            the in-site editor: reader edit -> PR into drafts
-api/github-auth.js             "Sign in with GitHub" popup for the editor
+api/github-auth.js             "Sign in with GitHub" popup for the editor and the author site
+api/request-book.js            the portal's "Publish your textbook here" form
+api/author-read.js             author site: books, drafts tree and files, the console's lists
+api/author-send.js             author site: the one send path, a commit on drafts
+api/author-import.js           author site: Word upload parts, start, status (private staging)
+api/author-act.js              author site: suggestions, draft changes, going live
 lib/common.mjs                 what the endpoints share (fetch, credential, limiter, helpers)
 lib/identity.mjs               signed identity tokens (sign-in without keeping GitHub tokens)
 lib/registry.mjs               registry validation and Origin -> book resolution
 lib/github-app.mjs             App JWT (RS256 via node:crypto) and installation tokens
+lib/author.mjs                 author site: who may, paths, the App, the drafts commit
+lib/author-import.mjs          author site: the import staging layout and part receipts
+lib/author-console.mjs         author site: the console's wording (from the desktop app)
+lib/author-console-reads.mjs   author site: suggestion and publish reads shared by two endpoints
 registry/bundled.mjs           GENERATED registry snapshot, pinned to a registry commit
 scripts/bundle-registry.mjs    writes registry/bundled.mjs (the Vercel build step)
 test/assertions.test.mjs       abuse-test assertion suite
@@ -24,6 +33,9 @@ test/registry.test.mjs         book resolution
 test/github-app.test.mjs       App credential path, token exchange stubbed
 test/harness.mjs               drives the real handler with fetch stubbed
 test/propose-edit.test.mjs     propose-edit and github-auth against an in-memory GitHub
+test/request-book.test.mjs     request-book against an in-memory GitHub
+test/author.test.mjs           the author endpoints against test/fake-github.mjs
+test/fake-github.mjs           an in-memory GitHub with real git object ids
 vercel.json                    maxDuration only
 package.json                   pins Node 22 via engines; test and build scripts
 ```
@@ -148,6 +160,63 @@ below).
   `textbookproject2026-alt/book-requests`.
 - The App must be installed on that repo. Tokens are downscoped to it, with
   `issues` + `contents` write.
+
+## The author site (`/api/author-*`)
+
+The back end of the author site (`author.confused4now.org`, repo `author-site`), which
+replaced the desktop Authoring Assistant. Each file's header comment has its contract.
+
+**Who may.** Every request is checked afresh, from three things only:
+
+1. The `Origin` is a platform page whose registry entry (`platform.pages`) lists
+   `author-api`: the author site's domain, or its Pages project's `*.pages.dev`
+   previews. Anything else gets 403 with no CORS headers.
+2. `Authorization: Bearer <identity>`, an identity token that `github-auth` issued **to
+   that same origin** (the author site is a `github-auth` page in the registry, so the
+   popup works there with no code change). Otherwise 401.
+3. The login is in the target book's `authors` (registry), compared case-insensitively,
+   and the book isn't retired. Otherwise 403, before GitHub is asked anything.
+
+Repository collaborator status plays no part, and nobody's GitHub token is kept.
+
+**Who writes.** The GitHub App, and only the App: the `BOT_TOKEN` fallback is refused
+here (502), since it would put an author's work under another account. Every request
+logs `credential=app for <repo>`. Commits on drafts have the author's noreply address
+as author and `textbook-suggest-edit[bot]` as committer, with `Sent by @login via the
+author site.` in the message. Every reply, close note, merge message and publish
+description says `by @login via the author site`.
+
+**What it may touch.** `chapters/…`, `assets/…`, and exactly `index.md`, `glossary.md`
+and `chapter-sources.json`. No traversal, empty or dot segments, backslashes, control
+characters or non-NFC names. A send naming anything else is refused whole.
+
+**The one send path** (`author-send`): one commit whose parent is the drafts commit the
+author worked from (`base`), then the branch moved without force. If drafts isn't at
+`base` (before, or by the time the ref moves) nothing is written, and 409 carries what
+moved (commits and file patches) for the site's conflict view. Files already exactly
+as sent are left out. The same path sends a Word import (its staged files are copied
+from the private requests repo, never through the browser) and an accepted suggestion
+(then the reader is thanked with the commit's link and the suggestion closed).
+
+**Word import** (`author-import`): parts as request-book's (2.5 MB each, 20 MB in all),
+stored as blobs in the **private** requests repo; each part is answered with a receipt
+signed for that login, and only receipts are accepted when the import starts, so no one
+can name another manuscript's blob. Each import is its own orphan branch
+`author-imports/<id>` in the requests repo (`request.json` + `source.docx`), converted
+by book-requests' `import-chapter` workflow, which writes `result.json` and `out/…`
+there (layout in `lib/author-import.mjs`). Only the author who started an import can
+read, re-convert or send it.
+
+**Limits** (per login, per instance, best-effort as below): 600 reads, 60 writes, 20
+import starts and 3 imports' worth of parts per hour.
+
+- `REQUESTS_REPO` (optional): as request-book.
+- `AUTHOR_BOT_LOGIN`, `AUTHOR_BOT_ID` (optional): the committer account, default
+  `textbook-suggest-edit[bot]`, `329478423`.
+- The App must be installed on each book's repo and on the requests repo, with
+  **Contents**, **Issues** and **Pull requests** read and write (as for the editor).
+  Merging to a book's live branch needs no bypass while live branches are unprotected;
+  if one is ever protected, the App must be allowed to merge there.
 
 ## Behaviour notes
 
