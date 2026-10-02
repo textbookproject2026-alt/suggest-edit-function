@@ -30,8 +30,9 @@
  * The book comes from the Origin, against the registry, exactly as suggest-edit.
  * Signed in, the commit's author is the reader's GitHub account (its noreply
  * address), so the contribution counts on their profile and the contributors page.
- * Anonymous, the App is the author and the reader's name and masked email are in
- * the PR body only, never in git history.
+ * Anonymous, the App is the author, the reader's name and masked email are in the
+ * PR body, and the name alone (never the email) is in the commit as a
+ * `Proposed-by:` trailer, which the book's Contributors page and page history read.
  *
  * Needs the App's Contents and Pull requests permissions (README, "The App").
  */
@@ -187,6 +188,10 @@ export function lineDiff(before, after) {
   return text.length > MAX_ISSUE_DIFF ? `${text.slice(0, MAX_ISSUE_DIFF)}\n… (truncated)` : text;
 }
 
+/** One line, no control characters, at most 80 characters: safe as a git trailer value. */
+export const trailerValue = (name) =>
+  String(name).replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+
 function proposer(data) {
   return data.identity
     ? `@${data.identity.login} (signed in with GitHub)`
@@ -315,6 +320,9 @@ async function openPullRequest(book, token, left, current, newText, data, tag) {
       data.title,
       data.description,
       data.identity ? '' : 'Proposed by a reader with the in-site editor.',
+      // The name they gave, as a trailer, so the book's build can credit it on the
+      // Contributors page and in page history without asking GitHub.
+      data.identity ? '' : `Proposed-by: ${trailerValue(data.name)}`,
     ].filter(Boolean).join('\n\n');
     const put = await gh(`/repos/${repo}/contents/${encodePath(data.path)}`, token, left, {
       method: 'PUT',
