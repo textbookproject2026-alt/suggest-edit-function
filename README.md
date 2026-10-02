@@ -148,6 +148,21 @@ GitHub-style editor on the book's own page. This is its back end.
 
 ---
 
+## Page history (`/api/page-revision`)
+
+The book sites' **History** panel (quartz-edition-extras' edit-on-github). The list of a
+page's revisions is built into the site by quartz-book from `git log --follow`; this
+endpoint serves one revision when a reader opens it:
+`GET /api/page-revision?book=<slug>&sha=<commit>&path=<file>` → the file before and
+after, the page as it was (rendered by GitHub's markdown API), and, for an anonymous
+in-site proposal, the name its pull request gives. The header comment has the contract.
+
+- Public: no sign-in, `Access-Control-Allow-Origin: *`. Registered, non-retired books
+  only; the commit must be on the book's live branch, and the file one it changed.
+- Reads as the App (contents and pull requests read). A 200 is cached at the edge for a
+  year (a commit never changes); refusals for 5 minutes. 120 uncached requests per hour
+  per IP (per instance, as everywhere here).
+
 ## Book requests (`/api/request-book`)
 
 The portal's *Publish your textbook here* form. Accepted only from the portal
