@@ -18,12 +18,15 @@ api/author-read.js             author site: books, drafts tree and files, the co
 api/author-send.js             author site: the one send path, a commit on drafts
 api/author-import.js           author site: Word upload parts, start, status (private staging)
 api/author-act.js              author site: suggestions, draft changes, going live
+api/author-people.js           author site: a book's People panel (authors, pending changes)
+api/author-people-change.js    author site: invite or remove an author (a registry PR)
 lib/common.mjs                 what the endpoints share (fetch, credential, limiter, helpers)
 lib/identity.mjs               signed identity tokens (sign-in without keeping GitHub tokens)
 lib/registry.mjs               registry validation and Origin -> book resolution
 lib/github-app.mjs             App JWT (RS256 via node:crypto) and installation tokens
 lib/author.mjs                 author site: who may, paths, the App, the drafts commit
 lib/author-import.mjs          author site: the import staging layout and part receipts
+lib/author-people.mjs          author site: authors changed by registry pull request
 lib/author-console.mjs         author site: the console's wording (from the desktop app)
 lib/author-console-reads.mjs   author site: suggestion and publish reads shared by two endpoints
 registry/bundled.mjs           GENERATED registry snapshot, pinned to a registry commit
@@ -207,12 +210,29 @@ by book-requests' `import-chapter` workflow, which writes `result.json` and `out
 there (layout in `lib/author-import.mjs`). Only the author who started an import can
 read, re-convert or send it.
 
-**Limits** (per login, per instance, best-effort as below): 600 reads, 60 writes, 20
-import starts and 3 imports' worth of parts per hour.
+**People** (`author-people`, `author-people-change`): any of a book's authors may invite
+another GitHub account or remove one. A change is a pull request on
+`textbook-registry` that rewrites only that book's `authors` line, opened by the App
+(branch `people/<slug>/<add|remove>-<login>-<ms>`, commit authored by the author) with
+**auto-merge** on, so it merges once `registry` and `github-facts` are green, the
+registry's rule. An invitation @-mentions the invitee (their notification) with a line
+to sign in at the author site; both say `by @login via the author site`. Refused: an
+account that doesn't exist or isn't a person, one already listed (any case), removing
+the platform owner (`textbookproject2026-alt`, on every book) or the last author, and a
+second change while one for the book is still open. Access changes only when this
+function runs a registry that includes the merge: until `compare(<merge>...<BUNDLE.sha>)`
+shows it (`X-Registry-Version`), the panel lists the change as pending.
+
+**Limits** (per login, per instance, best-effort as below): 600 reads, 60 writes, 10
+people changes, 20 import starts and 3 imports' worth of parts per hour.
 
 - `REQUESTS_REPO` (optional): as request-book.
 - `AUTHOR_BOT_LOGIN`, `AUTHOR_BOT_ID` (optional): the committer account, default
   `textbook-suggest-edit[bot]`, `329478423`.
+- People changes need the App installed on **`textbook-registry`** too (Contents and
+  Pull requests read and write), and **Allow auto-merge** switched on in that
+  repository's settings. Without auto-merge the pull request is still opened, and the
+  author is told the technical contact merges it.
 - The App must be installed on each book's repo and on the requests repo, with
   **Contents**, **Issues** and **Pull requests** read and write (as for the editor).
   Merging to a book's live branch needs no bypass while live branches are unprotected;

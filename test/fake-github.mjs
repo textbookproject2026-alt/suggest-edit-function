@@ -13,7 +13,7 @@ const json = (status, body) => ({ ok: status < 300, status, json: async () => bo
 
 export function createFakeGitHub() {
   const repos = new Map();
-  const state = { calls: [], tokenRequests: [], nextNumber: 100, clock: Date.parse('2026-09-28T10:00:00Z'), hooks: {} };
+  const state = { calls: [], tokenRequests: [], nextNumber: 100, clock: Date.parse('2026-09-28T10:00:00Z'), hooks: {}, users: new Map(), autoMerge: [] };
 
   function repo(full) {
     const key = full.toLowerCase();
@@ -132,6 +132,15 @@ export function createFakeGitHub() {
       const r = [...repos.values()].find((x) => x.full.split('/')[1] === name) ?? { full: `unknown/${name}` };
       return json(201, { token: `ghs_${name}`, expires_at: new Date(Date.now() + 3600_000).toISOString(), permissions: body.permissions, repositories: [{ full_name: r.full }] });
     }
+    if ((m = /^\/users\/([^/]+)$/.exec(u.pathname)) && method === 'GET') {
+      const user = state.users.get(decodeURIComponent(m[1]).toLowerCase());
+      return user ? json(200, user) : json(404, { message: 'Not Found' });
+    }
+    if (u.pathname === '/graphql' && method === 'POST') {
+      // Only enablePullRequestAutoMerge: remember which pull request, and how.
+      state.autoMerge.push(body.variables);
+      return json(200, { data: { enablePullRequestAutoMerge: { pullRequest: { autoMergeRequest: { mergeMethod: body.variables.method } } } } });
+    }
     if (!(m = /^\/repos\/([^/]+\/[^/]+)(\/.*)?$/.exec(u.pathname))) throw new Error(`fake github: unexpected ${method} ${url}`);
     const r = repo(decodeURIComponent(m[1]));
     const rest = m[2] ?? '';
@@ -212,9 +221,12 @@ export function createFakeGitHub() {
     }
     if ((m = /^\/compare\/(.+)\.\.\.(.+)$/.exec(rest))) {
       const [a, b] = [decodeURIComponent(m[1]), decodeURIComponent(m[2])].map((x) => r.refs.get(x) ?? x);
+      if (!r.commits.has(a) || !r.commits.has(b)) return json(404, { message: 'Not Found' });
       const behind = new Set(ancestors(r, a));
       const commits = ancestors(r, b).filter((id) => !behind.has(id)).reverse();
-      return json(200, { ahead_by: commits.length, commits: commits.map((id) => commitJson(r, id)), files: diff(r, a, b) });
+      const ahead = new Set(ancestors(r, b));
+      const behindBy = ancestors(r, a).filter((id) => !ahead.has(id)).length;
+      return json(200, { ahead_by: commits.length, behind_by: behindBy, status: behindBy ? (commits.length ? 'diverged' : 'behind') : commits.length ? 'ahead' : 'identical', commits: commits.map((id) => commitJson(r, id)), files: diff(r, a, b) });
     }
 
     // --- issues
@@ -256,7 +268,7 @@ export function createFakeGitHub() {
     // --- pulls
     if (rest === '/pulls' && method === 'GET') {
       const head = q.get('head');
-      const list = [...r.pulls.values()].filter((p) => p.state === 'open'
+      const list = [...r.pulls.values()].filter((p) => (q.get('state') === 'all' || p.state === 'open')
         && (!q.get('base') || p.base.ref === q.get('base'))
         && (!head || `${r.full.split('/')[0]}:${p.head.ref}` === head)).reverse();
       return json(200, list);
@@ -264,6 +276,7 @@ export function createFakeGitHub() {
     if (rest === '/pulls' && method === 'POST') {
       const number = addPull(r.full, { head: body.head, base: body.base, title: body.title, user: 'textbook-suggest-edit[bot]' });
       r.pulls.get(number).body = body.body;
+      r.pulls.get(number).node_id = `PR_${number}`;
       return json(201, r.pulls.get(number));
     }
     if ((m = /^\/pulls\/(\d+)$/.exec(rest))) {
@@ -288,6 +301,8 @@ export function createFakeGitHub() {
       r.refs.set(p.base.ref, id);
       p.state = 'closed';
       p.merged = true;
+      p.merge_commit_sha = id;
+      p.merged_at = tick();
       p.mergeBody = body;
       return json(200, { merged: true, sha: id });
     }
