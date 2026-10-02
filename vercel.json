@@ -33,6 +33,9 @@
     },
     "api/author-people-change.js": {
       "maxDuration": 30
+    },
+    "api/page-revision.js": {
+      "maxDuration": 25
     }
   }
 }
