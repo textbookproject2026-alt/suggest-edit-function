@@ -20,6 +20,7 @@ api/author-import.js           author site: Word upload parts, start, status (pr
 api/author-act.js              author site: suggestions, draft changes, going live
 api/author-people.js           author site: a book's People panel (authors, pending changes)
 api/author-people-change.js    author site: invite or remove an author (a registry PR)
+api/author-history.js          author site: drafts' revision history, one revision's diff and text
 lib/common.mjs                 what the endpoints share (fetch, credential, limiter, helpers)
 lib/identity.mjs               signed identity tokens (sign-in without keeping GitHub tokens)
 lib/registry.mjs               registry validation and Origin -> book resolution
@@ -209,6 +210,13 @@ can name another manuscript's blob. Each import is its own orphan branch
 by book-requests' `import-chapter` workflow, which writes `result.json` and `out/…`
 there (layout in `lib/author-import.mjs`). Only the author who started an import can
 read, re-convert or send it.
+
+**History** (`author-history`): the commits on drafts, 30 a page, each marked live or
+still waiting (from `compare live...drafts`), optionally only those touching one
+file; and one revision's author files with patches, plus a file's text at the commit
+and at its parent, for the site's Changes view and Restore (which is an ordinary
+`author-send`, never a revert). Read as the App so authors don't share GitHub's
+unauthenticated per-IP limit.
 
 **People** (`author-people`, `author-people-change`): any of a book's authors may invite
 another GitHub account or remove one. A change is a pull request on

@@ -28,6 +28,9 @@
     "api/author-people.js": {
       "maxDuration": 25
     },
+    "api/author-history.js": {
+      "maxDuration": 25
+    },
     "api/author-people-change.js": {
       "maxDuration": 30
     }

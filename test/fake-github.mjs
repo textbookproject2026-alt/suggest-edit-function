@@ -217,7 +217,15 @@ export function createFakeGitHub() {
         if (since && c.date < since) continue;
         out.push(commitJson(r, id));
       }
-      return json(200, out.slice(0, Number(q.get('per_page') ?? 30)));
+      const per = Number(q.get('per_page') ?? 30);
+      const page = Number(q.get('page') ?? 1);
+      return json(200, out.slice((page - 1) * per, page * per));
+    }
+    if ((m = /^\/commits\/([0-9a-f]{40})$/.exec(rest)) && method === 'GET') {
+      const c = r.commits.get(m[1]);
+      if (!c) return json(404, { message: 'Not Found' });
+      const parent = c.parents[0];
+      return json(200, { ...commitJson(r, m[1]), parents: c.parents.map((sha) => ({ sha })), files: parent ? diff(r, parent, m[1]) : [] });
     }
     if ((m = /^\/compare\/(.+)\.\.\.(.+)$/.exec(rest))) {
       const [a, b] = [decodeURIComponent(m[1]), decodeURIComponent(m[2])].map((x) => r.refs.get(x) ?? x);
