@@ -24,6 +24,12 @@
     },
     "api/author-act.js": {
       "maxDuration": 30
+    },
+    "api/author-people.js": {
+      "maxDuration": 25
+    },
+    "api/author-people-change.js": {
+      "maxDuration": 30
     }
   }
 }
