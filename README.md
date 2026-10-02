@@ -14,13 +14,14 @@ api/suggest-edit.js            suggest an edit: reader text -> issue
 api/propose-edit.js            the in-site editor: reader edit -> PR into drafts
 api/github-auth.js             "Sign in with GitHub" popup for the editor and the author site
 api/request-book.js            the portal's "Publish your textbook here" form
-api/author-read.js             author site: books, drafts tree and files, the console's lists
-api/author-send.js             author site: the one send path, a commit on drafts
-api/author-import.js           author site: Word upload parts, start, status (private staging)
-api/author-act.js              author site: suggestions, draft changes, going live
-api/author-people.js           author site: a book's People panel (authors, pending changes)
-api/author-people-change.js    author site: invite or remove an author (a registry PR)
-api/author-history.js          author site: drafts' revision history, one revision's diff and text
+api/author.js                  every /api/author-* URL, one function (vercel.json rewrites)
+author/author-read.js             author site: books, drafts tree and files, the console's lists
+author/author-send.js             author site: the one send path, a commit on drafts
+author/author-import.js           author site: Word upload parts, start, status (private staging)
+author/author-act.js              author site: suggestions, draft changes, going live
+author/author-people.js           author site: a book's People panel (authors, pending changes)
+author/author-people-change.js    author site: invite or remove an author (a registry PR)
+author/author-history.js          author site: drafts' revision history, one revision's diff and text
 lib/common.mjs                 what the endpoints share (fetch, credential, limiter, helpers)
 lib/identity.mjs               signed identity tokens (sign-in without keeping GitHub tokens)
 lib/registry.mjs               registry validation and Origin -> book resolution
