@@ -115,6 +115,18 @@ test('refusals: not on the live branch, a file the commit did not change, unknow
   assert.equal((await get({}, { method: 'OPTIONS' })).statusCode, 204);
 });
 
+test('names in one call: live-branch proposals only, cached a day, bounded', async () => {
+  const res = await get({ book: BOOK.slug, shas: [v2, v3, draftsOnly, v2].join(',') });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.payload.names, { [v2]: 'Jo Reader', [v3]: null, [draftsOnly]: null });
+  assert.match(res.headers['cache-control'], /s-maxage=86400/);
+  assert.equal(res.headers['access-control-allow-origin'], '*');
+  assert.equal((await get({ book: BOOK.slug, shas: '' })).statusCode, 400);
+  assert.equal((await get({ book: BOOK.slug, shas: `${v2},nope` })).statusCode, 400);
+  assert.equal((await get({ book: BOOK.slug, shas: Array.from({ length: 31 }, (_, i) => i.toString(16).padStart(40, 'a')).join(',') })).statusCode, 400);
+  assert.equal((await get({ book: 'no-such-book', shas: v2 })).statusCode, 404);
+});
+
 test('rate-limited per IP', async () => {
   let last;
   for (let i = 0; i < 121; i++) last = await get({ book: BOOK.slug, sha: 'bad' }, { from: '10.99.0.1' });

@@ -135,7 +135,9 @@ GitHub-style editor on the book's own page. This is its back end.
   filed as an issue with a diff and the answer is `201 { issueUrl, fallback: true }`.
   Nothing a reader types is lost.
 - **Attribution.** Anonymous: the App authors the commit; the reader's name and masked
-  email appear in the PR body only, never in git history. Signed in: the commit's author
+  email appear in the PR body, and the name alone (never the email) ends the commit
+  message as a `Proposed-by:` trailer, which the book's Contributors page and page
+  history read without a GitHub token. Signed in: the commit's author
   is the reader's `<id>+<login>@users.noreply.github.com`, so it counts on their GitHub
   profile and the contributors page, and the PR body @-mentions them so they follow it.
 - **Sign-in** (`/api/github-auth`) is an OAuth App with **no scopes**. The popup comes back
@@ -157,6 +159,12 @@ endpoint serves one revision when a reader opens it:
 `GET /api/page-revision?book=<slug>&sha=<commit>&path=<file>` → the file before and
 after, the page as it was (rendered by GitHub's markdown API), and, for an anonymous
 in-site proposal, the name its pull request gives. The header comment has the contract.
+
+`GET /api/page-revision?book=<slug>&shas=<sha>,…` (at most 30) → `{ names: { <sha>:
+name | null } }`: the names anonymous proposals gave, for the "a reader" rows of a
+History list that was built before commits carried a `Proposed-by:` trailer. The panel
+asks once when the list opens. Live-branch commits only; cached at the edge for a day;
+one call counts once against the per-IP limit.
 
 - Public: no sign-in, `Access-Control-Allow-Origin: *`. Registered, non-retired books
   only; the commit must be on the book's live branch, and the file one it changed.

@@ -141,7 +141,8 @@ test('paragraph edit: branch from the drafts head, one commit, PR into drafts, l
   assert.match(gh.pulls[0].body, /\*\*Where:\*\* ¶2/);
   assert.match(gh.pulls[0].body, /`A Reader` \(`r\*\*\*@example\.org`\)/);
   assert.ok(!gh.pulls[0].body.includes('reader@example.org'), 'never the full email');
-  assert.ok(!gh.puts[0].message.includes('A Reader'), 'the name stays out of git history');
+  assert.match(gh.puts[0].message, /\n\nProposed-by: A Reader$/, 'the name, as a trailer, for the Contributors page');
+  assert.ok(!gh.puts[0].message.includes('example.org'), 'never the email in git history');
   assert.deepEqual(gh.labelled[0].labels, ['proposed-edit', 'needs-triage']);
 });
 

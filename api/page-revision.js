@@ -10,9 +10,17 @@
  *        html:         `after` rendered by GitHub's markdown API (the client sanitises
  *                      it again), Obsidian syntax reduced as the editor's Preview does
  *        proposer:     the name an anonymous in-site proposal gave, or null. The
- *                      book's build-time list says "a reader" for those commits
- *                      (git history never holds the name; the pull request does).
+ *                      book's build-time list has it from the commit's Proposed-by:
+ *                      trailer; commits from before the trailer say "a reader"
+ *                      (their names are only in the pull requests).
  *   -> 4xx/5xx { error, userMessage }
+ *
+ * GET /api/page-revision?book=<slug>&shas=<sha>,<sha>,… — the names anonymous
+ * proposals gave, for a History list's "a reader" rows, in one call (at most
+ * MAX_SHAS; one call counts once against the limit).
+ *   -> 200 { names: { <sha>: name | null } }   null: not on the live branch, or no
+ *        App-written proposal behind it. Cached at the edge for a day, not a year,
+ *        so a name a maintainer removes from a pull request goes too.
  *
  * Only registered, non-retired books, only commits on the book's live branch, and
  * only a file that commit changed. A commit never changes, so a 200 is cached at the
@@ -25,6 +33,7 @@ import { clientIp, createRateLimiter, isSafePath, send } from '../lib/common.mjs
 const appToken = appCredentials({ contents: 'read', pull_requests: 'read' });
 const isRateLimited = createRateLimiter(120, 60 * 60 * 1000);
 const MAX_NAME = 80;
+const MAX_SHAS = 30;
 
 /** Commits already shown to be on a live branch: "<repo>@<sha>". Never stops being true. */
 const onLive = new Set();
@@ -63,10 +72,27 @@ async function proposer(repo, sha, commit, token, left) {
   if (!isBot(a.name, a.email, commit.author)) return null;
   const coAuthors = [...String(commit.commit?.message ?? '').matchAll(/^Co-authored-by: (.*)$/gim)];
   if (coAuthors.some((m) => !/\[bot\]/i.test(m[1]))) return null;
+  return proposalName(repo, sha, token, left);
+}
+
+/** The name in the App-written pull request behind `sha`, or null. */
+async function proposalName(repo, sha, token, left) {
   const pulls = await ghJson(`/repos/${repo}/commits/${sha}/pulls?per_page=5`, token, left).catch(() => []);
   // Only a body the App wrote itself is read as a proposal.
   for (const pr of pulls ?? []) if (pr?.user?.type === 'Bot') return proposerName(pr.body);
   return null;
+}
+
+/** Whether `sha` is on the book's live branch (remembered once it is). */
+async function isOnLive(book, sha, token, left) {
+  const repo = book.content.repo;
+  if (onLive.has(`${repo}@${sha}`)) return true;
+  const live = encodePath(book.content.live_branch);
+  const cmp = await gh(`/repos/${repo}/compare/${sha}...${live}?per_page=1`, token, left, { allow: [404] });
+  const status = cmp.status === 404 ? 'missing' : (await cmp.json())?.status;
+  if (status !== 'ahead' && status !== 'identical') return false;
+  onLive.add(`${repo}@${sha}`);
+  return true;
 }
 
 function refuse(res, status, error, userMessage) {
@@ -88,30 +114,34 @@ export default wrap(async (req, res) => {
   const slug = q.get('book') ?? '';
   const sha = (q.get('sha') ?? '').toLowerCase();
   const path = q.get('path') ?? '';
+  const shas = q.has('shas') ? [...new Set((q.get('shas') ?? '').toLowerCase().split(','))] : null;
   const book = REGISTRY.books.find((b) => b.slug === slug && b.status !== 'retired');
   if (!book) return refuse(res, 404, 'unknown book', 'This book isn’t on the platform.');
-  if (!SHA_RE.test(sha) || !isSafePath(path)) return refuse(res, 400, 'bad request', 'That revision link isn’t valid.');
+  if (shas
+    ? !shas.length || shas.length > MAX_SHAS || !shas.every((s) => SHA_RE.test(s))
+    : !SHA_RE.test(sha) || !isSafePath(path)) return refuse(res, 400, 'bad request', 'That revision link isn’t valid.');
   if (isRateLimited(clientIp(req), Date.now())) {
     res.setHeader('Retry-After', '600');
     return refuse(res, 429, 'rate limit exceeded', 'Too many revisions opened from here in the last hour. Please try again later.');
   }
 
   const repo = book.content.repo;
-  const tag = `[page-revision ${slug} ${sha.slice(0, 7)} ${path}]`;
+  const tag = shas ? `[page-revision ${slug} names ×${shas.length}]` : `[page-revision ${slug} ${sha.slice(0, 7)} ${path}]`;
   const left = budget(20_000);
   let credential;
   try {
     credential = await appToken(book, tag);
     const { token } = credential;
 
-    if (!onLive.has(`${repo}@${sha}`)) {
-      const live = encodePath(book.content.live_branch);
-      const cmp = await gh(`/repos/${repo}/compare/${sha}...${live}?per_page=1`, token, left, { allow: [404] });
-      const status = cmp.status === 404 ? 'missing' : (await cmp.json())?.status;
-      if (status !== 'ahead' && status !== 'identical') {
-        return refuse(res, 404, 'not on the live branch', 'That revision isn’t part of the published book.');
-      }
-      onLive.add(`${repo}@${sha}`);
+    if (shas) {
+      const found = await Promise.all(shas.map(async (s) =>
+        (await isOnLive(book, s, token, left)) ? proposalName(repo, s, token, left) : null));
+      res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=86400');
+      return send(res, 200, { names: Object.fromEntries(shas.map((s, i) => [s, found[i]])) });
+    }
+
+    if (!(await isOnLive(book, sha, token, left))) {
+      return refuse(res, 404, 'not on the live branch', 'That revision isn’t part of the published book.');
     }
 
     // ponytail: a commit's first 300 files only (GitHub's page size); a page edit is one.
