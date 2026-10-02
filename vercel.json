@@ -13,29 +13,17 @@
     "api/request-book.js": {
       "maxDuration": 60
     },
-    "api/author-read.js": {
-      "maxDuration": 25
-    },
-    "api/author-send.js": {
-      "maxDuration": 60
-    },
-    "api/author-import.js": {
-      "maxDuration": 60
-    },
-    "api/author-act.js": {
-      "maxDuration": 30
-    },
-    "api/author-people.js": {
-      "maxDuration": 25
-    },
-    "api/author-history.js": {
-      "maxDuration": 25
-    },
-    "api/author-people-change.js": {
-      "maxDuration": 30
-    },
     "api/page-revision.js": {
       "maxDuration": 25
+    },
+    "api/author.js": {
+      "maxDuration": 60
     }
-  }
+  },
+  "rewrites": [
+    {
+      "source": "/api/author-:route",
+      "destination": "/api/author?route=:route"
+    }
+  ]
 }

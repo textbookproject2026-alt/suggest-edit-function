@@ -21,7 +21,7 @@ globalThis.fetch = gh.fetch;
 
 const { default: BUNDLE } = await import('../registry/bundled.mjs');
 const { issueIdentity } = await import('../lib/identity.mjs');
-const { default: history } = await import('../api/author-history.js');
+const { default: history } = await import('../author/author-history.js');
 
 const PAGE = BUNDLE.registry.platform.pages.find((p) => p.services.includes('author-api'));
 const ORIGIN = `https://${PAGE.domain}`;

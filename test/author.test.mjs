@@ -29,10 +29,10 @@ const { default: BUNDLE } = await import('../registry/bundled.mjs');
 const { issueIdentity, sign } = await import('../lib/identity.mjs');
 const { isAuthorPath } = await import('../lib/author.mjs');
 const { partReceipt } = await import('../lib/author-import.mjs');
-const { default: read } = await import('../api/author-read.js');
-const { default: sendEp } = await import('../api/author-send.js');
-const { default: importEp } = await import('../api/author-import.js');
-const { default: act } = await import('../api/author-act.js');
+const { default: read } = await import('../author/author-read.js');
+const { default: sendEp } = await import('../author/author-send.js');
+const { default: importEp } = await import('../author/author-import.js');
+const { default: act } = await import('../author/author-act.js');
 const { default: auth } = await import('../api/github-auth.js');
 const { proposeSlug } = await import('../api/request-book.js');
 const { validateRegistry, createPageResolver } = await import('../lib/registry.mjs');
@@ -637,7 +637,7 @@ test('with no App configured (BOT_TOKEN only), the author endpoints refuse rathe
   process.env.BOT_TOKEN = 'ghp_someone';
   let fresh;
   try {
-    fresh = (await import(`../api/author-read.js?bot=${Date.now()}`)).default;
+    fresh = (await import(`../author/author-read.js?bot=${Date.now()}`)).default;
   } finally {
     Object.assign(process.env, saved);
     delete process.env.BOT_TOKEN;

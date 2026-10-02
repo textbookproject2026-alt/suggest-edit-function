@@ -24,8 +24,8 @@ globalThis.fetch = gh.fetch;
 const { default: BUNDLE } = await import('../registry/bundled.mjs');
 const { issueIdentity } = await import('../lib/identity.mjs');
 const { withAuthors, PLATFORM_OWNER, REGISTRY_REPO } = await import('../lib/author-people.mjs');
-const { default: peopleEp } = await import('../api/author-people.js');
-const { default: changeEp } = await import('../api/author-people-change.js');
+const { default: peopleEp } = await import('../author/author-people.js');
+const { default: changeEp } = await import('../author/author-people-change.js');
 
 const PAGE = BUNDLE.registry.platform.pages.find((p) => p.services.includes('author-api'));
 const ORIGIN = `https://${PAGE.domain}`;
