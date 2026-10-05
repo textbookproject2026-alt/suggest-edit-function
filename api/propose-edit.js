@@ -195,7 +195,7 @@ export const trailerValue = (name) =>
 function proposer(data) {
   return data.identity
     ? `@${data.identity.login} (signed in with GitHub)`
-    : `${inlineCode(data.name)} (${inlineCode(maskEmail(data.email))})`;
+    : `${data.name ? inlineCode(data.name) : 'a reader'} (${inlineCode(maskEmail(data.email))})`;
 }
 
 function fenced(text, lang = 'text') {
@@ -289,7 +289,6 @@ function validate(body, origin) {
 
   const name = asString(body.name);
   const email = asString(body.email);
-  if (!name) return reject('validation: name missing', 'Please include your name.');
   if (name.length > MAX_NAME) return reject('validation: name too long', 'That name is too long — please shorten it.');
   if (!email) return reject('validation: email missing', 'Please include your email address.');
   if (email.length > MAX_EMAIL || !EMAIL_RE.test(email)) {
@@ -321,8 +320,9 @@ async function openPullRequest(book, token, left, current, newText, data, tag) {
       data.description,
       data.identity ? '' : 'Proposed by a reader with the in-site editor.',
       // The name they gave, as a trailer, so the book's build can credit it on the
-      // Contributors page and in page history without asking GitHub.
-      data.identity ? '' : `Proposed-by: ${trailerValue(data.name)}`,
+      // Contributors page and in page history without asking GitHub. No name, no
+      // trailer: "a reader" everywhere.
+      data.identity || !trailerValue(data.name) ? '' : `Proposed-by: ${trailerValue(data.name)}`,
     ].filter(Boolean).join('\n\n');
     const put = await gh(`/repos/${repo}/contents/${encodePath(data.path)}`, token, left, {
       method: 'PUT',
