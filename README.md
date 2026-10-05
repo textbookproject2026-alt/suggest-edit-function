@@ -134,9 +134,10 @@ GitHub-style editor on the book's own page. This is its back end.
   the paragraph no longer occurs exactly once), nothing is committed. Their change is
   filed as an issue with a diff and the answer is `201 { issueUrl, fallback: true }`.
   Nothing a reader types is lost.
-- **Attribution.** Anonymous: the App authors the commit; the reader's name and masked
-  email appear in the PR body, and the name alone (never the email) ends the commit
-  message as a `Proposed-by:` trailer, which the book's Contributors page and page
+- **Attribution.** Anonymous: the App authors the commit; the reader's name (optional;
+  the form says it's shown publicly in the page's history) and masked email appear in
+  the PR body, and the name alone (never the email) ends the commit message as a
+  `Proposed-by:` trailer (none when no name was given: "a reader" everywhere), which the book's Contributors page and page
   history read without a GitHub token. Signed in: the commit's author
   is the reader's `<id>+<login>@users.noreply.github.com`, so it counts on their GitHub
   profile and the contributors page, and the PR body @-mentions them so they follow it.

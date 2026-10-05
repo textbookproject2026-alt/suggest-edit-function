@@ -146,6 +146,14 @@ test('paragraph edit: branch from the drafts head, one commit, PR into drafts, l
   assert.deepEqual(gh.labelled[0].labels, ['proposed-edit', 'needs-triage']);
 });
 
+test('anonymous with no name: "a reader" in the PR, no trailer', async () => {
+  resetGitHub();
+  const r = await call({ body: { ...para(), name: '  ' } });
+  assert.equal(r.statusCode, 201);
+  assert.match(gh.pulls[0].body, /\*\*Proposed by:\*\* a reader \(`r\*\*\*@example\.org`\)/);
+  assert.ok(!gh.puts[0].message.includes('Proposed-by:'), 'no trailer without a name');
+});
+
 test('page edit keeps the file\'s CRLF line endings', async () => {
   resetGitHub({ crlf: true });
   const content = TEXT0.replace('Third.', 'Third, edited.');
@@ -233,7 +241,7 @@ test('no change, bad fields, and the honeypot', async () => {
   assert.equal(same.payload.userMessage, "You haven't changed anything yet.");
   for (const body of [
     para({ mode: 'other' }), para({ path: '../etc.md' }), para({ baseSha: 'zz' }), para({ startLine: -1 }),
-    para({ original: '' }), para({ name: '' }), para({ email: 'nope' }), para({ title: 'x'.repeat(201) }),
+    para({ original: '' }), para({ email: 'nope' }), para({ name: 'x'.repeat(201) }), para({ title: 'x'.repeat(201) }),
     { mode: 'page', path: PATH, baseSha: SHA0, content: 'x'.repeat(400_001), ...ANON },
   ]) {
     assert.equal((await call({ body })).statusCode, 400, JSON.stringify(body).slice(0, 80));
