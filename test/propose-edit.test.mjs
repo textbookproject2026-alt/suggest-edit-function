@@ -28,7 +28,7 @@ const TEXT0 = '---\ntitle: T\n---\n\nFirst paragraph here.\n\nSecond paragraph, 
 const gh = {};
 function resetGitHub({ text = TEXT0, sha = SHA0, crlf = false } = {}) {
   Object.assign(gh, {
-    text: crlf ? text.replace(/\n/g, '\r\n') : text, sha, refs: [], puts: [], pulls: [], issues: [],
+    text: crlf ? text.replace(/\n/g, '\r\n') : text, sha, commit: COMMIT, refs: [], puts: [], pulls: [], issues: [],
     deleted: [], labelled: [], putStatus: 200, prStatus: 201, calls: [],
   });
 }
@@ -46,7 +46,7 @@ globalThis.fetch = async (url, opts = {}) => {
   if (url.startsWith('https://api.github.com/applications/')) return { ok: true, status: 204 };
   if (!url.startsWith(api)) throw new Error(`unexpected ${method} ${url}`);
   const rest = url.slice(api.length);
-  if (method === 'GET' && rest === `/git/ref/heads/${BASE}`) return json(200, { object: { sha: COMMIT } });
+  if (method === 'GET' && rest === `/git/ref/heads/${BASE}`) return json(200, { object: { sha: gh.commit } });
   if (method === 'GET' && rest.startsWith(`/contents/${PATH}?ref=`)) {
     return json(200, { type: 'file', sha: gh.sha, encoding: 'base64', content: Buffer.from(gh.text).toString('base64') });
   }
@@ -212,6 +212,26 @@ test('anonymous proposals are off by default: 401, a pointer to sign-in or Sugge
   } finally {
     process.env.PROPOSE_EDIT_ANONYMOUS = 'on';
   }
+});
+
+test('the conflict check is the file\'s blob, not the drafts head: drafts moved (a sync, another page) but this file didn\'t', async () => {
+  for (const body of [
+    { mode: 'page', path: PATH, baseSha: SHA0, content: TEXT0.replace('Third.', 'Third, edited.'), title: 'Fix', ...ANON },
+    para(),
+  ]) {
+    resetGitHub();
+    gh.commit = 'd'.repeat(40); // drafts' head is not the one the editor loaded from
+    const r = await call({ body });
+    assert.equal(r.statusCode, 201, body.mode);
+    assert.ok(r.payload.prUrl, `${body.mode}: a pull request, not the issue fallback`);
+    assert.equal(gh.issues.length, 0);
+    assert.equal(gh.refs[0].sha, 'd'.repeat(40), 'branched from drafts as it is now');
+    assert.equal(gh.puts[0].sha, SHA0);
+  }
+  // And the same blob check does catch the file itself changing.
+  resetGitHub({ sha: 'e'.repeat(40) });
+  const moved = await call({ body: { mode: 'page', path: PATH, baseSha: SHA0, content: 'x', title: 'Fix', ...ANON } });
+  assert.equal(moved.payload.fallback, true);
 });
 
 // --- POST: conflicts fall back to an issue -------------------------------------------------
