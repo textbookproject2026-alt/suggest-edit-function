@@ -4,7 +4,7 @@
  * that list still on their way (lib/author-people.mjs).
  *
  *   -> 200 { authors: [login], owner, registry: <sha>, pending: [{ number, url, action,
- *            login, by, state: "open"|"merged", when }] }
+ *            login, by, state: "open"|"merged"|"failed", when, reasons? }] }
  *   -> 4xx/5xx { error, userMessage }
  */
 import { appCredentials, authorise, bookFor, budget, fail, limits, query, wrap } from '../lib/author.mjs';
