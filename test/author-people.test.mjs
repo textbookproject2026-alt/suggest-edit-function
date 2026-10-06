@@ -23,7 +23,7 @@ globalThis.fetch = gh.fetch;
 
 const { default: BUNDLE } = await import('../registry/bundled.mjs');
 const { issueIdentity } = await import('../lib/identity.mjs');
-const { withAuthors, PLATFORM_OWNER, REGISTRY_REPO } = await import('../lib/author-people.mjs');
+const { withAuthors, outcome, PLATFORM_OWNER, REGISTRY_REPO, STALLED_MS } = await import('../lib/author-people.mjs');
 const { default: peopleEp } = await import('../author/author-people.js');
 const { default: changeEp } = await import('../author/author-people-change.js');
 
@@ -157,6 +157,32 @@ test('auto-merge refused by GitHub: the pull request stands, and the author is t
   const r = await change('add', 'NewPerson');
   assert.equal(r.statusCode, 201);
   assert.match(r.payload.warning, /technical contact to merge it/);
+});
+
+test('a failed change shows as failed, with the registry\'s reasons, and the next change closes it', async () => {
+  resetRegistry();
+  // Made as the endpoint makes one (directly: the endpoint's per-login limit is spent by now).
+  gh.repo(REGISTRY_REPO).refs.set(`people/${SLUG}/add-NewPerson-1`, gh.repo(REGISTRY_REPO).refs.get('main'));
+  const pr = gh.repo(REGISTRY_REPO).pulls.get(gh.addPull(REGISTRY_REPO, { head: `people/${SLUG}/add-NewPerson-1`, base: 'main', title: 'add' }));
+  pr.body = 'Added by @textbookproject2026-alt via the author site.\n\n<!-- people-outcome -->\n**This change did not go through.** Nothing changed.\n- platform-test-book authors: there is no GitHub account called NewPerson';
+  const failed = (await list()).payload.pending;
+  assert.deepEqual(failed.map((c) => [c.state, c.reasons]), [['failed', ['platform-test-book authors: there is no GitHub account called NewPerson']]]);
+
+  // Not "in progress": the next change goes ahead, and the failed one is closed, saying why.
+  const next = await change('remove', 'BrandonAndCaroline');
+  assert.equal(next.statusCode, 201, JSON.stringify(next.payload));
+  assert.equal(pr.state, 'closed');
+  assert.match(pr.comments.at(-1), /didn't go through, and @BrandonAndCaroline has made another change/);
+  assert.deepEqual((await list()).payload.pending.map((c) => [c.number, c.state]), [[next.payload.number, 'open']]);
+});
+
+test('outcome: open, recorded failure, stalled past the hour, merged', () => {
+  const now = Date.parse('2026-10-06T12:00:00Z');
+  const at = (ms) => new Date(now - ms).toISOString();
+  assert.deepEqual(outcome({ created_at: at(60_000), body: 'x' }, now), { state: 'open' });
+  assert.deepEqual(outcome({ created_at: at(60_000), body: 'x\n<!-- people-outcome -->\nno list' }, now).reasons, ["the platform's checks refused it"]);
+  assert.equal(outcome({ created_at: at(STALLED_MS + 1), body: 'x' }, now).state, 'failed');
+  assert.deepEqual(outcome({ created_at: at(STALLED_MS + 1), merged_at: at(5), body: '' }, now), { state: 'merged' });
 });
 
 test('withAuthors rewrites one line in the file\'s own style, and refuses a book with no authors line', () => {
