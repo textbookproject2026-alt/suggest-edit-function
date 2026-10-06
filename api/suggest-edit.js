@@ -7,7 +7,11 @@
  * (registry/bundled.mjs); nothing about any book is hardcoded here.
  *
  * Contract (fixed by the live front-end — do not deviate):
- *   POST JSON { name, email, suggestion, reasoning, path, website }
+ *   POST JSON { name, suggestion, reasoning, path, website }
+ *
+ *   No email: the issue shows the name, and nothing else used an address. A body
+ *   that still carries `email` (a page built before 6 Oct 2026) is accepted, and
+ *   the email is dropped unread.
  *     -> 201 { issueUrl }
  *     -> 4xx/5xx { error, userMessage? }
  *
@@ -22,8 +26,8 @@
 import BUNDLE from '../registry/bundled.mjs';
 import { validateRegistry, createResolver } from '../lib/registry.mjs';
 import {
-  EMAIL_RE, GITHUB_API, asString, clientIp, corsHeaders, createCredentials, createRateLimiter, ensureLabels,
-  fence, fileUrl, githubFetch, inlineCode, isJsonContentType, isSafePath, maskEmail, parseBody,
+  GITHUB_API, asString, clientIp, corsHeaders, createCredentials, createRateLimiter, ensureLabels,
+  fence, fileUrl, githubFetch, inlineCode, isJsonContentType, isSafePath, parseBody,
   resolveBook as resolveBookWith, send,
 } from '../lib/common.mjs';
 
@@ -46,7 +50,6 @@ const LABEL_DEFAULTS = {
 const MAX_SUGGESTION = 5000;
 const MAX_REASONING = 5000;
 const MAX_NAME = 200;
-const MAX_EMAIL = 254;
 
 // Rate limit: 5 submissions per hour per IP.
 const RATE_LIMIT_MAX = 5;
@@ -82,7 +85,6 @@ const isRateLimited = createRateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
  */
 function validate(body) {
   const name = asString(body.name);
-  const email = asString(body.email);
   const suggestion = asString(body.suggestion);
   const reasoning = asString(body.reasoning);
   const path = asString(body.path);
@@ -92,11 +94,6 @@ function validate(body) {
   if (!name) return reject('validation: name missing', 'Please include your name.');
   if (name.length > MAX_NAME) {
     return reject('validation: name too long', 'That name is too long — please shorten it.');
-  }
-
-  if (!email) return reject('validation: email missing', 'Please include your email address.');
-  if (email.length > MAX_EMAIL || !EMAIL_RE.test(email)) {
-    return reject('validation: email malformed', 'That email address does not look right.');
   }
 
   if (!suggestion) {
@@ -123,14 +120,14 @@ function validate(body) {
     return reject('validation: path rejected', 'We could not tell which page this refers to.');
   }
 
-  return { ok: true, data: { name, email, suggestion, reasoning, path } };
+  return { ok: true, data: { name, suggestion, reasoning, path } };
 }
 
 // ---------------------------------------------------------------------------
 // Issue body
 // ---------------------------------------------------------------------------
 
-function buildIssueBody(book, { name, email, suggestion, reasoning, path }) {
+function buildIssueBody(book, { name, suggestion, reasoning, path }) {
   const f = fence(suggestion);
   const parts = [
     `**File:** [\`${path}\`](${fileUrl(book, path)})`,
@@ -151,7 +148,7 @@ function buildIssueBody(book, { name, email, suggestion, reasoning, path }) {
     '',
     '---',
     '',
-    `**Submitted by:** ${inlineCode(name)} (${inlineCode(maskEmail(email))})`,
+    `**Submitted by:** ${inlineCode(name)}`,
     '',
     '_submitted via the suggest-an-edit form_',
   );

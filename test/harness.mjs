@@ -129,7 +129,6 @@ export async function call({ method = 'POST', contentType = 'application/json',
 
 export const VALID = {
   name: 'Ada Lovelace',
-  email: 'ada@example.com',
   suggestion: 'Chapter 3 says "recieve"; it should be "receive".',
   reasoning: 'Spelling.',
   path: 'chapters/chapter-03.md',
