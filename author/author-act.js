@@ -37,7 +37,7 @@ import {
   describePublish, publishRequestBody, takenOn, thanksWithChange,
 } from '../lib/author-console.mjs';
 import {
-  acceptedAt, changesSince, compareDrafts, mergeability, openPublishRequest, suggestion,
+  acceptedAt, changesSince, compareDrafts, liveServes, mergeability, openPublishRequest, suggestion,
 } from '../lib/author-console-reads.mjs';
 
 const appToken = appCredentials({ contents: 'write', pull_requests: 'write', issues: 'write' });
@@ -170,7 +170,7 @@ async function openOrRefresh(book, token, left, identity, tag) {
       if (!pr) throw err;
     }
   }
-  const info = describePublish(pr, compare, await mergeability(book, pr.number, token, left, 4));
+  const info = describePublish(pr, compare, await mergeability(book, pr.number, token, left, 4), await liveServes(book));
   return { ...info, opened };
 }
 
