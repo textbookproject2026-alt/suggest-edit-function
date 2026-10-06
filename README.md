@@ -67,7 +67,6 @@ Fixed by the live front-end. Do not change either side alone.
 | Field        | Required | Notes                                                           |
 | ------------ | -------- | --------------------------------------------------------------- |
 | `name`       | yes      | ≤ 200 chars                                                     |
-| `email`      | yes      | shape-checked; **masked** in the issue (`a***@example.com`)      |
 | `suggestion` | yes      | ≤ 5000 chars                                                    |
 | `reasoning`  | no       | ≤ 5000 chars                                                    |
 | `path`       | yes      | repo-relative `.md` path, e.g. `chapters/03-methods.md`          |
@@ -84,7 +83,7 @@ Fixed by the live front-end. Do not change either side alone.
 **4xx / 5xx** — failure:
 
 ```json
-{ "error": "validation: email malformed", "userMessage": "That email address does not look right." }
+{ "error": "validation: name missing", "userMessage": "Please include your name." }
 ```
 
 - `error` is **log material**. It is deliberately free of internals — no stack traces,
@@ -283,8 +282,8 @@ Requiring JSON forces a preflight, so the origin allowlist is enforced by the br
 before the request is ever sent.
 
 **User content in the issue.** `suggestion` and `reasoning` go inside a fence whose
-backtick run is longer than any run in the content, and `name` plus the masked email
-go inside a code span (`inlineCode`). Nothing a reader types can become a heading, a
+backtick run is longer than any run in the content, and `name` goes inside a code
+span (`inlineCode`). No email is asked for or shown. Nothing a reader types can become a heading, a
 link, an image, or an `@mention` that notifies someone. See `TESTING.md`.
 
 **How a book is resolved.** Before anything else, preflight included, the `Origin`
@@ -513,7 +512,7 @@ curl -i -X OPTIONS "$URL" -H "Origin: https://ontology-for-social-research-a-cri
 curl -i -X POST "$URL" \
   -H 'Content-Type: application/json' \
   -H 'Origin: https://ontology-for-social-research-a-criti.confused4now.org' \
-  -d '{"name":"Ada","email":"ada@example.com","path":"chapters/01-intro.md",
+  -d '{"name":"Ada","path":"chapters/01-intro.md",
        "suggestion":"Typo in paragraph two: \"recieve\" -> \"receive\".",
        "reasoning":"Spelling.","website":""}'
 

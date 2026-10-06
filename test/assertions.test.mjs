@@ -124,18 +124,20 @@ test('newlines in the name cannot inject headings or extra markdown lines', asyn
   assert.equal(lines.length, 2, 'attribution must stay exactly two rendered lines');
   assert.ok(!block.includes('\n# '), 'no injected heading');
   assert.ok(!/!\[/.test(block.replace(/`[^`]*`/g, '')), 'no image outside a code span');
-  assert.match(lines[0], /^\*\*Submitted by:\*\* `[^`]*` \(`[^`]*`\)$/);
+  assert.match(lines[0], /^\*\*Submitted by:\*\* `[^`]*`$/);
 });
 
-test('markdown in the email domain cannot become a link', async () => {
-  // EMAIL_RE permits [ ] ( ) in the domain, so the masked address must be neutralised too.
-  const r = await call({ body: { ...VALID, email: 'a@[click](https:)x.com' } });
+test('a note shows the name only; an email from an older page is accepted and never shown', async () => {
+  const r = await call({ body: { ...VALID, email: 'ada@example.com' } });
   assert.equal(r.status, 201);
-  const line = submittedBy(r.issue.body);
-  assert.ok(line.includes('[click](https:)'), 'the masked address is still shown to the editor');
-  const outsideCode = line.replace(/`[^`]*`/g, '');
-  assert.ok(!outsideCode.includes(']('), 'no markdown link may survive outside a code span');
-  assert.ok(!outsideCode.includes('['), 'no bracket may survive outside a code span');
+  assert.equal(submittedBy(r.issue.body), '**Submitted by:** `Ada Lovelace`');
+  assert.ok(!r.issue.body.includes('example.com'), 'no part of the address reaches the issue');
+  assert.ok(!r.issue.body.includes('***'), 'no masked form either');
+  const without = await call({ body: { ...VALID } });
+  assert.equal(without.status, 201);
+  // An email that would once have been rejected is now simply ignored.
+  const odd = await call({ body: { ...VALID, email: 'not-an-email' } });
+  assert.equal(odd.status, 201);
 });
 
 test('a name made only of backticks still produces a well-formed code span', async () => {
@@ -178,7 +180,7 @@ test('an unbalanced paren in the path cannot truncate the file link', async () =
 // ---------------------------------------------------------------------------
 
 test('missing required fields are rejected and file nothing', async () => {
-  for (const field of ['name', 'email', 'suggestion', 'path']) {
+  for (const field of ['name', 'suggestion', 'path']) {
     const body = { ...VALID };
     delete body[field];
     const r = await call({ body });
@@ -197,24 +199,14 @@ test('reasoning is genuinely optional', async () => {
   assert.ok(!r.issue.body.includes('### Reasoning'));
 });
 
-test('malformed emails are rejected', async () => {
-  for (const email of ['not-an-email', 'a@b', 'a b@example.com', '@example.com', 'a@.com', 'a@example.']) {
-    const r = await call({ body: { ...VALID, email } });
-    assert.equal(r.status, 400, `${email} should be rejected`);
-    assert.equal(r.payload.error, 'validation: email malformed');
-    assert.equal(r.issue, null);
-  }
-});
-
 test('length caps hold for every free-text field', async () => {
   const cases = [
     ['name', 201, 'validation: name too long'],
-    ['email', 255, 'validation: email malformed'],
     ['suggestion', 5001, 'validation: suggestion too long'],
     ['reasoning', 5001, 'validation: reasoning too long'],
   ];
   for (const [field, len, expected] of cases) {
-    const filler = field === 'email' ? `${'a'.repeat(len - 12)}@example.com` : 'a'.repeat(len);
+    const filler = 'a'.repeat(len);
     const r = await call({ body: { ...VALID, [field]: filler } });
     assert.equal(r.status, 400, `oversized ${field}`);
     assert.equal(r.payload.error, expected);

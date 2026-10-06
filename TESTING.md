@@ -1,5 +1,10 @@
 # Abuse testing — `POST /api/suggest-edit`
 
+> **6 Oct 2026:** suggest-edit no longer takes an email. The form asks for none, the
+> issue shows the name only, and a body that still carries `email` is accepted and the
+> address dropped unread. The email sections below (5, the masked-email link, the 254
+> cap, `maskEmail`) record the earlier contract.
+
 Adversarial test pass against the **live** deployment
 `https://suggest-edit-function.vercel.app/api/suggest-edit`, plus the patches the
 findings justified.
