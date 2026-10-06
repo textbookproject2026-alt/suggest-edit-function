@@ -10,7 +10,9 @@
  *     deletes?: [path],
  *     import?: <id>,                  a finished import (api/author-import.js): its
  *                                     staged files and deletions are sent from the
- *                                     private requests repo, never via the browser
+ *                                     private requests repo, never via the browser;
+ *                                     a file also in `files` (the chapter, lint-fixed
+ *                                     by the author) is sent as `files` has it
  *     replace?: true,                 required when the import replaces a chapter
  *                                     already in drafts (the app's second tick)
  *     suggestion?: <number>,          after the commit: thank the reader with a link
@@ -172,7 +174,10 @@ export default wrap(async (req, res) => {
       if (importResult.chapter.new === false && body.replace !== true) {
         throw new Refusal(409, 'replace not confirmed', `A chapter called ${importResult.chapter.path} is already in the drafts area. Tick the box to say it should be replaced. Nothing was sent.`);
       }
-      writes = [...imp.writes, ...writes];
+      // A file sent with the import (the chapter, after the author fixed what the book's
+      // lint found in it) takes the place of the import's own copy of that file.
+      const sent = new Set(writes.map((w) => w.path));
+      writes = [...imp.writes.filter((w) => !sent.has(w.path)), ...writes];
       deletes = [...imp.deletes, ...deletes];
     }
     const s = data.suggestion === null ? null : await readSuggestion(book, data.suggestion, credential.token, left);

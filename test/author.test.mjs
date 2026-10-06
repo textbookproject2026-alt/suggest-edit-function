@@ -409,6 +409,18 @@ test('import: sent with the one send path — staged files copied from the priva
   assert.match(gh.repo(REPO).commits.get(head).message, /^Import chapters\/chapter-04\.md \(new chapter\)\n\nSent by @brandonandcaroline/);
 });
 
+test('import: the chapter as the author fixed it (lint) is sent in place of the converted copy; the rest of the import still goes', async () => {
+  resetBook();
+  const id = await startedImport();
+  finishImport(id, GOOD_RESULT, GOOD_STAGED);
+  const fixed = `${CH4}\n## Fixed by the author\n`;
+  const r = await call(sendEp, { body: { book: BOOK.slug, base: BASE, import: id, files: [{ path: 'chapters/chapter-04.md', text: fixed }] } });
+  assert.equal(r.statusCode, 201, JSON.stringify(r.payload));
+  const head = gh.repo(REPO).refs.get(DRAFTS);
+  assert.equal(gh.textAt(REPO, head, 'chapters/chapter-04.md'), fixed);
+  assert.match(gh.textAt(REPO, head, 'index.md'), /chapter-04\|Chapter 4/);
+});
+
 test('import: a result that writes outside the author paths is refused whole', async () => {
   resetBook();
   const id = await startedImport();
@@ -627,6 +639,44 @@ test('publishing: the tick box, the one request shown, a clean merge — then a 
   assert.equal(pr.mergeBody.commit_message, 'Published by @brandonandcaroline via the author site.');
   assert.match(pr.body, /\*\*Published by @brandonandcaroline via the author site\.\*\*/);
   assert.equal(gh.textAt(REPO, gh.repo(REPO).refs.get(LIVE), 'chapters/chapter-03.md'), NEW3);
+});
+
+test('publishing stops on the book\'s own lint, with the problems listed; its config is the book\'s; dead links are only a notice', async () => {
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, { 'chapters/chapter-03.md': `${NEW3}\n**Bold as a heading**\n\nText.\n` });
+  const prep = await call(act, { body: { book: BOOK.slug, action: 'publish-prepare' } });
+  const n = prep.payload.publish.number;
+  const pr = gh.repo(REPO).pulls.get(n);
+  pr.head.sha = gh.repo(REPO).refs.get(DRAFTS);
+  pr.comments.push(`<!-- link-check sha=${pr.head.sha} -->\nLinks that didn't work:\n- https://gone.example/x in chapters/chapter-03.md (404 Not Found)`);
+  const state = (await get('publish', { book: BOOK.slug })).payload.publish;
+  assert.equal(state.state, 'lint');
+  assert.equal(state.can_publish, false);
+  assert.deepEqual(state.lint.map((p) => [p.path, p.rule]), [['chapters/chapter-03.md', 'MD036']]);
+  assert.deepEqual(state.links, { checked: true, dead: [{ url: 'https://gone.example/x', file: 'chapters/chapter-03.md', status: '404 Not Found' }] });
+
+  const refused = await call(act, { body: { book: BOOK.slug, action: 'publish', number: n, confirm: true } });
+  assert.equal(refused.statusCode, 409);
+  assert.equal(refused.payload.state, 'lint');
+  assert.match(refused.payload.userMessage, /1 formatting problem in 1 page.*chapters\/chapter-03\.md line \d+ \(emphasis used instead of a heading\)/);
+  assert.equal(gh.repo(REPO).refs.get(LIVE), BASE, 'nothing went live');
+
+  // The book's own config decides: with MD036 off, it publishes, dead link and all.
+  gh.commitFiles(REPO, DRAFTS, { '.markdownlint-cli2.yaml': 'config:\n  default: true\n  MD036: false\nignores:\n  - "templates/**"\n' });
+  pr.head.sha = gh.repo(REPO).refs.get(DRAFTS);
+  const after = (await get('publish', { book: BOOK.slug })).payload.publish;
+  assert.equal(after.state, 'clean');
+  assert.equal(after.links.checked, false, 'the link check spoke of an earlier commit');
+  assert.equal((await call(act, { body: { book: BOOK.slug, action: 'publish', number: n, confirm: true } })).statusCode, 200);
+});
+
+test('lint ignores: the config\'s globs and node_modules are skipped', async () => {
+  const { lintTexts, parseConfig } = await import('../lib/book-lint.mjs');
+  const bad = '# A\n\n**B**\n';
+  const found = await lintTexts({ 'templates/x.md': bad, 'node_modules/y.md': bad, 'scripts/seed-index.md': bad, 'chapters/z.md': bad },
+    parseConfig('config:\n  default: true\nignores:\n  - "templates/**"\n  - "scripts/seed-index.md"\n'));
+  assert.deepEqual(found.map((p) => p.path), ['chapters/z.md']);
+  assert.deepEqual(parseConfig('').config, { default: true });
 });
 
 // --- the credential ---------------------------------------------------------------------------
