@@ -28,6 +28,7 @@
  * Accepting a suggestion *with* the change made goes through api/author-send.js
  * (one send path), which replies and closes after the commit.
  */
+import { lintBook, lintWords } from '../lib/book-lint.mjs';
 import {
   SHA_RE, Refusal, appCredentials, authorise, bookFor, budget, byline, fail, ghJson, limits, wrap,
 } from '../lib/author.mjs';
@@ -37,7 +38,7 @@ import {
   describePublish, publishRequestBody, takenOn, thanksWithChange,
 } from '../lib/author-console.mjs';
 import {
-  acceptedAt, changesSince, compareDrafts, liveServes, mergeability, openPublishRequest, suggestion,
+  acceptedAt, changesSince, compareDrafts, liveServes, mergeability, openPublishRequest, publishChecks, suggestion,
 } from '../lib/author-console-reads.mjs';
 
 const appToken = appCredentials({ contents: 'write', pull_requests: 'write', issues: 'write' });
@@ -170,7 +171,8 @@ async function openOrRefresh(book, token, left, identity, tag) {
       if (!pr) throw err;
     }
   }
-  const info = describePublish(pr, compare, await mergeability(book, pr.number, token, left, 4), await liveServes(book));
+  const [state, rule, checks] = await Promise.all([mergeability(book, pr.number, token, left, 4), liveServes(book), publishChecks(book, pr, token, left)]);
+  const info = describePublish(pr, compare, state, rule, checks);
   return { ...info, opened };
 }
 
@@ -260,6 +262,12 @@ async function publish(book, body, ctx) {
   const state = await mergeability(book, n, token, left, 3);
   if (state !== 'clean') {
     throw new Refusal(409, `not mergeable: ${state}`, PUBLISH_STATE_WORDS[state] ?? PUBLISH_STATE_WORDS.unknown, { state });
+  }
+  // The book's lint on exactly what goes live: a problem, or no answer, stops it.
+  const lint = await lintBook(book, existing.head?.sha, token, left).catch(() => null);
+  if (!lint) throw new Refusal(409, 'not mergeable: unchecked', PUBLISH_STATE_WORDS.unchecked, { state: 'unchecked' });
+  if (lint.problems.length) {
+    throw new Refusal(409, 'not mergeable: lint', lintWords(lint.problems), { state: 'lint', lint: lint.problems.slice(0, 100), lint_count: lint.problems.length });
   }
   try {
     await ghJson(`/repos/${book.content.repo}/pulls/${n}`, token, left, {

@@ -249,6 +249,10 @@ export function createFakeGitHub() {
       if (method === 'PATCH') Object.assign(i, body);
       return json(200, i);
     }
+    if ((m = /^\/issues\/(\d+)\/comments$/.exec(rest)) && method === 'GET') {
+      const i = r.issues.get(Number(m[1])) ?? r.pulls.get(Number(m[1]));
+      return json(200, (i?.comments ?? []).map((body) => ({ body })));
+    }
     if ((m = /^\/issues\/(\d+)\/comments$/.exec(rest)) && method === 'POST') {
       const i = r.issues.get(Number(m[1])) ?? r.pulls.get(Number(m[1]));
       i.comments.push(body.body);

@@ -9,5 +9,9 @@
     "test": "node --test test/*.test.mjs",
     "registry:bundle": "node scripts/bundle-registry.mjs",
     "vercel-build": "node scripts/bundle-registry.mjs && npm test"
+  },
+  "dependencies": {
+    "js-yaml": "4.1.0",
+    "markdownlint": "0.38.0"
   }
 }
