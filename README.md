@@ -126,8 +126,10 @@ GitHub-style editor on the book's own page. This is its back end.
   when the registry names none), LF line endings, and the blob sha the edit is based on.
 - `POST /api/propose-edit` with `mode: "page"` (`content`) or `mode: "paragraph"`
   (`startLine`, `original`, `replacement`, optional `paragraph`), plus `path`, `baseSha`,
-  `title`, `description`, and either `identity` or `name` + `email` (+ `website`, the
-  honeypot). It branches `proposed-edits/<page>-<time>-<rand>` from the drafts head,
+  `title`, `description`, and `identity` (from sign-in). The anonymous path (`name` +
+  `email`, + `website`, the honeypot) is kept but off: without `PROPOSE_EDIT_ANONYMOUS=on`
+  a POST with no identity is `401 sign-in required`, and the editor asks for sign-in
+  before it opens. It branches `proposed-edits/<page>-<time>-<rand>` from the drafts head,
   commits the one file, opens a PR into drafts labelled `proposed-edit` + `needs-triage`,
   and answers `201 { prUrl }`.
 - **If drafts moved under the reader** (page mode: the blob sha differs; paragraph mode:
@@ -374,6 +376,7 @@ they are never logged or echoed.
 | `GITHUB_OAUTH_CLIENT_SECRET` | for sign-in | Its client secret. Mark **Sensitive**. |
 | `IDENTITY_SECRET`            | for sign-in | 32+ random characters; signs the identity tokens. Rotating it signs everyone out. |
 | `GITHUB_OAUTH_REDIRECT_URI`  | no | Defaults to `https://<request host>/api/github-auth`. Set it if the OAuth App's callback URL differs. |
+| `PROPOSE_EDIT_ANONYMOUS`     | no | `on` re-opens anonymous (name + email) proposals in propose-edit. Off (unset) since 6 Oct 2026: editing needs GitHub sign-in. |
 | `BOT_TOKEN`                  | temporary | The old personal access token. **A fallback for the App rollout only**, to be deleted along with its code once `credential=app` is proven in production. |
 
 **The App.** Permissions **Issues: Read and write**, **Contents: Read and write**,

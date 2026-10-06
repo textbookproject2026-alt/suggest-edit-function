@@ -17,7 +17,9 @@
  *                                                line of `original` at baseSha)
  *     title, description,
  *     identity                                  (from /api/github-auth), or
- *     name, email, website                      (anonymous; website = honeypot)
+ *     name, email, website                      (anonymous, only with
+ *                                               PROPOSE_EDIT_ANONYMOUS=on; website
+ *                                               = honeypot)
  *   }
  *     -> 201 { prUrl }                          applied: a PR is open
  *     -> 201 { issueUrl, fallback: true }       the drafts branch moved under the
@@ -33,6 +35,9 @@
  * Anonymous, the App is the author, the reader's name and masked email are in the
  * PR body, and the name alone (never the email) is in the commit as a
  * `Proposed-by:` trailer, which the book's Contributors page and page history read.
+ * Anonymous proposals are off unless PROPOSE_EDIT_ANONYMOUS=on (5 Oct: editing
+ * needs GitHub sign-in; readers without it use suggest-edit). Off, a POST without
+ * an identity is a 401 and writes nothing.
  *
  * Needs the App's Contents and Pull requests permissions (README, "The App").
  */
@@ -86,6 +91,7 @@ const GENERIC = 'Something went wrong sending your edit. Please try again.';
 // the form that still works, instead of a generic "couldn't load".
 const NOT_SET_UP =
   "Editing isn't switched on for this book yet. Please use “Suggest an edit” instead.";
+const SIGN_IN_NEEDED = 'Please sign in with GitHub to propose an edit, or use “Suggest an edit” instead.';
 const NO_BRANCH =
   "This book isn't set up to take edits yet (it has no drafts branch). Please use “Suggest an edit” instead.";
 
@@ -99,6 +105,9 @@ const baseBranch = (book) => book.content.drafts_branch || book.content.live_bra
 const basename = (path) => path.split('/').pop().replace(/\.md$/, '');
 
 class Conflict extends Error {}
+
+/** The anonymous (name + email) path, kept but off by default. Read per request. */
+const anonymousOn = () => process.env.PROPOSE_EDIT_ANONYMOUS?.trim() === 'on';
 
 /** A clock for one request: each call gets min(8s, what's left). */
 function budget(ms = BUDGET_MS) {
@@ -280,12 +289,15 @@ function validate(body, origin) {
         ok: false,
         status: 401,
         error: 'identity invalid',
-        userMessage: 'Your GitHub sign-in has expired. Sign in again, or send it without signing in.',
+        userMessage: anonymousOn()
+          ? 'Your GitHub sign-in has expired. Sign in again, or send it without signing in.'
+          : 'Your GitHub sign-in has expired. Please sign in again.',
       };
     }
     data.identity = identity;
     return { ok: true, data };
   }
+  if (!anonymousOn()) return { ok: false, status: 401, error: 'sign-in required', userMessage: SIGN_IN_NEEDED };
 
   const name = asString(body.name);
   const email = asString(body.email);

@@ -10,6 +10,9 @@ process.env.BOT_TOKEN = 'test-token';
 process.env.IDENTITY_SECRET = 'x'.repeat(40);
 process.env.GITHUB_OAUTH_CLIENT_ID = 'client-id';
 process.env.GITHUB_OAUTH_CLIENT_SECRET = 'client-secret';
+// Most tests below exercise the anonymous path, kept behind this flag; the
+// sign-in-required test turns it off, as it is in production.
+process.env.PROPOSE_EDIT_ANONYMOUS = 'on';
 
 const { default: BUNDLE } = await import('../registry/bundled.mjs');
 const BOOK = BUNDLE.registry.books.find((b) => b.status !== 'retired' && b.site.domain && b.suggest_edit.enabled);
@@ -186,6 +189,29 @@ test('a forged, expired or other-book identity is a 401 with a way forward, and 
     assert.ok(r.payload.userMessage);
   }
   assert.equal(gh.refs.length, 0);
+});
+
+test('anonymous proposals are off by default: 401, a pointer to sign-in or Suggest an edit, nothing written', async () => {
+  resetGitHub();
+  delete process.env.PROPOSE_EDIT_ANONYMOUS;
+  try {
+    const r = await call({ body: para() });
+    assert.equal(r.statusCode, 401);
+    assert.equal(r.payload.error, 'sign-in required');
+    assert.match(r.payload.userMessage, /sign in with GitHub.*Suggest an edit/);
+    assert.equal(gh.refs.length, 0);
+    assert.equal(gh.issues.length, 0);
+    const expired = issueIdentity(process.env.IDENTITY_SECRET, { login: 'ada-l', id: 42 }, ORIGIN, Date.now() - 9 * 3600e3);
+    const e = await call({ body: para({ identity: expired }) });
+    assert.equal(e.statusCode, 401);
+    assert.doesNotMatch(e.payload.userMessage, /without signing in/);
+    // Signed in still works.
+    const identity = issueIdentity(process.env.IDENTITY_SECRET, { login: 'ada-l', id: 42, name: 'Ada' }, ORIGIN);
+    const ok = await call({ body: para({ name: '', email: '', identity }) });
+    assert.equal(ok.statusCode, 201);
+  } finally {
+    process.env.PROPOSE_EDIT_ANONYMOUS = 'on';
+  }
 });
 
 // --- POST: conflicts fall back to an issue -------------------------------------------------
