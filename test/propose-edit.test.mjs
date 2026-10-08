@@ -157,6 +157,20 @@ test('anonymous with no name: "a reader" in the PR, no trailer', async () => {
   assert.ok(!gh.puts[0].message.includes('Proposed-by:'), 'no trailer without a name');
 });
 
+test('the book\'s authors are @mentioned in the pull request, so GitHub emails them; a signed-in author is not', async () => {
+  resetGitHub();
+  const r = await call({ body: para() });
+  assert.equal(r.statusCode, 201);
+  const authors = BOOK.authors.filter((a) => !(BOOK.mentions_off ?? []).some((m) => m.toLowerCase() === a.toLowerCase()));
+  assert.ok(authors.length, 'the test book has authors to mention');
+  assert.ok(gh.pulls[0].body.includes(`For this book's authors: ${authors.map((a) => `@${a}`).join(' ')}.`), gh.pulls[0].body);
+  resetGitHub();
+  const identity = issueIdentity(process.env.IDENTITY_SECRET, { login: authors[0], id: 7, name: 'An author' }, ORIGIN);
+  await call({ body: para({ name: '', email: '', identity }) });
+  const line = gh.pulls[0].body.split('\n').find((l) => l.startsWith("For this book's authors:")) ?? '';
+  assert.ok(!line.includes(`@${authors[0]} `) && !line.includes(`@${authors[0]}.`), `the author who proposed it is not mentioned: ${line}`);
+});
+
 test('page edit keeps the file\'s CRLF line endings', async () => {
   resetGitHub({ crlf: true });
   const content = TEXT0.replace('Third.', 'Third, edited.');

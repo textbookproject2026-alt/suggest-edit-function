@@ -297,3 +297,12 @@ test('no response ever leaks the bot token or a stack trace', async () => {
     assert.ok(!s.includes('api.github.com'), 'no upstream internals');
   }
 });
+
+test('mentionLines: the authors less mentions_off and the one who asked; nothing when nobody is left', async () => {
+  const { mentionLines } = await import('../lib/common.mjs');
+  const book = { slug: 'b', authors: ['Ada', 'grace-h', 'Alan'], mentions_off: ['ALAN'] };
+  assert.deepEqual(mentionLines(book, 'https://author.example'), ['', "For this book's authors: @Ada @grace-h. Answer it on the author site: https://author.example/#/b/drafts"]);
+  assert.match(mentionLines(book, 'https://a', 'ada')[1], /: @grace-h\./);
+  assert.deepEqual(mentionLines({ slug: 'b', authors: ['Ada'], mentions_off: ['ada'] }, 'https://a'), []);
+  assert.deepEqual(mentionLines({ slug: 'b' }, 'https://a'), []);
+});

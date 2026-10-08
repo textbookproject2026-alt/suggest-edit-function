@@ -4,7 +4,8 @@
  * the GitHub App with auto-merge on (lib/author-people.mjs). Nothing changes access
  * until it has merged and this function has been redeployed with it.
  *
- *   POST JSON { book, action: "add" | "remove", login }
+ *   POST JSON { book, action: "add" | "remove" | "mentions-off" | "mentions-on", login }
+ *     (the mentions actions only for the signed-in author's own login)
  *     -> 201 { number, url, action, login, by, state: "open", when, warning? }
  *     -> 4xx { error, userMessage }   no such account, already listed, the platform
  *                                     owner, the last author, another change on its way
@@ -13,7 +14,7 @@
  */
 import { Refusal, appCredentials, authorise, bookFor, budget, fail, limits, wrap } from '../lib/author.mjs';
 import { asString, isJsonContentType, parseBody, send } from '../lib/common.mjs';
-import { LOGIN_RE, proposeChange, registryCredential } from '../lib/author-people.mjs';
+import { LOGIN_RE, MENTION_ACTIONS, proposeChange, registryCredential } from '../lib/author-people.mjs';
 
 const registryToken = appCredentials({ contents: 'write', pull_requests: 'write' });
 
@@ -42,7 +43,7 @@ export default wrap(async (req, res) => {
   try {
     const action = body.action;
     const login = asString(body.login).trim().replace(/^@/, '');
-    if (action !== 'add' && action !== 'remove') throw new Refusal(400, 'validation: action', "That isn't something the People panel does.");
+    if (!['add', 'remove', ...MENTION_ACTIONS].includes(action)) throw new Refusal(400, 'validation: action', "That isn't something the People panel does.");
     if (!LOGIN_RE.test(login)) throw new Refusal(400, 'validation: login', "That isn't a GitHub username: letters, numbers and single hyphens, at most 39.");
     if (limits.people(auth.identity.login.toLowerCase(), Date.now())) {
       console.warn(`rate limit: ${tag}`);

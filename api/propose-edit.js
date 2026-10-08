@@ -48,6 +48,8 @@ import {
   EMAIL_RE, asString, clientIp, corsHeaders, createCredentials, createRateLimiter, detailOf,
   ensureLabels, fence, fileUrl, githubFetch, inlineCode, isJsonContentType, isSafePath, maskEmail,
   parseBody, resolveBook, send,
+  AUTHOR_SITE,
+  mentionLines,
 } from '../lib/common.mjs';
 import { noreplyEmail, readIdentity, readIdentitySecret } from '../lib/identity.mjs';
 
@@ -216,6 +218,7 @@ function prBody(book, branch, data) {
   const parts = [`**File:** [\`${data.path}\`](${fileUrl(book, data.path, branch)})`];
   if (data.mode === 'paragraph' && data.paragraph) parts.push(`**Where:** ¶${data.paragraph}`);
   if (data.description) parts.push('', '### Description', '', ...fenced(data.description));
+  parts.push(...mentionLines(book, AUTHOR_SITE, data.identity?.login));
   parts.push(
     '',
     '---',
@@ -236,6 +239,7 @@ function issueBody(book, branch, data, diff) {
     ...fenced(diff, 'diff'),
   ];
   if (data.description) parts.push('', '### Description', '', ...fenced(data.description));
+  parts.push(...mentionLines(book, AUTHOR_SITE, data.identity?.login));
   parts.push('', '---', '', `**Proposed by:** ${proposer(data)}`, '', '_proposed with the in-site editor_');
   return parts.join('\n');
 }
