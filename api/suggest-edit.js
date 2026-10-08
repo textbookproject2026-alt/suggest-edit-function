@@ -29,6 +29,8 @@ import {
   GITHUB_API, asString, clientIp, corsHeaders, createCredentials, createRateLimiter, ensureLabels,
   fence, fileUrl, githubFetch, inlineCode, isJsonContentType, isSafePath, parseBody,
   resolveBook as resolveBookWith, send,
+  AUTHOR_SITE,
+  mentionLines,
 } from '../lib/common.mjs';
 
 // ---------------------------------------------------------------------------
@@ -144,6 +146,7 @@ function buildIssueBody(book, { name, suggestion, reasoning, path }) {
     parts.push('', '### Reasoning', '', `${rf}text`, reasoning, rf);
   }
 
+  parts.push(...mentionLines(book, AUTHOR_SITE));
   parts.push(
     '',
     '---',

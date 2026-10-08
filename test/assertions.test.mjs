@@ -297,3 +297,19 @@ test('no response ever leaks the bot token or a stack trace', async () => {
     assert.ok(!s.includes('api.github.com'), 'no upstream internals');
   }
 });
+
+test('mentionLines: the authors less mentions_off and the one who asked; nothing when nobody is left', async () => {
+  const { mentionLines } = await import('../lib/common.mjs');
+  const book = { slug: 'b', authors: ['Ada', 'grace-h', 'Alan'], mentions_off: ['ALAN'] };
+  assert.deepEqual(mentionLines(book, 'https://author.example'), ['', "For this book's authors: @Ada @grace-h. Answer it on the author site: https://author.example/#/b/drafts"]);
+  assert.match(mentionLines(book, 'https://a', 'ada')[1], /: @grace-h\./);
+  assert.deepEqual(mentionLines({ slug: 'b', authors: ['Ada'], mentions_off: ['ada'] }, 'https://a'), []);
+  assert.deepEqual(mentionLines({ slug: 'b' }, 'https://a'), []);
+});
+
+test('describeChange: a proposed edit names its page, from the body propose-edit wrote', async () => {
+  const { describeChange } = await import('../lib/author-console.mjs');
+  const pr = { number: 3, user: { login: 'r' }, title: 'T', created_at: 'x', html_url: 'u', body: '**File:** [`chapters/chapter-02.md`](https://github.com/o/b/blob/drafts/chapters/chapter-02.md)\n\nMore' };
+  assert.equal(describeChange(pr).path, 'chapters/chapter-02.md');
+  assert.equal(describeChange({ ...pr, body: 'Hand-made change' }).path, null);
+});

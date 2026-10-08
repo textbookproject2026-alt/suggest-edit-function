@@ -23,7 +23,7 @@ globalThis.fetch = gh.fetch;
 
 const { default: BUNDLE } = await import('../registry/bundled.mjs');
 const { issueIdentity } = await import('../lib/identity.mjs');
-const { withAuthors, outcome, PLATFORM_OWNER, REGISTRY_REPO, STALLED_MS } = await import('../lib/author-people.mjs');
+const { withAuthors, withMentionsOff, outcome, PLATFORM_OWNER, REGISTRY_REPO, STALLED_MS } = await import('../lib/author-people.mjs');
 const { default: peopleEp } = await import('../author/author-people.js');
 const { default: changeEp } = await import('../author/author-people-change.js');
 
@@ -35,7 +35,7 @@ const AUTHOR = { login: 'BrandonAndCaroline', id: 777, name: 'Brandon' };
 const STRANGER = { login: 'someone-else', id: 999, name: 'Someone' };
 
 // registry.json as the registry writes it: two-space JSON, each `authors` on one line.
-const registryText = (reg) => `${JSON.stringify(reg, null, 2).replace(/"authors": \[\s*([^\]]*?)\s*\]/g, (_, list) => `"authors": [${list.split(/,\s*/).join(', ')}]`)}\n`;
+const registryText = (reg) => `${JSON.stringify(reg, null, 2).replace(/"(authors|mentions_off)": \[\s*([^\]]*?)\s*\]/g, (_, key, list) => `"${key}": [${list.split(/,\s*/).filter(Boolean).join(', ')}]`)}\n`;
 function resetRegistry(edit = () => {}) {
   const reg = structuredClone(BUNDLE.registry);
   edit(reg);
@@ -74,7 +74,7 @@ test('the panel: who has access now, from the registry this function runs, for t
   resetRegistry();
   const r = await list();
   assert.equal(r.statusCode, 200);
-  assert.deepEqual(r.payload, { authors: BOOK.authors, owner: PLATFORM_OWNER, registry: BUNDLE.sha, pending: [] });
+  assert.deepEqual(r.payload, { authors: BOOK.authors, mentionsOff: [], owner: PLATFORM_OWNER, registry: BUNDLE.sha, pending: [] });
   assert.equal(r.headers['x-registry-version'], BUNDLE.sha);
   assert.equal((await list(STRANGER)).statusCode, 403);
   assert.equal((await change('add', 'NewPerson', STRANGER)).statusCode, 403);
@@ -194,10 +194,46 @@ test('withAuthors rewrites one line in the file\'s own style, and refuses a book
   assert.throws(() => withAuthors(text, reg, 'social-research-methods', ['x']), (e) => /can't be changed from here/.test(e.userMessage));
 });
 
+test('mentions: an author turns @mentions on new suggestions off for themselves, and on again; never for someone else', async () => {
+  resetRegistry();
+  const before = gh.textAt(REGISTRY_REPO, gh.repo(REGISTRY_REPO).refs.get('main'), 'registry.json');
+  const OWNER = { login: 'textbookproject2026-alt', id: 1, name: 'Owner' };
+  assert.equal((await change('mentions-off', 'BrandonAndCaroline', OWNER)).statusCode, 403, 'not for another author');
+  const r = await change('mentions-off', 'textbookproject2026-ALT', OWNER);
+  assert.equal(r.statusCode, 201, JSON.stringify(r.payload));
+  const pr = gh.repo(REGISTRY_REPO).pulls.get(r.payload.number);
+  assert.match(pr.head.ref, new RegExp(`^people/${SLUG}/mentions-off-textbookproject2026-alt-\\d+$`));
+  assert.match(pr.body, /textbookproject2026-alt is no longer @mentioned/);
+  const after = gh.textAt(REGISTRY_REPO, gh.repo(REGISTRY_REPO).refs.get(pr.head.ref), 'registry.json');
+  const added = after.split('\n').filter((l) => !before.split('\n').includes(l));
+  assert.deepEqual(added, ['      "authors": ["BrandonAndCaroline", "textbookproject2026-alt"],', '      "mentions_off": ["textbookproject2026-alt"],'].filter((l) => !before.includes(l)));
+  assert.deepEqual(registryOn(pr.head.ref).books.find((b) => b.slug === SLUG).mentions_off, ['textbookproject2026-alt']);
+  assert.deepEqual((await list(OWNER)).payload.pending.map((c) => [c.action, c.login]), [['mentions-off', 'textbookproject2026-alt']]);
+
+  // Already off: on again rewrites the same line.
+  resetRegistry((reg) => { reg.books.find((b) => b.slug === SLUG).mentions_off = ['textbookproject2026-alt']; });
+  assert.equal((await change('mentions-off', 'textbookproject2026-alt', OWNER)).statusCode, 409);
+  const on = await change('mentions-on', 'textbookproject2026-alt', OWNER);
+  assert.equal(on.statusCode, 201, JSON.stringify(on.payload));
+  const back = registryOn(gh.repo(REGISTRY_REPO).pulls.get(on.payload.number).head.ref).books.find((b) => b.slug === SLUG);
+  assert.deepEqual(back.mentions_off, []);
+});
+
+test('withMentionsOff adds the line after authors, or rewrites it, and nothing else', () => {
+  const reg = structuredClone(BUNDLE.registry);
+  const text = registryText(reg);
+  const out = withMentionsOff(text, reg, 'platform-test-book', ['gobi10k']);
+  assert.equal(out.split('\n').length, text.split('\n').length + 1);
+  assert.match(out, /"authors": \[[^\]]*\],\n {6}"mentions_off": \["gobi10k"\]/);
+  const reg2 = JSON.parse(out);
+  assert.equal(withMentionsOff(out, reg2, 'platform-test-book', []).split('\n').length, out.split('\n').length);
+});
+
 test('rate-limited per login', async () => {
   resetRegistry();
-  const who = { login: 'textbookproject2026-alt', id: 1, name: 'Owner' };
+  // The test book's other author: no earlier test has used this login's allowance.
+  const who = { login: 'gobi10k', id: 2, name: 'Tester' };
   const codes = [];
-  for (let i = 0; i < 11; i++) codes.push((await change('add', 'nobody-here', who)).statusCode);
+  for (let i = 0; i < 11; i++) codes.push((await call(changeEp, { body: { book: 'platform-test-book', action: 'add', login: 'nobody-here' }, who })).statusCode);
   assert.deepEqual(codes, [...Array(10).fill(404), 429]);
 });
