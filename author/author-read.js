@@ -18,7 +18,9 @@
  *   ?what=change&book=<slug>&number=<n>               one draft change as before/after lines
  *     -> { readable, why, pages }
  *   ?what=publish&book=<slug>                         what stands between drafts and live
- *     -> { publish: null | {...} }
+ *     -> { publish: null | {...} }                    (with `lint` whenever it could be run)
+ *   ?what=drafts&book=<slug>                          drafts vs live, file by file, readers'
+ *     -> { live, drafts, files, more }                files only (lib/author-console-reads.mjs)
  *
  * Refused: another origin (403), no or another origin's identity (401), a book the
  * login isn't an author of (403), a path outside chapters/, assets/, index.md,
@@ -30,7 +32,7 @@ import {
 } from '../lib/author.mjs';
 import { send } from '../lib/common.mjs';
 import { SUGGESTED, describeChange, parseSuggestion, readableChange } from '../lib/author-console.mjs';
-import { acceptedAt, changesSince, publishState, suggestion } from '../lib/author-console-reads.mjs';
+import { acceptedAt, changesSince, draftsDiff, publishState, suggestion } from '../lib/author-console-reads.mjs';
 
 const appToken = appCredentials({ contents: 'read', pull_requests: 'read', issues: 'read' });
 const MAX_FILE = 5 * 1024 * 1024;
@@ -111,7 +113,7 @@ async function change(book, token, left, params) {
   return readableChange(files ?? []);
 }
 
-const READS = { tree, file, suggestions, 'suggestion-changes': suggestionChanges, changes, change, publish: (book, token, left) => publishState(book, token, left, 1) };
+const READS = { tree, file, drafts: draftsDiff, suggestions, 'suggestion-changes': suggestionChanges, changes, change, publish: (book, token, left) => publishState(book, token, left, 1) };
 
 export default wrap(async (req, res) => {
   const auth = authorise(req, res, 'GET');
