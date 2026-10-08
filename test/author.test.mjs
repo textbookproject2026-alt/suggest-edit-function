@@ -725,3 +725,36 @@ test('the page resolver reads platform.pages; a page on a book\'s domain is refu
 test('request-book never proposes a platform page\'s label as a slug', () => {
   assert.equal(proposeSlug('Author'), 'book-author');
 });
+
+// --- the author site's Chapters and Drafts (08 Oct) ---------------------------------------
+
+test('import: .odt, .doc and .rtf are taken when their bytes match; a mismatch is refused', async () => {
+  const { safeWordName, looksLike } = await import('../lib/author-import.mjs');
+  const kinds = { 'Ch.docx': 'PK\x03\x04', 'Ch.odt': 'PK\x03\x04', 'Ch.doc': '\xD0\xCF\x11\xE0', 'Ch.rtf': '{\\rtf1 hi}' };
+  for (const [name, bytes] of Object.entries(kinds)) {
+    assert.equal(safeWordName(name), name);
+    assert.equal(looksLike(name, Buffer.from(bytes, 'binary')), true, name);
+  }
+  assert.equal(looksLike('Ch.rtf', Buffer.from('PK\x03\x04', 'binary')), false);
+  assert.equal(looksLike('Ch.doc', Buffer.from('PK\x03\x04', 'binary')), false);
+  for (const name of ['Ch.pdf', 'Ch.pages', '.rtf', 'Ch']) assert.equal(safeWordName(name), '', name);
+});
+
+test('drafts: what drafts hold beyond live, readers\' files only, each with who changed it last', async () => {
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, { 'chapters/chapter-03.md': NEW3, 'chapter-sources.json': '{}\n' });
+  const r = await get('drafts', { book: BOOK.slug });
+  assert.equal(r.statusCode, 200, JSON.stringify(r.payload));
+  assert.deepEqual(r.payload.files.map((f) => [f.path, f.status]), [['chapters/chapter-03.md', 'modified']]);
+  assert.ok(r.payload.files[0].when);
+  assert.equal(r.payload.drafts, gh.repo(REPO).refs.get(DRAFTS));
+  assert.equal(r.payload.live, gh.repo(REPO).refs.get(LIVE));
+});
+
+test('publish: with no request open yet, the drafts\' own lint comes back', async () => {
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, { 'chapters/chapter-03.md': NEW3 });
+  const p = (await get('publish', { book: BOOK.slug })).payload.publish;
+  assert.equal(p.state, 'not_open');
+  assert.ok(Array.isArray(p.lint), JSON.stringify(p));
+});

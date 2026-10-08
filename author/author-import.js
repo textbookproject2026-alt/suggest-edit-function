@@ -33,7 +33,7 @@ import {
 import { asString, createRateLimiter, isJsonContentType, parseBody, send } from '../lib/common.mjs';
 import {
   IMPORT_DIR, MAX_BYTES, MAX_PARTS, PART_BYTES, branchOf, checkOwner, checkedResult, destination, newId, partReceipt,
-  readImport, readReceipt, safeDocxName, stagedAt,
+  WORD_WORDS, looksLike, readImport, readReceipt, safeWordName, stagedAt,
 } from '../lib/author-import.mjs';
 
 const requestsToken = appCredentials({ contents: 'write' });
@@ -107,8 +107,8 @@ function requestJson(o) {
 
 async function start(body, auth, book, res, used) {
   const { identity } = auth;
-  const name = safeDocxName(asString(body.name));
-  if (!name) throw new Refusal(400, 'validation: name', 'Only Word documents (.docx) can be brought in.');
+  const name = safeWordName(asString(body.name));
+  if (!name) throw new Refusal(400, 'validation: name', `Only ${WORD_WORDS} can be brought in.`);
   const where = destination(body.folder, body.chapterName);
   const parts = body.parts;
   if (!Array.isArray(parts) || !parts.length || parts.length > MAX_PARTS) throw new Refusal(400, 'validation: parts', 'The Word document could not be read.');
@@ -123,8 +123,8 @@ async function start(body, auth, book, res, used) {
   const chunks = [];
   for (const sha of shas) chunks.push(await blobBytes(REQUESTS_REPO, sha, req.token, left));
   const docx = Buffer.concat(chunks);
-  if (docx.length === 0 || docx.length > MAX_BYTES) throw new Refusal(400, 'validation: size', 'The Word document must be under 20 MB.');
-  if (docx.subarray(0, 4).toString('binary') !== 'PK\x03\x04') throw new Refusal(400, 'validation: not docx', `${name} does not look like a Word document.`);
+  if (docx.length === 0 || docx.length > MAX_BYTES) throw new Refusal(400, 'validation: size', 'The document must be under 20 MB.');
+  if (!looksLike(name, docx)) throw new Refusal(400, 'validation: not docx', `${name} doesn't look like the kind of document its name says. Open it, save it again, and bring that in.`);
 
   const bt = await bookToken(book, btag, used);
   const base = await draftsHead(book, bt.token, left);

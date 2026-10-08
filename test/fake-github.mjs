@@ -234,7 +234,7 @@ export function createFakeGitHub() {
       const commits = ancestors(r, b).filter((id) => !behind.has(id)).reverse();
       const ahead = new Set(ancestors(r, b));
       const behindBy = ancestors(r, a).filter((id) => !ahead.has(id)).length;
-      return json(200, { ahead_by: commits.length, behind_by: behindBy, status: behindBy ? (commits.length ? 'diverged' : 'behind') : commits.length ? 'ahead' : 'identical', commits: commits.map((id) => commitJson(r, id)), files: diff(r, a, b) });
+      return json(200, { base_commit: { sha: a }, ahead_by: commits.length, behind_by: behindBy, status: behindBy ? (commits.length ? 'diverged' : 'behind') : commits.length ? 'ahead' : 'identical', commits: commits.map((id) => commitJson(r, id)), files: diff(r, a, b) });
     }
 
     // --- issues
