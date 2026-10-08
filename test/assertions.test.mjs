@@ -306,3 +306,10 @@ test('mentionLines: the authors less mentions_off and the one who asked; nothing
   assert.deepEqual(mentionLines({ slug: 'b', authors: ['Ada'], mentions_off: ['ada'] }, 'https://a'), []);
   assert.deepEqual(mentionLines({ slug: 'b' }, 'https://a'), []);
 });
+
+test('describeChange: a proposed edit names its page, from the body propose-edit wrote', async () => {
+  const { describeChange } = await import('../lib/author-console.mjs');
+  const pr = { number: 3, user: { login: 'r' }, title: 'T', created_at: 'x', html_url: 'u', body: '**File:** [`chapters/chapter-02.md`](https://github.com/o/b/blob/drafts/chapters/chapter-02.md)\n\nMore' };
+  assert.equal(describeChange(pr).path, 'chapters/chapter-02.md');
+  assert.equal(describeChange({ ...pr, body: 'Hand-made change' }).path, null);
+});
