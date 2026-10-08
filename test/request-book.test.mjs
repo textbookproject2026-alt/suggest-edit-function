@@ -92,6 +92,7 @@ test('a valid request commits the files and files a private issue', async () => 
   assert.equal(block.email, 'ada@example.com');
   assert.equal(block.status, 'live');
   assert.equal(block.sandbox, false);
+  assert.equal(block.type, 'book', 'a book unless the form says otherwise');
   assert.deepEqual(block.manuscript, [`requests/${r.payload.reference}/Chapter 1.docx`]);
 });
 
@@ -114,6 +115,7 @@ test('validation', async () => {
   };
   await bad({ agreeLicence: false }, /CC BY-SA/);
   await bad({ email: 'nope' }, /email/);
+  await bad({ type: 'thesis' }, /book, paper, report or article/);
   await bad({ summary: 'short' }, /describe/);
   await bad({ github: 'not a login!' }, /GitHub username/);
   await bad({ manuscriptLink: 'http://x.example/a' }, /https/);
@@ -184,4 +186,11 @@ test('a part that cannot be fetched still files the request, without files', asy
   assert.equal(r.statusCode, 201);
   assert.match(r.payload.userMessage, /files didn't/);
   assert.match(gh.issues[0].body, /The files did not arrive/);
+});
+
+test('a paper is filed as a paper', async () => {
+  const r = await call({ body: { ...VALID, type: 'paper' } });
+  assert.equal(r.statusCode, 201);
+  assert.equal(JSON.parse(gh.issues[0].body.match(/```json\n([\s\S]*?)\n```/)[1]).type, 'paper');
+  assert.match(gh.issues[0].body, /\(paper\), by/);
 });
