@@ -177,6 +177,9 @@ function isUtf8(bytes) {
   }
 }
 
+/** What a request may be (registry books[].type). */
+export const TYPES = ['book', 'paper', 'report', 'article'];
+
 export function validate(body) {
   const reject = (error, userMessage) => ({ ok: false, error: `validation: ${error}`, userMessage });
   const title = asString(body.title);
@@ -187,6 +190,8 @@ export function validate(body) {
   const github = asString(body.github).replace(/^@/, '');
   const link = asString(body.manuscriptLink);
   const notes = asString(body.notes);
+  // What kind of text it is (registry books[].type); the form defaults to a book.
+  const type = asString(body.type) || 'book';
 
   if (title.length < 3) return reject('title', 'Please give the book a title.');
   if (title.length > LIMITS.title) return reject('title too long', 'That title is too long.');
@@ -203,6 +208,7 @@ export function validate(body) {
     try { u = new URL(link); } catch { u = null; }
     if (!u || u.protocol !== 'https:' || link.length > LIMITS.link) return reject('link', 'The manuscript link must be a full https:// address.');
   }
+  if (!TYPES.includes(type)) return reject('type', 'Please choose what kind of text it is: a book, paper, report or article.');
   if (notes.length > LIMITS.notes) return reject('notes too long', `Please keep the notes under ${LIMITS.notes} characters.`);
   if (body.agreeLicence !== true) {
     return reject('licence', 'Books here are published under CC BY-SA 4.0. Please tick the box to agree.');
@@ -210,7 +216,7 @@ export function validate(body) {
   const files = checkFiles(body.files);
   if (!files.ok) return reject(files.why, files.user ?? 'One of the files could not be read.');
 
-  return { ok: true, data: { title, authors, email, summary, topic, github, link, notes, files: files.files } };
+  return { ok: true, data: { title, authors, email, summary, topic, github, link, notes, type, files: files.files } };
 }
 
 // ---------------------------------------------------------------------------
@@ -274,6 +280,7 @@ export function buildIssueBody(reference, d, { slug, committed, fileError }) {
   const request = {
     reference,
     slug,
+    type: d.type ?? 'book',
     title: d.title,
     summary: d.summary,
     authors: d.authors,
@@ -290,7 +297,7 @@ export function buildIssueBody(reference, d, { slug, committed, fileError }) {
   const jf = fence(json);
 
   const lines = [
-    `**${inlineCode(d.title)}**, by ${d.authors.map(inlineCode).join(', ')}`,
+    `**${inlineCode(d.title)}** (${d.type ?? 'book'}), by ${d.authors.map(inlineCode).join(', ')}`,
     '',
     `> ${inlineCode(d.summary)}`,
     '',
