@@ -22,6 +22,10 @@
   },
   "rewrites": [
     {
+      "source": "/api/history",
+      "destination": "/api/page-revision?mode=open"
+    },
+    {
       "source": "/api/author-:route",
       "destination": "/api/author?route=:route"
     }

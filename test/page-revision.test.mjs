@@ -141,3 +141,61 @@ test('proposerName and forPreview', () => {
   assert.equal(proposerName(null), null);
   assert.equal(forPreview('---\na: 1\n---\nSee [[x/Page|that]] and [[y/Other]].'), 'See that and Other.');
 });
+
+// --- batch 2a: what is being edited, Compare, and what is proposed -----------------
+
+const { attributionOf, openItem } = await import('../api/page-revision.js');
+const DRAFTS = BOOK.content.drafts_branch;
+
+test('a drafts revision (being edited) is served too, and says so; Compare gives any two public versions', async () => {
+  const d1 = gh.commitFiles(REPO, DRAFTS, { [PAGE]: '# One\n\nDrafted words.\n' }, { message: 'Edit ¶1 of one.md: a better word' });
+  const live = await get({ book: BOOK.slug, sha: v3, path: PAGE });
+  assert.equal(live.payload.branch, 'live');
+  const drafted = await get({ book: BOOK.slug, sha: d1, path: PAGE });
+  assert.equal(drafted.statusCode, 200);
+  assert.equal(drafted.payload.branch, 'drafts');
+  assert.equal(drafted.payload.after, '# One\n\nDrafted words.\n');
+  const cmp = await get({ book: BOOK.slug, sha: d1, base: v1, path: PAGE });
+  assert.equal(cmp.statusCode, 200);
+  assert.deepEqual([cmp.payload.status, cmp.payload.before, cmp.payload.after], ['compared', '# One\n\nFirst words.\n', '# One\n\nDrafted words.\n']);
+  assert.match(cmp.headers['cache-control'], /immutable/);
+  // A branch that is neither: refused, either way round.
+  assert.equal((await get({ book: BOOK.slug, sha: draftsOnly, base: v1, path: PAGE })).statusCode, 404);
+  assert.equal((await get({ book: BOOK.slug, sha: v1, base: draftsOnly, path: PAGE })).statusCode, 404);
+  assert.equal((await get({ book: BOOK.slug, sha: v1, base: 'nope', path: PAGE })).statusCode, 400);
+});
+
+const PR_BODY = '### Summary\n\n```text\nFixed the spelling of receive.\n```\n\n**File:** [`chapters/one.md`](x)\n**Where:** ¶2\n\n---\n\n**Proposed by:** @ada-l (signed in with GitHub)\n\n_proposed with the in-site editor._';
+const NOTE_BODY = '**File:** [`chapters/one.md`](x)\n**Where:** [¶4](https://b.example/chapters/one#p4)\n\n### Suggested edit\n\n```text\nThis needs a source.\n```\n\n---\n\n**Submitted by:** `Bea Reader`\n';
+
+test('what is proposed: open proposals and notes, public fields only, by page; cached 90 seconds', async () => {
+  const pr = gh.addPull(REPO, { head: 'proposed-edits/x', base: DRAFTS, title: 'Edit ¶2 of one.md: Fixed the spelling of receive.' });
+  Object.assign(gh.repo(REPO).pulls.get(pr), { body: PR_BODY, labels: [{ name: 'proposed-edit' }] });
+  const other = gh.addPull(REPO, { head: 'chore/x', base: DRAFTS, title: 'Housekeeping' });
+  Object.assign(gh.repo(REPO).pulls.get(other), { body: '', labels: [] });
+  const note = gh.addIssue(REPO, { title: 'Note on ¶4: chapters/one.md', body: NOTE_BODY, labels: [{ name: 'suggested-edit' }, { name: 'section-note' }] });
+  gh.addIssue(REPO, { title: 'Elsewhere', body: '**File:** [`chapters/two.md`](x)\n\n**Submitted by:** `C`\n', labels: [{ name: 'suggested-edit' }] });
+  const res = await get({ book: BOOK.slug, mode: 'open', path: PAGE });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.headers['cache-control'], 'public, max-age=60, s-maxage=90');
+  assert.deepEqual(res.payload.items.map((i) => [i.kind, i.number, i.summary, i.who, i.paragraph ?? null]), [
+    ['note', note, 'This needs a source.', { name: 'Bea Reader' }, 4],
+    ['edit', pr, 'Fixed the spelling of receive.', { name: 'ada-l', github: 'ada-l' }, 2],
+  ].sort((a, b) => b[1] - a[1]));
+  for (const i of res.payload.items) assert.deepEqual(Object.keys(i).sort(), ['date', 'files', 'kind', 'number', 'paragraph', 'summary', 'url', 'who'].filter((k) => k !== 'paragraph' || 'paragraph' in i).sort());
+  const whole = await get({ book: BOOK.slug, mode: 'open' });
+  assert.equal(whole.payload.items.length, 3, 'the whole book: both pages');
+  const calls = gh.state.calls.length;
+  await get({ book: BOOK.slug, mode: 'open', path: PAGE });
+  assert.equal(gh.state.calls.length, calls, 'within 90 seconds: from the cache, no GitHub call');
+  assert.equal((await get({ book: 'nope', mode: 'open' })).statusCode, 404);
+  assert.equal((await get({ book: BOOK.slug, mode: 'open', path: '../x' })).statusCode, 400);
+});
+
+test('attribution and an open item, as the panel shows them', () => {
+  assert.deepEqual(attributionOf('**Submitted by:** @gobi10k (signed in with GitHub)'), { name: 'gobi10k', github: 'gobi10k' });
+  assert.deepEqual(attributionOf('**Proposed by:** `Jo` (`j***@x`)'), { name: 'Jo' });
+  assert.equal(attributionOf('**Proposed by:** a reader (`j***@x`)'), null);
+  const item = openItem({ number: 7, html_url: 'u', created_at: '2026-10-09T10:00:00Z', title: 'Update one.md', body: '### Summary\n\n```text\n(no summary given)\n```\n' }, 'edit');
+  assert.equal(item.summary, 'Update one.md', 'no summary: the title');
+});

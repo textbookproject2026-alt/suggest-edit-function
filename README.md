@@ -180,8 +180,19 @@ History list that was built before commits carried a `Proposed-by:` trailer. The
 asks once when the list opens. Live-branch commits only; cached at the edge for a day;
 one call counts once against the per-IP limit.
 
+`GET /api/page-revision?book=<slug>&sha=<commit>&base=<commit>&path=<file>` → the page
+at `base` and at `sha` (`status: "compared"`): the panel's **Compare**.
+
+`GET /api/history?book=<slug>[&path=<file>]` (a rewrite to `page-revision?mode=open`;
+no new function on the Hobby plan) → `{ items }`: the open `proposed-edit` pull requests
+and `section-note` / `suggested-edit` issues of the page (by their **File:** line) or of
+the whole book, with kind, number, link, date, summary and who (from the attribution
+line). Public fields only; kept 90 seconds per instance and at the edge. The History
+panel's and the book's `/history` page's *Being edited* band.
+
 - Public: no sign-in, `Access-Control-Allow-Origin: *`. Registered, non-retired books
-  only; the commit must be on the book's live branch, and the file one it changed.
+  only; the commit must be on the book's live branch or its drafts branch (`branch` in
+  the answer says which), and the file one it changed.
 - Reads as the App (contents and pull requests read). A 200 is cached at the edge for a
   year (a commit never changes); refusals for 5 minutes. 120 uncached requests per hour
   per IP (per instance, as everywhere here).
