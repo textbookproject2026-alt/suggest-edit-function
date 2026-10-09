@@ -231,9 +231,15 @@ test('withMentionsOff adds the line after authors, or rewrites it, and nothing e
 
 test('rate-limited per login', async () => {
   resetRegistry();
-  // The test book's other author: no earlier test has used this login's allowance.
-  const who = { login: 'gobi10k', id: 2, name: 'Tester' };
+  // Any current author of the test book, from the registry this build bundles (the
+  // registry changes under the tests: a hard-coded login failed the deploy when that
+  // author was removed). Earlier tests may have used some of this login's allowance,
+  // so: only "no such account" answers, then 429 within the limit of 10.
+  const login = BUNDLE.registry.books.find((b) => b.slug === 'platform-test-book').authors.at(-1);
+  const who = { login, id: 2, name: 'Tester' };
   const codes = [];
-  for (let i = 0; i < 11; i++) codes.push((await call(changeEp, { body: { book: 'platform-test-book', action: 'add', login: 'nobody-here' }, who })).statusCode);
-  assert.deepEqual(codes, [...Array(10).fill(404), 429]);
+  for (let i = 0; i < 11 && codes.at(-1) !== 429; i++) codes.push((await call(changeEp, { body: { book: 'platform-test-book', action: 'add', login: 'nobody-here' }, who })).statusCode);
+  assert.equal(codes.at(-1), 429);
+  assert.ok(codes.length >= 2, 'at least one change was let through before the limit');
+  assert.ok(codes.slice(0, -1).every((c) => c === 404), String(codes));
 });
