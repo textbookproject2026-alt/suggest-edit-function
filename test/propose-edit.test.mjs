@@ -171,6 +171,36 @@ test('the book\'s authors are @mentioned in the pull request, so GitHub emails t
   assert.ok(!line.includes(`@${authors[0]} `) && !line.includes(`@${authors[0]}.`), `the author who proposed it is not mentioned: ${line}`);
 });
 
+test('the summary: commit subject (cut at 72), PR title tail, and the Summary atop the PR body', async () => {
+  resetGitHub();
+  const identity = issueIdentity(process.env.IDENTITY_SECRET, { login: 'ada-l', id: 42, name: 'Ada' }, ORIGIN);
+  const summary = 'Fixed the spelling of receive in the second paragraph, because the old spelling was simply wrong and confusing';
+  const r = await call({ body: para({ name: '', email: '', identity, summary: `  ${summary}\n`, description: 'More.' }) });
+  assert.equal(r.statusCode, 201);
+  const [subject, ...rest] = gh.puts[0].message.split('\n\n');
+  assert.ok(subject.length <= 72 && subject.endsWith('…') && summary.startsWith(subject.slice(0, -1)), subject);
+  assert.deepEqual(rest, [summary, 'More.'], 'the full summary, then the description');
+  assert.equal(gh.pulls[0].title, `Update chapter-03: ${summary}`);
+  assert.ok(gh.pulls[0].body.startsWith(`### Summary\n\n\`\`\`text\n${summary}\n\`\`\`\n`), gh.pulls[0].body);
+  // A short one is the subject as it is.
+  resetGitHub();
+  await call({ body: para({ name: '', email: '', identity, summary: 'Fixed a typo in paragraph 2.' }) });
+  assert.equal(gh.puts[0].message, 'Fixed a typo in paragraph 2.');
+});
+
+test('no summary (a page built before it): accepted, "(no summary given)", the title as before', async () => {
+  resetGitHub();
+  const r = await call({ body: para({ title: 'Fix spelling' }) });
+  assert.equal(r.statusCode, 201);
+  assert.equal(gh.pulls[0].title, 'Fix spelling');
+  assert.match(gh.puts[0].message, /^Fix spelling\n\n/);
+  assert.ok(gh.pulls[0].body.startsWith('### Summary\n\n```text\n(no summary given)\n```'), gh.pulls[0].body);
+  resetGitHub();
+  const long = await call({ body: para({ summary: 'x'.repeat(501) }) });
+  assert.equal(long.statusCode, 400);
+  assert.equal(gh.puts.length, 0);
+});
+
 test('page edit keeps the file\'s CRLF line endings', async () => {
   resetGitHub({ crlf: true });
   const content = TEXT0.replace('Third.', 'Third, edited.');

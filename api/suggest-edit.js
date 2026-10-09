@@ -9,6 +9,17 @@
  * Contract (fixed by the live front-end — do not deviate):
  *   POST JSON { name, suggestion, reasoning, path, website }
  *
+ *   A note on one paragraph (the ¶ margin's "Note to the authors about ¶n") adds
+ *     paragraph   the paragraph's number (a positive integer)
+ *     quote       the start of its text (<= 300 characters), as the reader saw it
+ *     page        the page's path on the book's site ("/chapters/chapter-03"), for
+ *                 the #p<n> permalink on the book's own domain
+ *   and gets the label `section-note`. A body without them is a note on the page,
+ *   as before. Any note may carry `identity` (the in-site editor's GitHub sign-in,
+ *   /api/github-auth): if it is genuine and for this book, the issue names the
+ *   reader as @login, so GitHub tells them when it is closed; otherwise it is
+ *   ignored and the note is the name's alone.
+ *
  *   No email: the issue shows the name, and nothing else used an address. A body
  *   that still carries `email` (a page built before 6 Oct 2026) is accepted, and
  *   the email is dropped unread.
@@ -32,6 +43,7 @@ import {
   AUTHOR_SITE,
   mentionLines,
 } from '../lib/common.mjs';
+import { readIdentity, readIdentitySecret } from '../lib/identity.mjs';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -47,11 +59,15 @@ const LABELS = ['suggested-edit', 'needs-triage'];
 const LABEL_DEFAULTS = {
   'suggested-edit': { color: '0e8a16', description: 'Reader-submitted edit from the suggest-an-edit form' },
   'needs-triage': { color: 'fbca04', description: 'Not yet reviewed by an editor' },
+  'section-note': { color: 'c5def5', description: 'A reader\'s note on one paragraph' },
 };
 
 const MAX_SUGGESTION = 5000;
 const MAX_REASONING = 5000;
 const MAX_NAME = 200;
+const MAX_QUOTE = 300;
+// A page's path on the book's site: Quartz's slugs, so no spaces, quotes or "..".
+const PAGE_RE = /^\/(?:[A-Za-z0-9._~%-]+\/)*[A-Za-z0-9._~%-]*$/;
 
 // Rate limit: 5 submissions per hour per IP.
 const RATE_LIMIT_MAX = 5;
@@ -122,36 +138,57 @@ function validate(body) {
     return reject('validation: path rejected', 'We could not tell which page this refers to.');
   }
 
-  return { ok: true, data: { name, suggestion, reasoning, path } };
+  const data = { name, suggestion, reasoning, path };
+  // A note on one paragraph: all three or none. Anything else is a page note.
+  const paragraph = body.paragraph;
+  const page = asString(body.page);
+  if (Number.isSafeInteger(paragraph) && paragraph > 0 && page && PAGE_RE.test(page) && !page.includes('..')) {
+    data.paragraph = paragraph;
+    data.page = page;
+    data.quote = asString(body.quote).replace(/\s+/g, ' ').slice(0, MAX_QUOTE);
+  }
+  return { ok: true, data };
 }
 
 // ---------------------------------------------------------------------------
 // Issue body
 // ---------------------------------------------------------------------------
 
-function buildIssueBody(book, { name, suggestion, reasoning, path }) {
+/** The paragraph's permalink on the book's own domain: the page's path, then #p<n>. */
+export const paragraphUrl = (book, page, n) => `https://${book.site.domain}${page}#p${n}`;
+
+function buildIssueBody(book, { name, suggestion, reasoning, path, paragraph, page, quote, identity }) {
   const f = fence(suggestion);
-  const parts = [
-    `**File:** [\`${path}\`](${fileUrl(book, path)})`,
+  const parts = [`**File:** [\`${path}\`](${fileUrl(book, path)})`];
+  if (paragraph) {
+    parts.push(`**Where:** [¶${paragraph}](${paragraphUrl(book, page, paragraph)})`);
+    if (quote) {
+      const qf = fence(quote);
+      parts.push('', `${qf}text`, quote, qf);
+    }
+  }
+  parts.push(
     '',
     '### Suggested edit',
     '',
     `${f}text`,
     suggestion,
     f,
-  ];
+  );
 
   if (reasoning) {
     const rf = fence(reasoning);
     parts.push('', '### Reasoning', '', `${rf}text`, reasoning, rf);
   }
 
-  parts.push(...mentionLines(book, AUTHOR_SITE));
+  parts.push(...mentionLines(book, AUTHOR_SITE, identity?.login));
   parts.push(
     '',
     '---',
     '',
-    `**Submitted by:** ${inlineCode(name)}`,
+    // Signed in: the login, so GitHub tells them when the issue closes (and the
+    // decision workflow can @mention them). Otherwise the name, in a code span.
+    `**Submitted by:** ${identity ? `@${identity.login} (signed in with GitHub)` : inlineCode(name)}`,
     '',
     '_submitted via the suggest-an-edit form_',
   );
@@ -169,9 +206,9 @@ async function createIssue(book, token, data) {
     token,
     method: 'POST',
     body: {
-      title: `Suggested edit: ${data.path}`,
+      title: data.paragraph ? `Note on ¶${data.paragraph}: ${data.path}` : `Suggested edit: ${data.path}`,
       body: buildIssueBody(book, data),
-      labels: LABELS,
+      labels: data.paragraph ? [...LABELS, 'section-note'] : LABELS,
     },
   });
 
@@ -308,6 +345,15 @@ async function handle(req, res) {
     console.warn(`${result.error} (ip=${ip}) ${tag}`);
     send(res, 400, { error: result.error, userMessage: result.userMessage });
     return;
+  }
+
+  // A sign-in from the in-site editor, if the page sent one and it holds for this
+  // book. A bad or expired one never refuses a note: it is just the name's.
+  const secret = readIdentitySecret(process.env);
+  const token = asString(body.identity);
+  if (secret && token) {
+    const identity = readIdentity(secret, token, origin);
+    if (identity) result.data.identity = identity;
   }
 
   // --- Credential ---------------------------------------------------------

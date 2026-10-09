@@ -113,6 +113,13 @@ behind after four minutes and the optional secret `SUGGEST_EDIT_DEPLOY_HOOK` is 
 job fires the hook once. The registry's `deploy.yml` still polls `X-Registry-Version` for
 registry changes.
 
+**A note on one paragraph.** The ¶ margin's "Note to the authors about ¶n" sends the same
+POST with `paragraph` (its number), `quote` (the start of its text) and `page` (its path on
+the book's site). The issue is titled `Note on ¶n: <path>`, links the paragraph at
+`https://<domain><page>#p<n>`, quotes it, and adds the label `section-note`. Any note may
+carry the editor's `identity`: if it holds for this book, the issue names the reader as
+`@login (signed in with GitHub)`; if not, it is ignored and the note keeps the name.
+
 ---
 
 ## The in-site editor (`/api/propose-edit`, `/api/github-auth`)
@@ -125,7 +132,12 @@ GitHub-style editor on the book's own page. This is its back end.
   when the registry names none), LF line endings, and the blob sha the edit is based on.
 - `POST /api/propose-edit` with `mode: "page"` (`content`) or `mode: "paragraph"`
   (`startLine`, `original`, `replacement`, optional `paragraph`), plus `path`, `baseSha`,
-  `title`, `description`, and `identity` (from sign-in). The anonymous path (`name` +
+  `summary` ("What did you change, and why?", up to 500 characters; the editor requires
+  10), optional `title` and `description`, and `identity` (from sign-in). The summary is
+  the commit's subject (cut at 72, in full below it), the tail of the PR title
+  (`Update chapter-03: <summary>`) and a **Summary** section at the top of the PR body. A
+  POST without one (a page built before it) is accepted and says "(no summary given)",
+  with its title as before. The anonymous path (`name` +
   `email`, + `website`, the honeypot) is kept but off: without `PROPOSE_EDIT_ANONYMOUS=on`
   a POST with no identity is `401 sign-in required`, and the editor asks for sign-in
   before it opens. It branches `proposed-edits/<page>-<time>-<rand>` from the drafts head,
