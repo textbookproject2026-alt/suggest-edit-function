@@ -130,7 +130,7 @@ async function answerSuggestion(book, token, left, s, sent, identity, tag) {
 }
 
 export default wrap(async (req, res) => {
-  const auth = authorise(req, res, 'POST');
+  const auth = await authorise(req, res, 'POST');
   if (!auth) return;
   const { identity, tag } = auth;
   if (!isJsonContentType(req)) {

@@ -201,3 +201,17 @@ test('attribution and an open item, as the panel shows them', () => {
   const item = openItem({ number: 7, html_url: 'u', created_at: '2026-10-09T10:00:00Z', title: 'Update one.md', body: '### Summary\n\n```text\n(no summary given)\n```\n' }, 'edit');
   assert.equal(item.summary, 'Update one.md', 'no summary: the title');
 });
+
+test('mode=item: a reader item the App opened or attributed, labelled; anything else is 404 (batch 2b notify)', async () => {
+  const note = gh.addIssue(REPO, { title: 'Note on ¶4', body: NOTE_BODY, labels: [{ name: 'suggested-edit' }, { name: 'section-note' }], user: { login: 'someone', type: 'User' } });
+  const byApp = gh.addIssue(REPO, { title: 'Suggestion', body: 'no attribution here', labels: [{ name: 'suggested-edit' }], user: { login: 'textbook-suggest-edit[bot]', type: 'Bot' } });
+  const unlabelled = gh.addIssue(REPO, { title: 'A bug', body: NOTE_BODY, labels: [{ name: 'bug' }], user: { login: 'someone', type: 'User' } });
+  const plain = gh.addIssue(REPO, { title: 'Hand-made', body: 'no attribution', labels: [{ name: 'section-note' }], user: { login: 'someone', type: 'User' } });
+  const ok = await get({ book: BOOK.slug, mode: 'item', number: String(note) });
+  assert.equal(ok.statusCode, 200);
+  assert.deepEqual([ok.payload.kind, ok.payload.number, ok.payload.summary, ok.payload.paragraph], ['note', note, 'This needs a source.', { n: 4, url: 'https://b.example/chapters/one#p4' }]);
+  assert.equal((await get({ book: BOOK.slug, mode: 'item', number: String(byApp) })).statusCode, 200);
+  for (const n of [unlabelled, plain, 99999]) assert.equal((await get({ book: BOOK.slug, mode: 'item', number: String(n) })).statusCode, 404, `#${n}`);
+  assert.equal((await get({ book: 'nope', mode: 'item', number: '1' })).statusCode, 404);
+  assert.equal((await get({ book: BOOK.slug, mode: 'item', number: 'x' })).statusCode, 404);
+});

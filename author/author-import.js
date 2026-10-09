@@ -190,7 +190,7 @@ async function status(params, auth, book, res, used) {
 }
 
 export default wrap(async (req, res) => {
-  const auth = authorise(req, res, 'GET, POST');
+  const auth = await authorise(req, res, 'GET, POST');
   if (!auth) return;
   const used = [];
   try {

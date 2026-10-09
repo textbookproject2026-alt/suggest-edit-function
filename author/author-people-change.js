@@ -19,7 +19,7 @@ import { LOGIN_RE, MENTION_ACTIONS, proposeChange, registryCredential } from '..
 const registryToken = appCredentials({ contents: 'write', pull_requests: 'write' });
 
 export default wrap(async (req, res) => {
-  const auth = authorise(req, res, 'POST');
+  const auth = await authorise(req, res, 'POST');
   if (!auth) return;
   if (!isJsonContentType(req)) {
     send(res, 415, { error: 'unsupported content-type' });

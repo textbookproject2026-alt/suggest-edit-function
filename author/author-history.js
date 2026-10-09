@@ -95,7 +95,7 @@ async function revision(book, token, left, params) {
 }
 
 export default wrap(async (req, res) => {
-  const auth = authorise(req, res, 'GET');
+  const auth = await authorise(req, res, 'GET');
   if (!auth) return;
   const params = query(req);
   const { identity, tag } = auth;
