@@ -126,10 +126,10 @@ test('the registry keeps a book\'s people on one line each; nothing else changes
 
 test('the author site\'s member list is taken for ids, names and logins only', async () => {
   const fake = async () => ({ ok: true, json: async () => ({
-    members: [{ id: 'm-0a1b2c3d4e', name: 'Ann', email: 'ann@example.org' }, { id: 'nope', name: 'X' }, { id: 'm-1111111111', name: 'a@b.c' }],
+    members: [{ id: 'm-0a1b2c3d4e', name: 'Ann', email: 'ann@example.org' }, { id: 'nope', name: 'X' }, { id: 'm-1111111111', name: 'a@b.c' }, { id: 'm-2222222222', name: 'Bo\u202Eb\u200B  Lee\n' }, { id: 'm-3333333333', name: '\u200B' }],
     github: ['ann-gh', 'bad login!'], mentionsOff: [],
   }) });
-  assert.deepEqual(await membersOf('platform-test-book', fake), { members: [{ id: 'm-0a1b2c3d4e', name: 'Ann' }], authors: ['ann-gh'], mentionsOff: [] });
+  assert.deepEqual(await membersOf('platform-test-book', fake), { members: [{ id: 'm-0a1b2c3d4e', name: 'Ann' }, { id: 'm-2222222222', name: 'Bob Lee' }], authors: ['ann-gh'], mentionsOff: [] });
 });
 
 test('notify: the book and the number only, to the hard-coded author site', async () => {

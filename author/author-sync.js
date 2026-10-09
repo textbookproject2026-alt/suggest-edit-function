@@ -29,8 +29,11 @@ export async function membersOf(slug, fetchImpl = fetch) {
   const res = await fetchImpl(`${AUTHOR_SITE_ORIGIN}/api/internal/members?book=${encodeURIComponent(slug)}`, { redirect: 'error', signal: AbortSignal.timeout(8000) });
   if (!res.ok) throw new Error(`members: HTTP ${res.status}`);
   const d = await res.json();
-  const members = (d.members ?? []).filter((m) => ID_RE.test(m?.id ?? '') && typeof m.name === 'string' && m.name.trim() && !m.name.includes('@'))
-    .map((m) => ({ id: m.id, name: m.name.trim().slice(0, 80) }));
+  // Names go into the public registry: cleaned again here (control, bidi and
+  // zero-width characters out), whatever the author site already did.
+  const clean = (n) => (typeof n === 'string' ? n.replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 80) : '');
+  const members = (d.members ?? []).map((m) => ({ id: m?.id ?? '', name: clean(m?.name) }))
+    .filter((m) => ID_RE.test(m.id) && m.name && !m.name.includes('@'));
   const logins = (list) => [...new Set((list ?? []).filter((l) => typeof l === 'string' && LOGIN_RE.test(l)))];
   return { members, authors: logins(d.github), mentionsOff: logins(d.mentionsOff) };
 }
