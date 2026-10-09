@@ -109,16 +109,20 @@ export default async function handler(req, res) {
     const left = budget(25_000);
     const people = await membersOf(slug);
     if (!people.members.length) return send(res, 409, { error: 'no members', userMessage: 'The author site lists nobody on this book; nothing synced.' });
-    credential = await registryCredential(appToken, tag);
-    const token = credential.token;
-    const main = await registryAtMain(token, left);
-    const entry = main.registry.books.find((b) => b.slug === slug);
-    const same = isDeepStrictEqual(entry.members ?? null, people.members)
+    const matches = (entry) => isDeepStrictEqual(entry.members ?? null, people.members)
       && isDeepStrictEqual(entry.authors ?? [], people.authors)
       && isDeepStrictEqual(entry.mentions_off ?? [], people.mentionsOff);
+    credential = await registryCredential(appToken, tag);
+    const token = credential.token;
     const branch = `people/${slug}/sync`;
     const open = await ghJson(`/repos/${REGISTRY_REPO}/pulls?state=open&head=${encodeURIComponent(`${REGISTRY_REPO.split('/')[0]}:${branch}`)}`, token, left);
-    if (same) {
+    // Anyone can ask for a sync, so the common case costs one GitHub call: the
+    // registry this deployment was built with already says this, and no sync pull
+    // request is open (one open could carry an older list, so it is always checked).
+    if (!open?.length && matches(book)) return send(res, 200, { inSync: true });
+    const main = await registryAtMain(token, left);
+    const entry = main.registry.books.find((b) => b.slug === slug);
+    if (matches(entry)) {
       // Main already says this: a sync pull request still open is out of date.
       for (const pr of open ?? []) await ghJson(`/repos/${REGISTRY_REPO}/pulls/${pr.number}`, token, left, { method: 'PATCH', body: { state: 'closed' } });
       return send(res, 200, { inSync: true });
