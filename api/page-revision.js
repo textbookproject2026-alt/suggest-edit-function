@@ -45,7 +45,8 @@
 import { REGISTRY, SHA_RE, Refusal, appCredentials, budget, encodePath, gh, ghJson, query, wrap } from '../lib/author.mjs';
 import { clientIp, createRateLimiter, isSafePath, send } from '../lib/common.mjs';
 
-const appToken = appCredentials({ contents: 'read', pull_requests: 'read' });
+// issues: read for /api/history's notes and suggestions: without it GitHub lists none (no error).
+const appToken = appCredentials({ contents: 'read', pull_requests: 'read', issues: 'read' });
 const isRateLimited = createRateLimiter(120, 60 * 60 * 1000);
 const MAX_NAME = 80;
 const MAX_SHAS = 30;
