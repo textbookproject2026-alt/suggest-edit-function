@@ -15,7 +15,13 @@
  *     content                                   (page: the whole new file)
  *     startLine, original, replacement, paragraph?   (paragraph: 0-based first
  *                                                line of `original` at baseSha)
- *     title, description,
+ *     summary                                   ("What did you change, and why?", 10-500
+ *                                               characters; the editor requires it). It is
+ *                                               the commit's subject (cut at 72), the PR
+ *                                               title's tail and the PR body's Summary.
+ *                                               Missing (a page built before it): the
+ *                                               Summary says "(no summary given)".
+ *     title, description                        (title: optional head of the PR title)
  *     identity                                  (from /api/github-auth), or
  *     name, email, website                      (anonymous, only with
  *                                               PROPOSE_EDIT_ANONYMOUS=on; website
@@ -74,6 +80,8 @@ const LABEL_DEFAULTS = {
 const MAX_CONTENT = 400_000; // characters; chapters are well under this
 const MAX_BLOCK = 20_000;
 const MAX_TITLE = 200;
+const MAX_SUMMARY = 500;
+const NO_SUMMARY = '(no summary given)';
 const MAX_DESCRIPTION = 5000;
 const MAX_NAME = 200;
 const MAX_EMAIL = 254;
@@ -214,8 +222,40 @@ function fenced(text, lang = 'text') {
   return [`${f}${lang}`, text, f];
 }
 
+/** At most `max` characters, cut at a word with an ellipsis: a commit subject, a PR title. */
+export const cutAt = (text, max) => {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max - 1);
+  const space = cut.lastIndexOf(' ');
+  return `${(space > max / 2 ? cut.slice(0, space) : cut).trimEnd()}…`;
+};
+
+/** The PR's title: the editor's head ("Update chapter-03"), then the reader's summary. */
+export const prTitle = (data) => (data.summary ? cutAt(`${data.title}: ${data.summary}`, 256) : data.title);
+
+/** The commit message: the summary as its subject (cut at 72, in full below if cut), then the description. */
+export function commitMessage(data) {
+  const subject = data.summary ? cutAt(data.summary, 72) : data.title;
+  return [
+    subject,
+    data.summary && subject !== data.summary ? data.summary : '',
+    data.description,
+    data.identity ? '' : 'Proposed by a reader with the in-site editor.',
+    // The name they gave, as a trailer, so the book's build can credit it on the
+    // Contributors page and in page history without asking GitHub. No name, no
+    // trailer: "a reader" everywhere.
+    data.identity || !trailerValue(data.name) ? '' : `Proposed-by: ${trailerValue(data.name)}`,
+  ].filter(Boolean).join('\n\n');
+}
+
 function prBody(book, branch, data) {
-  const parts = [`**File:** [\`${data.path}\`](${fileUrl(book, data.path, branch)})`];
+  const parts = [
+    '### Summary',
+    '',
+    ...fenced(data.summary || NO_SUMMARY),
+    '',
+    `**File:** [\`${data.path}\`](${fileUrl(book, data.path, branch)})`,
+  ];
   if (data.mode === 'paragraph' && data.paragraph) parts.push(`**Where:** ¶${data.paragraph}`);
   if (data.description) parts.push('', '### Description', '', ...fenced(data.description));
   parts.push(...mentionLines(book, AUTHOR_SITE, data.identity?.login));
@@ -232,6 +272,10 @@ function prBody(book, branch, data) {
 
 function issueBody(book, branch, data, diff) {
   const parts = [
+    '### Summary',
+    '',
+    ...fenced(data.summary || NO_SUMMARY),
+    '',
     `**File:** [\`${data.path}\`](${fileUrl(book, data.path, branch)})`,
     '',
     `The page changed on \`${branch}\` while the reader was editing, so their edit could not be applied automatically. Their change, against the version they edited:`,
@@ -279,6 +323,11 @@ function validate(body, origin) {
   const title = asString(body.title).replace(/\s+/g, ' ');
   if (title.length > MAX_TITLE) return reject('validation: title too long', `Please keep the title under ${MAX_TITLE} characters.`);
   data.title = title || `Update ${basename(path)}`;
+  const summary = asString(body.summary).replace(/\s+/g, ' ');
+  if (summary.length > MAX_SUMMARY) {
+    return reject('validation: summary too long', `Please keep the summary under ${MAX_SUMMARY} characters.`);
+  }
+  data.summary = summary;
   const description = asString(body.description);
   if (description.length > MAX_DESCRIPTION) {
     return reject('validation: description too long', `Please keep the description under ${MAX_DESCRIPTION} characters.`);
@@ -331,15 +380,7 @@ async function openPullRequest(book, token, left, current, newText, data, tag) {
 
   try {
     const out = current.crlf ? newText.replace(/\n/g, '\r\n') : newText;
-    const message = [
-      data.title,
-      data.description,
-      data.identity ? '' : 'Proposed by a reader with the in-site editor.',
-      // The name they gave, as a trailer, so the book's build can credit it on the
-      // Contributors page and in page history without asking GitHub. No name, no
-      // trailer: "a reader" everywhere.
-      data.identity || !trailerValue(data.name) ? '' : `Proposed-by: ${trailerValue(data.name)}`,
-    ].filter(Boolean).join('\n\n');
+    const message = commitMessage(data);
     const put = await gh(`/repos/${repo}/contents/${encodePath(data.path)}`, token, left, {
       method: 'PUT',
       body: {
@@ -357,7 +398,7 @@ async function openPullRequest(book, token, left, current, newText, data, tag) {
 
     const pr = await gh(`/repos/${repo}/pulls`, token, left, {
       method: 'POST',
-      body: { title: data.title, head: branch, base: current.branch, body: prBody(book, current.branch, data) },
+      body: { title: prTitle(data), head: branch, base: current.branch, body: prBody(book, current.branch, data) },
     });
     if (!pr.ok) throw await fail('open pull request', pr);
     const opened = await pr.json();
