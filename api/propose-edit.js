@@ -58,6 +58,7 @@ import {
   mentionLines,
 } from '../lib/common.mjs';
 import { noreplyEmail, readIdentity, readIdentitySecret } from '../lib/identity.mjs';
+import { notifyAuthors } from '../lib/member.mjs';
 
 const REGISTRY = validateRegistry(BUNDLE.registry);
 const RESOLVER = createResolver(REGISTRY);
@@ -557,6 +558,7 @@ async function handlePost(req, res, book, origin, tag) {
       console.warn(`conflict: ${err.message}; filing an issue ${tag}`);
       const issueUrl = await fileFallbackIssue(book, credential.token, left, current, data);
       console.log(`fallback issue for "${data.path}" — ${issueUrl} ${tag}`);
+      await notifyAuthors(book.slug, issueUrl);
       send(res, 201, { issueUrl, fallback: true });
       return;
     }
@@ -567,11 +569,13 @@ async function handlePost(req, res, book, origin, tag) {
     try {
       const prUrl = await openPullRequest(book, credential.token, left, current, newText, data, tag);
       console.log(`opened ${prUrl} for "${data.path}" (${data.mode}, ${data.identity ? `@${data.identity.login}` : 'anonymous'}, credential=${credential.kind}) ${tag}`);
+      await notifyAuthors(book.slug, prUrl);
       send(res, 201, { prUrl });
     } catch (err) {
       if (!(err instanceof Conflict)) throw err;
       console.warn(`conflict: ${err.message}; filing an issue ${tag}`);
       const issueUrl = await fileFallbackIssue(book, credential.token, left, current, data);
+      await notifyAuthors(book.slug, issueUrl);
       send(res, 201, { issueUrl, fallback: true });
     }
   } catch (err) {

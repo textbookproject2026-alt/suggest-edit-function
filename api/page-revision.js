@@ -200,6 +200,7 @@ export default wrap(async (req, res) => {
   const q = query(req);
   const slug = q.get('book') ?? '';
   if (q.get('mode') === 'open') return open(req, res, q);
+  if (q.get('mode') === 'item') return item(req, res, q);
   const sha = (q.get('sha') ?? '').toLowerCase();
   const path = q.get('path') ?? '';
   const shas = q.has('shas') ? [...new Set((q.get('shas') ?? '').toLowerCase().split(','))] : null;
@@ -283,6 +284,51 @@ export default wrap(async (req, res) => {
       'GitHub couldn’t be reached just now. Please try again in a moment.');
   }
 });
+
+/** The App that opens readers' proposals, notes and suggestions on every book. */
+const READER_APP_LOGIN = 'textbook-suggest-edit[bot]';
+const READER_LABELS = { 'proposed-edit': 'edit', 'section-note': 'note', 'suggested-edit': 'suggestion' };
+
+/**
+ * mode=item&book=<slug>&number=<n>: one reader proposal, note or suggestion, read with
+ * the App, for the author site's reader-suggestion emails (batch 2b). Only an item
+ * that exists, is labelled proposed-edit, section-note or suggested-edit, and was
+ * opened by the platform's App or carries the platform's attribution line; anything
+ * else is 404. Public fields only, as mode=open.
+ */
+async function item(req, res, q) {
+  const slug = q.get('book') ?? '';
+  const number = Number(q.get('number'));
+  const book = REGISTRY.books.find((b) => b.slug === slug && b.status !== 'retired');
+  if (!book || !Number.isInteger(number) || number < 1 || number > 1e7) return refuse(res, 404, 'not found', 'Not found.');
+  if (isRateLimited(clientIp(req), Date.now())) {
+    res.setHeader('Retry-After', '600');
+    return refuse(res, 429, 'rate limit exceeded', 'Too many requests from here in the last hour. Please try again later.');
+  }
+  const tag = `[item ${slug}#${number}]`;
+  let credential;
+  try {
+    credential = await appToken(book, tag);
+    const r = await gh(`/repos/${book.content.repo}/issues/${number}`, credential.token, budget(10_000), { allow: [404, 410] });
+    if (!r.ok) return refuse(res, 404, 'not found', 'Not found.');
+    const it = await r.json();
+    const labels = (it.labels ?? []).map((l) => (typeof l === 'string' ? l : l?.name));
+    const kinds = labels.map((l) => READER_LABELS[l]).filter(Boolean);
+    const byApp = it.user?.type === 'Bot' && it.user?.login === READER_APP_LOGIN;
+    if (!kinds.length || (!byApp && !attributionOf(String(it.body ?? '')))) return refuse(res, 404, 'not found', 'Not found.');
+    const one = openItem(it, kinds.includes('note') ? 'note' : kinds.includes('edit') ? 'edit' : 'suggestion');
+    const where = /^\*\*Where:\*\* \[¶(\d+)\]\((https:\/\/[^)\s]+)\)/m.exec(String(it.body ?? ''));
+    res.setHeader('Cache-Control', 'no-store');
+    return send(res, 200, {
+      number: one.number, kind: one.kind, url: one.url, summary: one.summary, state: it.state, created: it.created_at,
+      ...(where ? { paragraph: { n: Number(where[1]), url: where[2] } } : {}),
+    });
+  } catch (err) {
+    if (err.status === 401) credential?.refused();
+    console.error(`item: ${err.message} ${tag}`);
+    return refuse(res, 502, `github: ${err.message}`, 'GitHub couldn’t be reached just now.');
+  }
+}
 
 /** mode=open (/api/history): the book's, or a page's, open proposals and notes. */
 async function open(req, res, q) {

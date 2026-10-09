@@ -116,7 +116,7 @@ async function change(book, token, left, params) {
 const READS = { tree, file, drafts: draftsDiff, suggestions, 'suggestion-changes': suggestionChanges, changes, change, publish: (book, token, left) => publishState(book, token, left, 1) };
 
 export default wrap(async (req, res) => {
-  const auth = authorise(req, res, 'GET');
+  const auth = await authorise(req, res, 'GET');
   if (!auth) return;
   const params = query(req);
   const what = params.get('what') ?? '';

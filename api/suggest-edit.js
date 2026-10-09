@@ -44,6 +44,7 @@ import {
   mentionLines,
 } from '../lib/common.mjs';
 import { readIdentity, readIdentitySecret } from '../lib/identity.mjs';
+import { notifyAuthors } from '../lib/member.mjs';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -369,6 +370,7 @@ async function handle(req, res) {
     await ensureLabels(book.content.repo, credential.token, LABEL_DEFAULTS, LABEL_BUDGET_MS);
     const issueUrl = await createIssue(book, credential.token, result.data);
     console.log(`created issue for "${result.data.path}" — ${issueUrl} (credential=${credential.kind}) ${tag}`);
+    await notifyAuthors(book.slug, issueUrl);
     send(res, 201, { issueUrl });
   } catch (err) {
     // A revoked or expired App token must not stay cached for the rest of the instance.

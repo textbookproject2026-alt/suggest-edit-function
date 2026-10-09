@@ -113,7 +113,10 @@ test('table: every registered book\'s origin files on that book\'s repo', async 
     assert.equal(r.headers['access-control-allow-origin'], origin);
     const issuePosts = requests.filter((q) => q.method === 'POST' && q.url.endsWith('/issues'));
     assert.deepEqual(issuePosts.map((q) => q.url), [`https://api.github.com/repos/${b.content.repo}/issues`]);
-    assert.ok(requests.every((q) => q.url.startsWith(`https://api.github.com/repos/${b.content.repo}/`)),
+    // The one call off GitHub: telling the author site, by book and number only (batch 2b).
+    const offGitHub = requests.filter((q) => !q.url.startsWith('https://api.github.com/'));
+    assert.deepEqual(offGitHub.map((q) => [q.url, q.body]), [['https://author.confused4now.org/api/internal/notify', { book: b.slug, number: 1 }]]);
+    assert.ok(requests.filter((q) => q.url.startsWith('https://api.github.com/')).every((q) => q.url.startsWith(`https://api.github.com/repos/${b.content.repo}/`)),
       `${b.slug}: every GitHub call must target ${b.content.repo}`);
     assert.ok(r.issue.body.startsWith(
       `**File:** [\`${VALID.path}\`](https://github.com/${b.content.repo}/blob/${b.content.live_branch}/`));
@@ -156,7 +159,7 @@ test('table: with App credentials, each book\'s installation is looked up, the t
       assert.equal(mint.url, `https://api.github.com/app/installations/${installation}/access_tokens`, `${b.slug}: then mint`);
       assert.deepEqual(mint.body.repositories, [b.content.repo.split('/')[1]], `${b.slug}: token scoped to its repo`);
       assert.ok(rest.length >= 1);
-      for (const q of rest) {
+      for (const q of rest.filter((x) => x.url !== 'https://author.confused4now.org/api/internal/notify')) {
         assert.ok(q.url.startsWith(`https://api.github.com/repos/${b.content.repo}/`), `${b.slug}: ${q.method} ${q.url}`);
         assert.equal(q.headers.Authorization, `Bearer ghs_${b.slug}`, `${b.slug}: must use the minted token, not a fallback`);
       }

@@ -14,7 +14,7 @@ import { people, registryCredential } from '../lib/author-people.mjs';
 const registryToken = appCredentials({ contents: 'read', pull_requests: 'read' });
 
 export default wrap(async (req, res) => {
-  const auth = authorise(req, res, 'GET');
+  const auth = await authorise(req, res, 'GET');
   if (!auth) return;
   const book = bookFor(query(req).get('book'), auth, res);
   if (!book) return;
