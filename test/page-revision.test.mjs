@@ -183,6 +183,8 @@ test('what is proposed: open proposals and notes, public fields only, by page; c
     ['edit', pr, 'Fixed the spelling of receive.', { name: 'ada-l', github: 'ada-l' }, 2],
   ].sort((a, b) => b[1] - a[1]));
   for (const i of res.payload.items) assert.deepEqual(Object.keys(i).sort(), ['date', 'files', 'kind', 'number', 'paragraph', 'summary', 'url', 'who'].filter((k) => k !== 'paragraph' || 'paragraph' in i).sort());
+  // GitHub lists no issues (and no error) for a token without issues: read.
+  assert.ok(gh.state.tokenRequests.at(-1).permissions.issues === 'read', 'the token can read the notes');
   const whole = await get({ book: BOOK.slug, mode: 'open' });
   assert.equal(whole.payload.items.length, 3, 'the whole book: both pages');
   const calls = gh.state.calls.length;
