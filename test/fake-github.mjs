@@ -257,6 +257,7 @@ export function createFakeGitHub() {
     }
     if ((m = /^\/issues\/(\d+)\/comments$/.exec(rest)) && method === 'POST') {
       const i = r.issues.get(Number(m[1])) ?? r.pulls.get(Number(m[1]));
+      if (i.locked) return json(403, { message: 'Unable to create comment because issue is locked.' });
       i.comments.push(body.body);
       const id = (state.nextCommentId = (state.nextCommentId ?? 5000) + 1);
       (i.commentMeta ??= [])[i.comments.length - 1] = { id, user: { login: 'textbook-suggest-edit[bot]', type: 'Bot' }, created_at: tick() };
@@ -276,9 +277,9 @@ export function createFakeGitHub() {
       }
       return json(404, {});
     }
-    if ((m = /^\/issues\/(\d+)\/lock$/.exec(rest)) && method === 'PUT') {
+    if ((m = /^\/issues\/(\d+)\/lock$/.exec(rest))) {
       const i = r.issues.get(Number(m[1])) ?? r.pulls.get(Number(m[1]));
-      i.locked = true;
+      i.locked = method === 'PUT';
       return json(204, null);
     }
     if ((m = /^\/issues\/(\d+)\/events$/.exec(rest))) return json(200, r.issues.get(Number(m[1]))?.events ?? []);

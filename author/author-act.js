@@ -83,6 +83,21 @@ async function lock(book, token, left, n, tag) {
   }
 }
 
+/**
+ * `fn` on a declined item whose conversation is locked: the App can't write on a
+ * locked conversation, so it unlocks, writes and locks again (readers never get the
+ * gap: GitHub's lock is only about who may comment there).
+ */
+async function whileUnlocked(book, token, left, it, tag, fn) {
+  if (!it.locked) return fn();
+  await ghJson(`/repos/${book.content.repo}/issues/${it.number}/lock`, token, left, { method: 'DELETE', allow: [404] });
+  try {
+    return await fn();
+  } finally {
+    await lock(book, token, left, it.number, tag);
+  }
+}
+
 // --- comments on declined items ---------------------------------------------------
 
 async function declinedThing(book, n, token, left) {
@@ -97,7 +112,7 @@ async function commentAdd(book, body, ctx) {
   const t = cleanText(body.text, COMMENT_MIN);
   if (t.error) throw new Refusal(400, 'validation: text', t.error);
   const it = await declinedThing(book, number(body), token, left);
-  const c = await comment(book, token, left, it.number, memberComment(t.text, identity));
+  const c = await whileUnlocked(book, token, left, it, tag, () => comment(book, token, left, it.number, memberComment(t.text, identity)));
   console.log(`#${it.number}: comment ${c?.id} by ${identity.login} ${tag}`);
   return { done: true, id: c?.id ?? null, steps: ['Your comment was added. Anyone can read it in the book\'s history.'] };
 }
@@ -113,7 +128,7 @@ async function commentDelete(book, body, ctx) {
   if (!d || !String(c.issue_url ?? '').endsWith(`/issues/${it.number}`) || !identity.member || d.member !== identity.login) {
     throw new Refusal(403, 'not yours', 'You can only delete your own comments.');
   }
-  await ghJson(`/repos/${book.content.repo}/issues/comments/${id}`, token, left, { method: 'DELETE' });
+  await whileUnlocked(book, token, left, it, tag, () => ghJson(`/repos/${book.content.repo}/issues/comments/${id}`, token, left, { method: 'DELETE' }));
   console.log(`#${it.number}: comment ${id} deleted by ${identity.login} ${tag}`);
   return { done: true, steps: ['Your comment was deleted.'] };
 }
