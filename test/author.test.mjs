@@ -672,11 +672,13 @@ test('members comment on a declined item; only the writer deletes it; never on a
   assert.equal(other.statusCode, 403);
   const declineId = issue.commentMeta[0].id;
   assert.equal((await asMember(act, { book: BOOK.slug, action: 'comment-delete', number: n, id: declineId })).statusCode, 403);
+  assert.equal(issue.locked, true, 'locked again after commenting');
   const before = issue.comments.length;
   const del = await asMember(act, { book: BOOK.slug, action: 'comment-delete', number: n, id: added.payload.id });
   assert.equal(del.statusCode, 200, JSON.stringify(del.payload));
   assert.equal(issue.comments.length, before - 1);
   assert.ok(!issue.comments.some((c) => c.includes('revisit')));
+  assert.equal(issue.locked, true);
 });
 
 test('publishing: the tick box, the one request shown, a clean merge — then a merge commit naming the author', async () => {
