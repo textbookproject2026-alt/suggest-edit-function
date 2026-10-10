@@ -114,6 +114,8 @@ test('refused: another request than the one asserted, another book, no read-back
 
 test('the registry keeps a book\'s people on one line each; nothing else changes', () => {
   const reg = structuredClone(BUNDLE.registry);
+  // The "adds" case, whatever the live registry has for this book already.
+  for (const k of ['members', 'mentions_off']) delete reg.books.find((x) => x.slug === BOOK.slug)[k];
   const text = `${JSON.stringify(reg, null, 2).replace(/"(authors|mentions_off)": \[\s*([^\]]*?)\s*\]/g, (_, k, l) => `"${k}": [${l.split(/,\s*/).filter(Boolean).join(', ')}]`)}\n`;
   const people = { authors: ['textbookproject2026-alt'], members: [{ id: 'm-0a1b2c3d4e', name: 'Alec Gordon' }], mentionsOff: [] };
   const out = withBookPeople(text, JSON.parse(text), BOOK.slug, people);
@@ -121,7 +123,11 @@ test('the registry keeps a book\'s people on one line each; nothing else changes
   const b = parsed.books.find((x) => x.slug === BOOK.slug);
   assert.deepEqual([b.authors, b.members, b.mentions_off], [people.authors, people.members, []]);
   assert.match(out, /"members": \[\{ "id": "m-0a1b2c3d4e", "name": "Alec Gordon" \}\]/);
-  assert.equal(out.split('\n').length - text.split('\n').length, (BOOK.mentions_off ? 0 : 1) + 1);
+  assert.equal(out.split('\n').length - text.split('\n').length, 2);
+  // A members list spread over several lines (JSON.stringify's own layout) is rewritten whole.
+  const spread = `${JSON.stringify(JSON.parse(out), null, 2)}\n`;
+  const again = withBookPeople(spread, JSON.parse(spread), BOOK.slug, { ...people, members: [{ id: 'm-0a1b2c3d4e', name: 'Alec [G]' }] });
+  assert.deepEqual(JSON.parse(again).books.find((x) => x.slug === BOOK.slug).members, [{ id: 'm-0a1b2c3d4e', name: 'Alec [G]' }]);
 });
 
 test('the author site\'s member list is taken for ids, names and logins only', async () => {
@@ -138,4 +144,28 @@ test('notify: the book and the number only, to the hard-coded author site', asyn
   await notifyAuthors('b', 'https://github.com/o/r/pull/7', async (url, opts) => calls.push([url, JSON.parse(opts.body)]));
   await notifyAuthors('b', 'nonsense', async () => calls.push('no'));
   assert.deepEqual(calls, [[`${AUTHOR_SITE_ORIGIN}/api/internal/notify`, { book: 'b', number: 12 }], [`${AUTHOR_SITE_ORIGIN}/api/internal/notify`, { book: 'b', number: 7 }]]);
+});
+
+test('a book whose authors list is spread over several lines syncs too', () => {
+  const reg = { books: [{ slug: 'g', title: 'G', authors: ['old-login'] }] };
+  const text = '{\n  "books": [\n    {\n      "slug": "g",\n      "title": "G",\n      "authors": [\n        "old-login"\n      ],\n      "x": 1\n    }\n  ]\n}\n';
+  const fixed = { ...reg, books: [{ ...reg.books[0], x: 1 }] };
+  const out = withBookPeople(text, fixed, 'g', { authors: ['new-login'], members: [{ id: 'm-0a1b2c3d4e', name: 'A [B]' }], mentionsOff: [] });
+  const b = JSON.parse(out).books[0];
+  assert.deepEqual([b.authors, b.members, b.mentions_off, b.x], [['new-login'], [{ id: 'm-0a1b2c3d4e', name: 'A [B]' }], [], 1]);
+  assert.match(out, /^      "authors": \["new-login"\],$/m);
+  // And again, now that members is on its own line.
+  const again = withBookPeople(out, JSON.parse(out), 'g', { authors: ['new-login'], members: [{ id: 'm-0a1b2c3d4e', name: 'A [B] C' }], mentionsOff: ['new-login'] });
+  assert.deepEqual(JSON.parse(again).books[0].members, [{ id: 'm-0a1b2c3d4e', name: 'A [B] C' }]);
+});
+
+test('a GitHub identity token opens only the list of the author\'s books', async () => {
+  const { authorise } = await import('../lib/author.mjs');
+  for (const [method, url] of [['GET', '/api/author-read?what=tree&book=platform-test-book'], ['POST', '/api/author-act'], ['GET', '/api/author-people?book=platform-test-book'], ['GET', '/api/author?route=read&what=tree']]) {
+    let code = 0;
+    const res = { setHeader() {}, status: (c) => ((code = c), { json() {} }) };
+    const req = { method, url, headers: { origin: 'https://author.confused4now.org', authorization: 'Bearer anything' } };
+    assert.equal(await authorise(req, res, 'GET, POST'), null, `${method} ${url}`);
+    assert.equal(code, 401, `${method} ${url}`);
+  }
 });

@@ -21,6 +21,9 @@ Object.assign(process.env, { GITHUB_APP_ID: '123456', GITHUB_APP_PRIVATE_KEY: Bu
 const gh = createFakeGitHub();
 globalThis.fetch = gh.fetch;
 
+// These tests sign in with a GitHub identity token, which production now takes only
+// for author-read?what=books (member.test.mjs checks that).
+(await import('../lib/author.mjs')).LEGACY_BEARER.everywhere = true;
 const { default: BUNDLE } = await import('../registry/bundled.mjs');
 const { issueIdentity } = await import('../lib/identity.mjs');
 const { withAuthors, withMentionsOff, outcome, PLATFORM_OWNER, REGISTRY_REPO, STALLED_MS } = await import('../lib/author-people.mjs');
@@ -221,6 +224,7 @@ test('mentions: an author turns @mentions on new suggestions off for themselves,
 
 test('withMentionsOff adds the line after authors, or rewrites it, and nothing else', () => {
   const reg = structuredClone(BUNDLE.registry);
+  delete reg.books.find((b) => b.slug === 'platform-test-book').mentions_off; // the "adds" case, whatever the live registry has
   const text = registryText(reg);
   const out = withMentionsOff(text, reg, 'platform-test-book', ['gobi10k']);
   assert.equal(out.split('\n').length, text.split('\n').length + 1);

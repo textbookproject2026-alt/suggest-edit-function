@@ -25,6 +25,9 @@ Object.assign(process.env, APP_ENV, {
 const gh = createFakeGitHub();
 globalThis.fetch = gh.fetch;
 
+// These tests sign in with a GitHub identity token, which production now takes only
+// for author-read?what=books (member.test.mjs checks that).
+(await import('../lib/author.mjs')).LEGACY_BEARER.everywhere = true;
 const { default: BUNDLE } = await import('../registry/bundled.mjs');
 const { issueIdentity, sign } = await import('../lib/identity.mjs');
 const { isAuthorPath } = await import('../lib/author.mjs');
