@@ -114,6 +114,8 @@ test('refused: another request than the one asserted, another book, no read-back
 
 test('the registry keeps a book\'s people on one line each; nothing else changes', () => {
   const reg = structuredClone(BUNDLE.registry);
+  // The "adds" case, whatever the live registry has for this book already.
+  for (const k of ['members', 'mentions_off']) delete reg.books.find((x) => x.slug === BOOK.slug)[k];
   const text = `${JSON.stringify(reg, null, 2).replace(/"(authors|mentions_off)": \[\s*([^\]]*?)\s*\]/g, (_, k, l) => `"${k}": [${l.split(/,\s*/).filter(Boolean).join(', ')}]`)}\n`;
   const people = { authors: ['textbookproject2026-alt'], members: [{ id: 'm-0a1b2c3d4e', name: 'Alec Gordon' }], mentionsOff: [] };
   const out = withBookPeople(text, JSON.parse(text), BOOK.slug, people);
@@ -121,7 +123,11 @@ test('the registry keeps a book\'s people on one line each; nothing else changes
   const b = parsed.books.find((x) => x.slug === BOOK.slug);
   assert.deepEqual([b.authors, b.members, b.mentions_off], [people.authors, people.members, []]);
   assert.match(out, /"members": \[\{ "id": "m-0a1b2c3d4e", "name": "Alec Gordon" \}\]/);
-  assert.equal(out.split('\n').length - text.split('\n').length, (BOOK.mentions_off ? 0 : 1) + 1);
+  assert.equal(out.split('\n').length - text.split('\n').length, 2);
+  // A members list spread over several lines (JSON.stringify's own layout) is rewritten whole.
+  const spread = `${JSON.stringify(JSON.parse(out), null, 2)}\n`;
+  const again = withBookPeople(spread, JSON.parse(spread), BOOK.slug, { ...people, members: [{ id: 'm-0a1b2c3d4e', name: 'Alec [G]' }] });
+  assert.deepEqual(JSON.parse(again).books.find((x) => x.slug === BOOK.slug).members, [{ id: 'm-0a1b2c3d4e', name: 'Alec [G]' }]);
 });
 
 test('the author site\'s member list is taken for ids, names and logins only', async () => {

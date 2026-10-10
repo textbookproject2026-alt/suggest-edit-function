@@ -224,6 +224,7 @@ test('mentions: an author turns @mentions on new suggestions off for themselves,
 
 test('withMentionsOff adds the line after authors, or rewrites it, and nothing else', () => {
   const reg = structuredClone(BUNDLE.registry);
+  delete reg.books.find((b) => b.slug === 'platform-test-book').mentions_off; // the "adds" case, whatever the live registry has
   const text = registryText(reg);
   const out = withMentionsOff(text, reg, 'platform-test-book', ['gobi10k']);
   assert.equal(out.split('\n').length, text.split('\n').length + 1);

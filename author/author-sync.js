@@ -58,15 +58,27 @@ export function withBookPeople(text, registry, slug, { authors, members, mention
     if (!m || m.index > end()) throw new Refusal(409, 'no authors line', "This book's people can't be synced automatically.");
     return m;
   };
+  // The end of the JSON array starting at i (strings skipped, so a name may hold "]").
+  const arrayEnd = (i) => {
+    let depth = 0;
+    for (let j = i; j < out.length; j++) {
+      const c = out[j];
+      if (c === '"') {
+        for (j++; out[j] !== '"'; j++) if (out[j] === '\\') j++;
+      } else if (c === '[' || c === '{') depth++;
+      else if ((c === ']' || c === '}') && --depth === 0) return j + 1;
+    }
+    return -1;
+  };
   const set = (key, value) => {
     const line = `"${key}": ${value}`;
-    // members is only ever written here, on one line (a name may hold "]"); the
-    // login lists may have been written by hand over several lines.
-    const re = new RegExp(key === 'members' ? `"${key}":\\s*\\[[^\\n]*\\]` : `"${key}":\\s*\\[[^\\]]*\\]`, 'g');
+    const re = new RegExp(`"${key}":\\s*\\[`, 'g');
     re.lastIndex = at;
     const m = re.exec(out);
     if (m && m.index < end()) {
-      out = `${out.slice(0, m.index)}${line}${out.slice(m.index + m[0].length)}`;
+      // On one line or spread over several (as JSON.stringify or a hand edit leaves it).
+      const close = arrayEnd(m.index + m[0].length - 1);
+      out = `${out.slice(0, m.index)}${line}${out.slice(close)}`;
       return;
     }
     const a = authorsLine();
