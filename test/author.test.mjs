@@ -549,17 +549,30 @@ test('accept by hand, then "I\'ve made the change" with the newest commit on the
   assert.match(issue.comments[1], new RegExp(sent.payload.sha));
 
   const d = suggestionIssue('no');
-  await call(act, { body: { book: BOOK.slug, action: 'suggestion-decline', number: d } });
+  // No reason, or a too-short one: refused, and nothing is written.
+  for (const reason of [undefined, '', '   short  ', 'x'.repeat(1001)]) {
+    const r = await call(act, { body: { book: BOOK.slug, action: 'suggestion-decline', number: d, reason } });
+    assert.equal(r.statusCode, 400, String(reason));
+    assert.match(r.payload.userMessage, /Why is this being declined\?/);
+  }
+  assert.equal(gh.repo(REPO).issues.get(d).comments.length, 0);
+  assert.equal(gh.repo(REPO).issues.get(d).state, 'open');
+  const ok = await call(act, { body: { book: BOOK.slug, action: 'suggestion-decline', number: d, reason: 'The chapter already says this in ¶4, @someone.' } });
+  assert.equal(ok.statusCode, 200, JSON.stringify(ok.payload));
   const declined = gh.repo(REPO).issues.get(d);
   assert.equal(declined.state, 'closed');
-  assert.match(declined.comments[0], /stay as it is[\s\S]*by @brandonandcaroline via the author site/);
+  assert.equal(declined.state_reason, 'not_planned');
+  assert.equal(declined.locked, true);
+  assert.match(declined.comments[0], /^<!-- tb-declined \{"member":"brandonandcaroline","name":"Brandon","reason":"The chapter already says this in ¶4, @someone\."\} -->\n\*\*Declined by Brandon\*\*/);
+  assert.match(declined.comments[0], /> The chapter already says this in ¶4, @\u200bsomeone\./, 'no mention ping');
+  assert.match(declined.comments[1], /stay as it is[\s\S]*by @brandonandcaroline via the author site/, 'the thank-you stays');
 });
 
 test('an issue that isn\'t a suggestion can\'t be answered or closed from here', async () => {
   resetBook();
   const n = gh.addIssue(REPO, { title: 'Build broke', labels: [{ name: 'bug' }] });
   for (const action of ['suggestion-accept', 'suggestion-decline']) {
-    assert.equal((await call(act, { body: { book: BOOK.slug, action, number: n } })).statusCode, 404);
+    assert.equal((await call(act, { body: { book: BOOK.slug, action, number: n, reason: 'A good enough reason.' } })).statusCode, 404);
   }
   assert.equal(gh.repo(REPO).issues.get(n).state, 'open');
   assert.equal(gh.repo(REPO).issues.get(n).comments.length, 0);
@@ -604,18 +617,66 @@ test('a pull request that isn\'t into drafts can\'t be accepted or declined from
   gh.commitFiles(REPO, 'sneaky', { 'README.md': 'x' });
   const n = gh.addPull(REPO, { head: 'sneaky', base: LIVE, title: 'into live' });
   for (const action of ['change-accept', 'change-decline']) {
-    assert.equal((await call(act, { body: { book: BOOK.slug, action, number: n } })).statusCode, 409);
+    assert.equal((await call(act, { body: { book: BOOK.slug, action, number: n, reason: 'A good enough reason.' } })).statusCode, 409);
   }
   assert.equal(gh.repo(REPO).pulls.get(n).state, 'open');
 });
 
-test('declining a draft change leaves a note naming the author, then closes it', async () => {
+test('declining a draft change needs a reason; then the reason, a note naming the author, closed and locked', async () => {
   resetBook();
   const n = draftChange();
-  await call(act, { body: { book: BOOK.slug, action: 'change-decline', number: n } });
+  assert.equal((await call(act, { body: { book: BOOK.slug, action: 'change-decline', number: n } })).statusCode, 400);
+  assert.equal(gh.repo(REPO).pulls.get(n).state, 'open');
+  await call(act, { body: { book: BOOK.slug, action: 'change-decline', number: n, reason: 'We keep the original wording.' } });
   const pr = gh.repo(REPO).pulls.get(n);
   assert.equal(pr.state, 'closed');
-  assert.match(pr.comments[0], /^Declined by @brandonandcaroline via the author site/);
+  assert.equal(pr.locked, true);
+  assert.match(pr.comments[0], /^<!-- tb-declined .*"reason":"We keep the original wording\."/);
+  assert.match(pr.comments[1], /^Declined by @brandonandcaroline via the author site/);
+});
+
+// --- comments on declined items (batch 2c) ---------------------------------------------------
+
+const MEMBER_ID = 'M'.repeat(43);
+/** A member through the author site: its assertion read-back answered here, GitHub by the fake. */
+async function asMember(handler, body, member = { id: '0a1b2c3d4e', name: 'Mo Member' }) {
+  const { AUTHOR_SITE_ORIGIN } = await import('../lib/member.mjs');
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => String(url) === `${AUTHOR_SITE_ORIGIN}/api/internal/assertion`
+    ? { ok: true, status: 200, json: async () => ({ member: { ...member, github: null }, book: BOOK.slug, books: [BOOK.slug] }) }
+    : real(url, opts);
+  try {
+    const res = mockRes();
+    await handler({ method: 'POST', headers: { origin: AUTHOR_SITE_ORIGIN, authorization: `Member ${MEMBER_ID}`, 'content-type': 'application/json', 'x-forwarded-for': '10.1.1.2' }, url: '/api/author-act', body, socket: {} }, res);
+    return res;
+  } finally {
+    globalThis.fetch = real;
+  }
+}
+
+test('members comment on a declined item; only the writer deletes it; never on an open one', async () => {
+  resetBook();
+  const open = suggestionIssue('still open');
+  assert.equal((await asMember(act, { book: BOOK.slug, action: 'comment-add', number: open, text: 'A comment' })).statusCode, 404);
+  const n = suggestionIssue('declined one');
+  await call(act, { body: { book: BOOK.slug, action: 'suggestion-decline', number: n, reason: 'Not for this edition.' } });
+  // GitHub sign-in (not a member): refused.
+  assert.equal((await call(act, { body: { book: BOOK.slug, action: 'comment-add', number: n, text: 'hello there' } })).statusCode, 403);
+  assert.equal((await asMember(act, { book: BOOK.slug, action: 'comment-add', number: n, text: '' })).statusCode, 400);
+  const added = await asMember(act, { book: BOOK.slug, action: 'comment-add', number: n, text: 'We may revisit this in 2027.' });
+  assert.equal(added.statusCode, 200, JSON.stringify(added.payload));
+  const issue = gh.repo(REPO).issues.get(n);
+  assert.match(issue.comments.at(-1), /^<!-- tb-comment \{"member":"m-0a1b2c3d4e","name":"Mo Member","text":"We may revisit this in 2027\."\} -->/);
+  // Someone else's comment, or the decline itself: not theirs to delete.
+  const other = await asMember(act, { book: BOOK.slug, action: 'comment-delete', number: n, id: added.payload.id }, { id: '9f9f9f9f9f', name: 'Other' });
+  assert.equal(other.statusCode, 403);
+  const declineId = issue.commentMeta[0].id;
+  assert.equal((await asMember(act, { book: BOOK.slug, action: 'comment-delete', number: n, id: declineId })).statusCode, 403);
+  const before = issue.comments.length;
+  const del = await asMember(act, { book: BOOK.slug, action: 'comment-delete', number: n, id: added.payload.id });
+  assert.equal(del.statusCode, 200, JSON.stringify(del.payload));
+  assert.equal(issue.comments.length, before - 1);
+  assert.ok(!issue.comments.some((c) => c.includes('revisit')));
 });
 
 test('publishing: the tick box, the one request shown, a clean merge — then a merge commit naming the author', async () => {

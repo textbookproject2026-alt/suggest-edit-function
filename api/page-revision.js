@@ -36,6 +36,15 @@
  * Kept 90 seconds, here and at the edge, so a classroom opening the same page asks
  * GitHub once.
  *
+ * With &declined=1 (batch 2c), also what the authors declined, newest first, with
+ * the reason, who declined it and the book's people's comments (lib/declined.mjs):
+ *   -> 200 { items, declined: [{ kind, number, url, proposed, date, summary, who,
+ *            files, paragraph?, reason | null, decliner | null, comments: [{ id,
+ *            member, name, date, text }] }] }
+ * Kept 2 minutes. GET /api/history?book=<slug>&change=<n> is one declined proposal's
+ * change, read from its pull request even after the branch is gone:
+ *   -> 200 { number, files: [{ path, before, after }] }
+ *
  * Only registered, non-retired books, only commits on the book's live branch or its
  * drafts branch (`branch` in the answer says which; batch 2a: what is being edited is
  * public in the repository too), and only a file that commit changed. A commit never
@@ -44,6 +53,7 @@
  */
 import { REGISTRY, SHA_RE, Refusal, appCredentials, budget, encodePath, gh, ghJson, query, wrap } from '../lib/author.mjs';
 import { clientIp, createRateLimiter, isSafePath, send } from '../lib/common.mjs';
+import { declinedChange, declinedItems } from '../lib/declined.mjs';
 
 // issues: read for /api/history's notes and suggestions: without it GitHub lists none (no error).
 const appToken = appCredentials({ contents: 'read', pull_requests: 'read', issues: 'read' });
@@ -57,6 +67,9 @@ const onLive = new Set();
 const openCache = new Map();
 const OPEN_TTL_MS = 90_000;
 const OPEN_MAX = 100;
+/** The declined answer per book: { at, items }. */
+const declinedCache = new Map();
+const DECLINED_TTL_MS = 120_000;
 
 /** Obsidian syntax GitHub doesn't know, reduced to what a reader would see (editor.ts forPreview). */
 export const forPreview = (md) =>
@@ -338,9 +351,14 @@ async function open(req, res, q) {
   if (!book) return refuse(res, 404, 'unknown book', 'This book isn’t on the platform.');
   if (path && !isSafePath(path)) return refuse(res, 400, 'bad request', 'That page isn’t valid.');
   const key = book.slug;
+  const change = q.has('change') ? Number(q.get('change')) : null;
+  if (change !== null) return declinedDiff(req, res, book, change);
+  const withDeclined = q.get('declined') === '1';
   const hit = openCache.get(key);
   let items = hit && Date.now() - hit.at < OPEN_TTL_MS ? hit.items : null;
-  if (!items) {
+  const dHit = declinedCache.get(key);
+  let declined = withDeclined && dHit && Date.now() - dHit.at < DECLINED_TTL_MS ? dHit.items : null;
+  if (!items || (withDeclined && !declined)) {
     if (isRateLimited(clientIp(req), Date.now())) {
       res.setHeader('Retry-After', '600');
       return refuse(res, 429, 'rate limit exceeded', 'Too many requests from here in the last hour. Please try again later.');
@@ -349,8 +367,13 @@ async function open(req, res, q) {
     let credential;
     try {
       credential = await appToken(book, tag);
-      items = await openItems(book, credential.token, budget(15_000));
+      const left = budget(20_000);
+      [items, declined] = await Promise.all([
+        items ?? openItems(book, credential.token, left),
+        withDeclined ? declined ?? declinedItems(book, credential.token, left) : null,
+      ]);
       openCache.set(key, { at: Date.now(), items });
+      if (withDeclined) declinedCache.set(key, { at: Date.now(), items: declined });
     } catch (err) {
       if (err.status === 401) credential?.refused();
       console.error(`history: ${err.message} ${tag}`);
@@ -358,5 +381,28 @@ async function open(req, res, q) {
     }
   }
   res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=90');
-  send(res, 200, { items: path ? items.filter((i) => i.files.includes(path)) : items });
+  const onPage = (list) => (path ? list.filter((i) => i.files.includes(path)) : list);
+  send(res, 200, { items: onPage(items), ...(withDeclined ? { declined: onPage(declined) } : {}) });
+}
+
+/** &change=<n>: a declined proposal's change (its pull request's files, before and after). */
+async function declinedDiff(req, res, book, n) {
+  if (!Number.isInteger(n) || n < 1 || n > 1e7) return refuse(res, 400, 'bad request', 'That isn’t a proposal.');
+  if (isRateLimited(clientIp(req), Date.now())) {
+    res.setHeader('Retry-After', '600');
+    return refuse(res, 429, 'rate limit exceeded', 'Too many requests from here in the last hour. Please try again later.');
+  }
+  const tag = `[declined ${book.slug}#${n}]`;
+  let credential;
+  try {
+    credential = await appToken(book, tag);
+    const d = await declinedChange(book, n, credential.token, budget(15_000), text);
+    if (!d) return refuse(res, 404, 'not declined', 'That isn’t a declined proposal of this book.');
+    res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=86400');
+    return send(res, 200, d);
+  } catch (err) {
+    if (err.status === 401) credential?.refused();
+    console.error(`declined change: ${err.message} ${tag}`);
+    return refuse(res, 502, `github: ${err.message}`, 'GitHub couldn’t be reached just now. Please try again in a moment.');
+  }
 }

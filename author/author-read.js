@@ -17,6 +17,8 @@
  *     -> { changes: [...] }
  *   ?what=change&book=<slug>&number=<n>               one draft change as before/after lines
  *     -> { readable, why, pages }
+ *   ?what=declined&book=<slug>                        declined proposals, notes and suggestions,
+ *     -> { items: [...] }                               with reasons and comments (lib/declined.mjs), fresh
  *   ?what=publish&book=<slug>                         what stands between drafts and live
  *     -> { publish: null | {...} }                    (with `lint` whenever it could be run)
  *   ?what=drafts&book=<slug>                          drafts vs live, file by file, readers'
@@ -33,6 +35,7 @@ import {
 import { send } from '../lib/common.mjs';
 import { SUGGESTED, describeChange, parseSuggestion, readableChange } from '../lib/author-console.mjs';
 import { acceptedAt, changesSince, draftsDiff, publishState, suggestion } from '../lib/author-console-reads.mjs';
+import { declinedItems } from '../lib/declined.mjs';
 
 const appToken = appCredentials({ contents: 'read', pull_requests: 'read', issues: 'read' });
 const MAX_FILE = 5 * 1024 * 1024;
@@ -113,7 +116,7 @@ async function change(book, token, left, params) {
   return readableChange(files ?? []);
 }
 
-const READS = { tree, file, drafts: draftsDiff, suggestions, 'suggestion-changes': suggestionChanges, changes, change, publish: (book, token, left) => publishState(book, token, left, 1) };
+const READS = { tree, file, drafts: draftsDiff, suggestions, 'suggestion-changes': suggestionChanges, changes, change, declined: async (book, token, left) => ({ items: await declinedItems(book, token, left) }), publish: (book, token, left) => publishState(book, token, left, 1) };
 
 export default wrap(async (req, res) => {
   const auth = await authorise(req, res, 'GET');
