@@ -215,3 +215,40 @@ test('mode=item: a reader item the App opened or attributed, labelled; anything 
   assert.equal((await get({ book: 'nope', mode: 'item', number: '1' })).statusCode, 404);
   assert.equal((await get({ book: BOOK.slug, mode: 'item', number: 'x' })).statusCode, 404);
 });
+
+test('declined (batch 2c): with &declined=1, closed-unmerged proposals and not-planned notes, with reasons and comments; &change= the proposal\'s diff', async () => {
+  const { declineComment, memberComment } = await import('../lib/declined.mjs');
+  const APP = { login: 'textbook-suggest-edit[bot]', type: 'Bot' };
+  const MEMBER = { login: 'm-0a1b2c3d4e', member: true, name: 'Mo Member' };
+  // A proposal, declined from the author site; its branch since deleted.
+  gh.repo(REPO).refs.set('proposed-edits/declined', gh.repo(REPO).refs.get(LIVE));
+  const head = gh.commitFiles(REPO, 'proposed-edits/declined', { [PAGE]: '# One\n\nWorse words.\n' }, { message: 'Edit' });
+  const pr = gh.addPull(REPO, { head: 'proposed-edits/declined', base: LIVE, title: 'Edit ¶2 of one.md: Worse words.' });
+  const p = gh.repo(REPO).pulls.get(pr);
+  Object.assign(p, { body: PR_BODY, labels: [{ name: 'proposed-edit' }], state: 'closed', closed_at: '2026-10-05T10:00:00Z', created_at: '2026-10-04T10:00:00Z',
+    base: { ...p.base, sha: v3 }, head: { ...p.head, sha: head } });
+  p.comments.push(declineComment('We keep the original wording.', MEMBER), memberComment('Maybe next edition.', MEMBER));
+  p.commentMeta = [{ id: 901, user: APP, created_at: '2026-10-05T10:00:00Z' }, { id: 902, user: APP, created_at: '2026-10-06T10:00:00Z' }];
+  gh.repo(REPO).refs.delete('proposed-edits/declined');
+  // GitHub still lists a closed pull request's files once its branch is gone (the fake can't).
+  gh.state.hooks[`/pulls/${pr}/files`] = () => json(200, [{ filename: PAGE, status: 'modified' }]);
+  // A test item, labelled out; and a note closed as done (accepted, not declined).
+  const test = gh.addIssue(REPO, { title: 'Platform check', body: NOTE_BODY, labels: [{ name: 'suggested-edit' }, { name: 'platform-test' }], state: 'closed', state_reason: 'not_planned' });
+  const done = gh.addIssue(REPO, { title: 'Done', body: NOTE_BODY, labels: [{ name: 'section-note' }], state: 'closed', state_reason: 'completed' });
+  gh.state.hooks['/issues?state=closed'] = () => json(200, [
+    ...[...gh.repo(REPO).pulls.values()].filter((x) => x.state === 'closed').map((x) => ({ ...x, pull_request: { merged_at: x.merged_at ?? null } })),
+    gh.repo(REPO).issues.get(test), gh.repo(REPO).issues.get(done),
+  ]);
+  const res = await get({ book: BOOK.slug, mode: 'open', path: PAGE, declined: '1' });
+  assert.equal(res.statusCode, 200, JSON.stringify(res.payload));
+  assert.deepEqual(res.payload.declined.map((d) => [d.kind, d.number, d.date, d.reason, d.decliner, d.who?.name, d.comments.map((c) => c.text)]), [
+    ['edit', pr, '2026-10-05', 'We keep the original wording.', 'Mo Member', 'ada-l', ['Maybe next edition.']],
+  ]);
+  assert.ok(!('declined' in (await get({ book: BOOK.slug, mode: 'open', path: PAGE })).payload), 'only when asked for');
+  const change = await get({ book: BOOK.slug, mode: 'open', change: String(pr) });
+  assert.equal(change.statusCode, 200, JSON.stringify(change.payload));
+  assert.deepEqual(change.payload.files, [{ path: PAGE, before: '# One\n\nBest words.\n', after: '# One\n\nWorse words.\n' }]);
+  assert.equal((await get({ book: BOOK.slug, mode: 'open', change: String(done) })).statusCode, 404, 'only a declined proposal');
+  delete gh.state.hooks['/issues?state=closed'];
+  delete gh.state.hooks[`/pulls/${pr}/files`];
+});

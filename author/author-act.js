@@ -6,8 +6,9 @@
  *
  *   { book, action: "suggestion-accept", number }
  *       taken on by hand: a thank-you saying so, labelled `accepted`, left open
- *   { book, action: "suggestion-decline", number }
- *       a polite reply, then closed
+ *   { book, action: "suggestion-decline", number, reason }
+ *       the reason (10–1000 characters, public) under the member's name, the polite
+ *       reply, then closed as not planned and locked (a written suggestion or a note)
  *   { book, action: "suggestion-made", number, sha }
  *       closes an accepted suggestion with a link to `sha`, which must be the newest
  *       commit on drafts to have changed its page since it was accepted
@@ -15,8 +16,12 @@
  *   { book, action: "change-accept", number, title? }
  *       squash-merges a draft change (an open PR into drafts) and puts the drafts in
  *       line for the live book (opens or refreshes the one publish request)
- *   { book, action: "change-decline", number }
- *       a note saying who declined it, then closed
+ *   { book, action: "change-decline", number, reason }
+ *       the reason, a note thanking them, then closed unmerged and locked
+ *   { book, action: "comment-add", number, text }
+ *       a comment by the member on a declined item (2–1000 characters, public)
+ *   { book, action: "comment-delete", number, id }
+ *       deletes one of the member's own comments on a declined item
  *   { book, action: "publish-prepare" }
  *       opens or refreshes the publish request; publishes nothing
  *   { book, action: "publish", number, confirm: true }
@@ -33,6 +38,7 @@ import {
   SHA_RE, Refusal, appCredentials, authorise, bookFor, budget, byline, fail, ghJson, limits, wrap,
 } from '../lib/author.mjs';
 import { ensureLabels, isJsonContentType, parseBody, send } from '../lib/common.mjs';
+import { COMMENT_MIN, cleanText, commentOf, declineComment, isDeclined, kindOf, memberComment } from '../lib/declined.mjs';
 import {
   ACCEPTED, ACCEPTED_LABEL, NEEDS_TRIAGE, PUBLISH_STATE_WORDS, PUBLISH_TITLE, PUBLISHED_STEPS, checkReply, declined,
   describePublish, publishRequestBody, takenOn, thanksWithChange,
@@ -59,6 +65,57 @@ async function dropLabel(book, token, left, n, label, tag) {
 
 async function comment(book, token, left, n, text) {
   return ghJson(`/repos/${book.content.repo}/issues/${n}/comments`, token, left, { method: 'POST', body: { body: text } });
+}
+
+/** A decline's reason, checked before anything is written: required, 10–1000 characters. */
+function reasonOf(body) {
+  const r = cleanText(body.reason);
+  if (r.error) throw new Refusal(400, 'validation: reason', `Why is this being declined? ${r.error}`);
+  return r.text;
+}
+
+/** Declined items take no replies on GitHub: only the book's people comment, here. */
+async function lock(book, token, left, n, tag) {
+  try {
+    await ghJson(`/repos/${book.content.repo}/issues/${n}/lock`, token, left, { method: 'PUT', body: { lock_reason: 'resolved' } });
+  } catch (err) {
+    console.warn(`#${n}: not locked — ${err.message} ${tag}`);
+  }
+}
+
+// --- comments on declined items ---------------------------------------------------
+
+async function declinedThing(book, n, token, left) {
+  const it = await ghJson(`/repos/${book.content.repo}/issues/${n}`, token, left);
+  if (!it || !kindOf(it) || !isDeclined(it)) throw new Refusal(404, 'not declined', "That isn't a declined proposal, note or suggestion of this book.");
+  return it;
+}
+
+async function commentAdd(book, body, ctx) {
+  const { token, left, identity, tag } = ctx;
+  if (!identity.member) throw new Refusal(403, 'members only', 'Only the book\'s people can comment here.');
+  const t = cleanText(body.text, COMMENT_MIN);
+  if (t.error) throw new Refusal(400, 'validation: text', t.error);
+  const it = await declinedThing(book, number(body), token, left);
+  const c = await comment(book, token, left, it.number, memberComment(t.text, identity));
+  console.log(`#${it.number}: comment ${c?.id} by ${identity.login} ${tag}`);
+  return { done: true, id: c?.id ?? null, steps: ['Your comment was added. Anyone can read it in the book\'s history.'] };
+}
+
+async function commentDelete(book, body, ctx) {
+  const { token, left, identity, tag } = ctx;
+  const id = body.id;
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Refusal(400, 'validation: id', "That isn't a comment the author site listed.");
+  const it = await declinedThing(book, number(body), token, left);
+  const c = await ghJson(`/repos/${book.content.repo}/issues/comments/${id}`, token, left, { allow: [404] }).catch(() => null);
+  const d = c ? commentOf(c) : null;
+  // Only the member's own comment, on this item.
+  if (!d || !String(c.issue_url ?? '').endsWith(`/issues/${it.number}`) || !identity.member || d.member !== identity.login) {
+    throw new Refusal(403, 'not yours', 'You can only delete your own comments.');
+  }
+  await ghJson(`/repos/${book.content.repo}/issues/comments/${id}`, token, left, { method: 'DELETE' });
+  console.log(`#${it.number}: comment ${id} deleted by ${identity.login} ${tag}`);
+  return { done: true, steps: ['Your comment was deleted.'] };
 }
 
 // --- suggestions ---------------------------------------------------------------
@@ -91,8 +148,10 @@ async function suggestionAccept(book, body, ctx) {
 
 async function suggestionDecline(book, body, ctx) {
   const { token, left, identity, tag } = ctx;
+  const reason = reasonOf(body);
   const s = await suggestion(book, number(body), token, left);
   if (!s.open) throw new Refusal(409, 'closed', 'That suggestion has already been dealt with.');
+  await comment(book, token, left, s.number, declineComment(reason, identity));
   await comment(book, token, left, s.number, declined(identity));
   await dropLabel(book, token, left, s.number, NEEDS_TRIAGE, tag);
   try {
@@ -101,8 +160,9 @@ async function suggestionDecline(book, body, ctx) {
     console.error(`suggestion #${s.number}: close failed — ${err.message} ${tag}`);
     return { done: true, steps: ['A polite reply was sent.'], warning: 'The reply was sent, but the suggestion could not be closed.' };
   }
+  await lock(book, token, left, s.number, tag);
   console.log(`suggestion #${s.number} declined ${byline(identity)} ${tag}`);
-  return { done: true, steps: ['A polite reply was sent.', 'The suggestion was closed.'] };
+  return { done: true, steps: ['Your reason was posted, with a polite reply.', 'The suggestion was closed. It shows as Declined in the book\'s history.'] };
 }
 
 async function suggestionMade(book, body, ctx) {
@@ -237,11 +297,14 @@ async function changeAccept(book, body, ctx) {
 
 async function changeDecline(book, body, ctx) {
   const { token, left, identity, tag } = ctx;
+  const reason = reasonOf(body);
   const pr = await draftChange(book, number(body), token, left);
+  await comment(book, token, left, pr.number, declineComment(reason, identity));
   await comment(book, token, left, pr.number, `Declined ${byline(identity)}. Thank you for proposing it.`);
   await ghJson(`/repos/${book.content.repo}/pulls/${pr.number}`, token, left, { method: 'PATCH', body: { state: 'closed' } });
+  await lock(book, token, left, pr.number, tag);
   console.log(`draft change #${pr.number} declined ${byline(identity)} ${tag}`);
-  return { done: true, steps: ['The draft change was closed, with a note saying you declined it.'] };
+  return { done: true, steps: ['The draft change was closed, with your reason and a note thanking them.', 'It shows as Declined in the book\'s history.'] };
 }
 
 async function publishPrepare(book, body, ctx) {
@@ -294,6 +357,8 @@ const ACTIONS = {
   'suggestion-made': suggestionMade,
   'change-accept': changeAccept,
   'change-decline': changeDecline,
+  'comment-add': commentAdd,
+  'comment-delete': commentDelete,
   'publish-prepare': publishPrepare,
   publish,
 };

@@ -249,14 +249,37 @@ export function createFakeGitHub() {
       if (method === 'PATCH') Object.assign(i, body);
       return json(200, i);
     }
+    // Comments: their text in `comments` (what tests read), the rest alongside in `commentMeta`.
+    const commentObj = (i, k) => ({ body: i.comments[k], id: i.commentMeta?.[k]?.id ?? k + 1, user: i.commentMeta?.[k]?.user ?? { login: 'someone', type: 'User' }, created_at: i.commentMeta?.[k]?.created_at ?? null, issue_url: `https://api.github.com/repos/${r.full}/issues/${i.number}` });
     if ((m = /^\/issues\/(\d+)\/comments$/.exec(rest)) && method === 'GET') {
       const i = r.issues.get(Number(m[1])) ?? r.pulls.get(Number(m[1]));
-      return json(200, (i?.comments ?? []).map((body) => ({ body })));
+      return json(200, (i?.comments ?? []).map((_, k) => commentObj(i, k)));
     }
     if ((m = /^\/issues\/(\d+)\/comments$/.exec(rest)) && method === 'POST') {
       const i = r.issues.get(Number(m[1])) ?? r.pulls.get(Number(m[1]));
       i.comments.push(body.body);
-      return json(201, { id: 1 });
+      const id = (state.nextCommentId = (state.nextCommentId ?? 5000) + 1);
+      (i.commentMeta ??= [])[i.comments.length - 1] = { id, user: { login: 'textbook-suggest-edit[bot]', type: 'Bot' }, created_at: tick() };
+      return json(201, { id });
+    }
+    if ((m = /^\/issues\/comments\/(\d+)$/.exec(rest))) {
+      const id = Number(m[1]);
+      for (const i of [...r.issues.values(), ...r.pulls.values()]) {
+        const k = (i.commentMeta ?? []).findIndex((c) => c?.id === id);
+        if (k < 0) continue;
+        if (method === 'DELETE') {
+          i.comments.splice(k, 1);
+          i.commentMeta.splice(k, 1);
+          return json(204, null);
+        }
+        return json(200, commentObj(i, k));
+      }
+      return json(404, {});
+    }
+    if ((m = /^\/issues\/(\d+)\/lock$/.exec(rest)) && method === 'PUT') {
+      const i = r.issues.get(Number(m[1])) ?? r.pulls.get(Number(m[1]));
+      i.locked = true;
+      return json(204, null);
     }
     if ((m = /^\/issues\/(\d+)\/events$/.exec(rest))) return json(200, r.issues.get(Number(m[1]))?.events ?? []);
     if ((m = /^\/issues\/(\d+)\/labels$/.exec(rest)) && method === 'POST') {
