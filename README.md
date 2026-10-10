@@ -190,6 +190,17 @@ the whole book, with kind, number, link, date, summary and who (from the attribu
 line). Public fields only; kept 90 seconds per instance and at the edge. The History
 panel's and the book's `/history` page's *Being edited* band.
 
+With `&declined=1` (batch 2c) also `declined`: the proposals, notes and suggestions the
+authors declined (a pull request closed unmerged, an issue closed as not planned), each
+with the reason (the one given in the author site, from the App's `tb-declined`
+marker; for older ones the last comment by the book's people or the maintainer, else
+null), who declined it, and the book's people's comments. Items labelled `no-credit`
+or `platform-test` are left out; kept 2 minutes. `&change=<n>` is one declined
+proposal's change (`{ number, files: [{ path, before, after }] }`), read from its pull
+request after the branch is gone. The author site reads the same through
+`author-read` (`what=declined`, uncached, and `what=declined-change`), and members
+comment with `author-act` (`comment-add`, `comment-delete` their own).
+
 - Public: no sign-in, `Access-Control-Allow-Origin: *`. Registered, non-retired books
   only; the commit must be on the book's live branch or its drafts branch (`branch` in
   the answer says which), and the file one it changed.
