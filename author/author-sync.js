@@ -51,7 +51,8 @@ export function withBookPeople(text, registry, slug, { authors, members, mention
     return n < 0 ? out.length : n;
   };
   const authorsLine = () => {
-    const re = /^([ \t]*)"authors":\s*\[[^\]\n]*\]/gm;
+    // A list of logins, on one line or spread over several (logins have no "]").
+    const re = /^([ \t]*)"authors":\s*\[[^\]]*\]/gm;
     re.lastIndex = at;
     const m = re.exec(out);
     if (!m || m.index > end()) throw new Refusal(409, 'no authors line', "This book's people can't be synced automatically.");
@@ -59,7 +60,9 @@ export function withBookPeople(text, registry, slug, { authors, members, mention
   };
   const set = (key, value) => {
     const line = `"${key}": ${value}`;
-    const re = new RegExp(`"${key}":\\s*\\[[^\\n]*\\]`, 'g');
+    // members is only ever written here, on one line (a name may hold "]"); the
+    // login lists may have been written by hand over several lines.
+    const re = new RegExp(key === 'members' ? `"${key}":\\s*\\[[^\\n]*\\]` : `"${key}":\\s*\\[[^\\]]*\\]`, 'g');
     re.lastIndex = at;
     const m = re.exec(out);
     if (m && m.index < end()) {

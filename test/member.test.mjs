@@ -139,3 +139,27 @@ test('notify: the book and the number only, to the hard-coded author site', asyn
   await notifyAuthors('b', 'nonsense', async () => calls.push('no'));
   assert.deepEqual(calls, [[`${AUTHOR_SITE_ORIGIN}/api/internal/notify`, { book: 'b', number: 12 }], [`${AUTHOR_SITE_ORIGIN}/api/internal/notify`, { book: 'b', number: 7 }]]);
 });
+
+test('a book whose authors list is spread over several lines syncs too', () => {
+  const reg = { books: [{ slug: 'g', title: 'G', authors: ['old-login'] }] };
+  const text = '{\n  "books": [\n    {\n      "slug": "g",\n      "title": "G",\n      "authors": [\n        "old-login"\n      ],\n      "x": 1\n    }\n  ]\n}\n';
+  const fixed = { ...reg, books: [{ ...reg.books[0], x: 1 }] };
+  const out = withBookPeople(text, fixed, 'g', { authors: ['new-login'], members: [{ id: 'm-0a1b2c3d4e', name: 'A [B]' }], mentionsOff: [] });
+  const b = JSON.parse(out).books[0];
+  assert.deepEqual([b.authors, b.members, b.mentions_off, b.x], [['new-login'], [{ id: 'm-0a1b2c3d4e', name: 'A [B]' }], [], 1]);
+  assert.match(out, /^      "authors": \["new-login"\],$/m);
+  // And again, now that members is on its own line.
+  const again = withBookPeople(out, JSON.parse(out), 'g', { authors: ['new-login'], members: [{ id: 'm-0a1b2c3d4e', name: 'A [B] C' }], mentionsOff: ['new-login'] });
+  assert.deepEqual(JSON.parse(again).books[0].members, [{ id: 'm-0a1b2c3d4e', name: 'A [B] C' }]);
+});
+
+test('a GitHub identity token opens only the list of the author\'s books', async () => {
+  const { authorise } = await import('../lib/author.mjs');
+  for (const [method, url] of [['GET', '/api/author-read?what=tree&book=platform-test-book'], ['POST', '/api/author-act'], ['GET', '/api/author-people?book=platform-test-book'], ['GET', '/api/author?route=read&what=tree']]) {
+    let code = 0;
+    const res = { setHeader() {}, status: (c) => ((code = c), { json() {} }) };
+    const req = { method, url, headers: { origin: 'https://author.confused4now.org', authorization: 'Bearer anything' } };
+    assert.equal(await authorise(req, res, 'GET, POST'), null, `${method} ${url}`);
+    assert.equal(code, 401, `${method} ${url}`);
+  }
+});
