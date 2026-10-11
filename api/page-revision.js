@@ -91,12 +91,11 @@ export function proposerName(body) {
 }
 
 async function text(repo, path, ref, token, left) {
-  const res = await gh(`/repos/${repo}/contents/${encodePath(path)}?ref=${ref}`, token, left, { allow: [404] });
+  // The raw file: no JSON or base64 to undo. A path that is a folder is a 404 here too
+  // (raw serves files only).
+  const res = await gh(`/repos/${repo}/contents/${encodePath(path)}?ref=${ref}`, token, left, { accept: 'application/vnd.github.raw', allow: [404] });
   if (res.status === 404) return '';
-  const file = await res.json();
-  if (file?.type !== 'file' || typeof file.content !== 'string') return '';
-  // ponytail: files over 1 MB come back without content; chapters are far smaller.
-  return Buffer.from(file.content, 'base64').toString('utf8').replace(/\r\n/g, '\n');
+  return (await res.text()).replace(/\r\n/g, '\n');
 }
 
 /** An App-authored commit with no human co-author: an anonymous proposal's name, from its PR. */
@@ -116,27 +115,47 @@ async function proposalName(repo, sha, token, left) {
   return null;
 }
 
-/** Whether `sha` is on `branch` of the book's repository. */
-async function isOn(repo, branch, sha, token, left) {
-  const cmp = await gh(`/repos/${repo}/compare/${sha}...${encodePath(branch)}?per_page=1`, token, left, { allow: [404] });
-  const status = cmp.status === 404 ? 'missing' : (await cmp.json())?.status;
-  return status === 'ahead' || status === 'identical';
+async function graphql(query, variables, token, left) {
+  const res = await gh('/graphql', token, left, { method: 'POST', body: { query, variables } });
+  const out = await res.json();
+  if (out?.errors?.length || !out?.data?.repository) throw new Error(`graphql: ${out?.errors?.[0]?.message ?? 'no repository'}`);
+  return out.data.repository;
 }
 
-/** Whether `sha` is on the book's live branch (remembered once it is). */
-async function isOnLive(book, sha, token, left) {
+/**
+ * Where each of `shas` is: 'live', 'drafts' (being edited, not yet published) or null
+ * (neither: not public here). Two small GraphQL queries, which commits exist and then
+ * where they are, instead of REST's compare, whose answer carries every changed file's
+ * patch (hundreds of KB to parse for one word). A commit GitHub doesn't have would fail
+ * the second query whole, hence the first. Live is remembered once true.
+ */
+async function branchesOf(book, shas, token, left, { liveOnly = false } = {}) {
   const repo = book.content.repo;
-  if (onLive.has(`${repo}@${sha}`)) return true;
-  if (!(await isOn(repo, book.content.live_branch, sha, token, left))) return false;
-  onLive.add(`${repo}@${sha}`);
-  return true;
-}
-
-/** "live", "drafts" (being edited, not yet published) or null (neither: not public here). */
-async function branchOf(book, sha, token, left) {
-  if (await isOnLive(book, sha, token, left)) return 'live';
-  const drafts = book.content.drafts_branch;
-  return drafts && (await isOn(book.content.repo, drafts, sha, token, left)) ? 'drafts' : null;
+  const out = new Map(shas.map((s) => [s, onLive.has(`${repo}@${s}`) ? 'live' : null]));
+  const ask = shas.filter((s) => !out.get(s));
+  if (!ask.length) return out;
+  const [owner, name] = repo.split('/');
+  const vars = { owner, name, ...Object.fromEntries(ask.map((s, i) => [`s${i}`, s])) };
+  const objects = await graphql(`query($owner: String!, $name: String!, ${ask.map((_, i) => `$s${i}: GitObjectID!`).join(', ')}) { repository(owner: $owner, name: $name) { ${ask.map((_, i) => `c${i}: object(oid: $s${i}) { ... on Commit { oid } }`).join(' ')} } }`, vars, token, left);
+  const real = ask.filter((_, i) => objects[`c${i}`]?.oid);
+  if (!real.length) return out;
+  const branches = [book.content.live_branch, ...(liveOnly || !book.content.drafts_branch ? [] : [book.content.drafts_branch])];
+  const where = await graphql(
+    `query($owner: String!, $name: String!, ${real.map((_, j) => `$h${j}: String!`).join(', ')}, ${branches.map((_, i) => `$b${i}: String!`).join(', ')}) { repository(owner: $owner, name: $name) { ${
+      branches.map((_, i) => `r${i}: ref(qualifiedName: $b${i}) { ${real.map((_, j) => `c${j}: compare(headRef: $h${j}) { status }`).join(' ')} }`).join(' ')} } }`,
+    { owner, name, ...Object.fromEntries(real.map((s, j) => [`h${j}`, s])), ...Object.fromEntries(branches.map((b, i) => [`b${i}`, `refs/heads/${b}`])) },
+    token, left,
+  );
+  // The branch's head compared with the commit: BEHIND or IDENTICAL means the commit
+  // is in the branch's history (REST's compare/<sha>...<branch> said ahead or identical).
+  const on = (i, j) => ['BEHIND', 'IDENTICAL'].includes(where[`r${i}`]?.[`c${j}`]?.status);
+  real.forEach((s, j) => {
+    if (on(0, j)) {
+      out.set(s, 'live');
+      onLive.add(`${repo}@${s}`);
+    } else if (branches.length > 1 && on(1, j)) out.set(s, 'drafts');
+  });
+  return out;
 }
 
 /** Who a proposal or note is from, by its attribution line (suggest-edit-function writes it). */
@@ -237,20 +256,21 @@ export default wrap(async (req, res) => {
     const { token } = credential;
 
     if (shas) {
-      const found = await Promise.all(shas.map(async (s) =>
-        (await isOnLive(book, s, token, left)) ? proposalName(repo, s, token, left) : null));
+      const where = await branchesOf(book, shas, token, left, { liveOnly: true });
+      const found = await Promise.all(shas.map((s) => (where.get(s) === 'live' ? proposalName(repo, s, token, left) : null)));
       res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=86400');
       return send(res, 200, { names: Object.fromEntries(shas.map((s, i) => [s, found[i]])) });
     }
 
-    const branch = await branchOf(book, sha, token, left);
+    const where = await branchesOf(book, base !== null ? [sha, base] : [sha], token, left);
+    const branch = where.get(sha);
     if (!branch) {
       return refuse(res, 404, 'not on the live branch', 'That revision isn’t part of the published book.');
     }
 
     if (base !== null) {
       // Compare: the page at two versions, both public (published or being edited).
-      if (!(await branchOf(book, base, token, left))) {
+      if (!where.get(base)) {
         return refuse(res, 404, 'not on the live branch', 'That revision isn’t part of the published book.');
       }
       const [before, after] = await Promise.all([text(repo, path, base, token, left), text(repo, path, sha, token, left)]);

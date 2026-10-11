@@ -136,6 +136,26 @@ export function createFakeGitHub() {
       const user = state.users.get(decodeURIComponent(m[1]).toLowerCase());
       return user ? json(200, user) : json(404, { message: 'Not Found' });
     }
+    if (u.pathname === '/graphql' && method === 'POST' && /object\(oid: \$s\d+\)|compare\(headRef:/.test(body.query)) {
+      // page-revision's branchesOf: which commits exist, then where they are.
+      const r = repos.get(`${body.variables.owner}/${body.variables.name}`.toLowerCase());
+      const v = body.variables;
+      const repository = {};
+      for (const [, alias, key] of body.query.matchAll(/(c\d+): object\(oid: \$(s\d+)\)/g)) {
+        repository[alias] = r?.commits.has(v[key]) ? { oid: v[key] } : null;
+      }
+      for (const [, ralias, bkey, inner] of body.query.matchAll(/(r\d+): ref\(qualifiedName: \$(b\d+)\) \{((?: c\d+: compare\(headRef: \$h\d+\) \{ status \})+) \}/g)) {
+        const head = r?.refs.get(v[bkey].replace(/^refs\/heads\//, ''));
+        if (!head) { repository[ralias] = null; continue; }
+        const history = new Set(ancestors(r, head));
+        repository[ralias] = Object.fromEntries([...inner.matchAll(/(c\d+): compare\(headRef: \$(h\d+)\)/g)].map(([, c, h]) => {
+          const sha = v[h];
+          const status = sha === head ? 'IDENTICAL' : history.has(sha) ? 'BEHIND' : ancestors(r, sha).includes(head) ? 'AHEAD' : 'DIVERGED';
+          return [c, { status }];
+        }));
+      }
+      return json(200, { data: { repository } });
+    }
     if (u.pathname === '/graphql' && method === 'POST' && body.query.includes('byteSize')) {
       // Blob sizes by oid (lib/common.mjs blobSizes): p0, p1, … in the order asked.
       const r = repos.get(`${body.variables.owner}/${body.variables.name}`.toLowerCase());
