@@ -12,20 +12,17 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { platform } from '../lib/platform.mjs';
 import { serve } from './adapter.mjs';
-import author from '../api/author.js';
-import githubAuth from '../api/github-auth.js';
-import pageRevision from '../api/page-revision.js';
-import proposeEdit from '../api/propose-edit.js';
-import requestBook from '../api/request-book.js';
-import suggestEdit from '../api/suggest-edit.js';
+import { fromKv, historyKey, toKv } from './history-cache.mjs';
 
+// Each route loads only its own modules, on its first request in an isolate: a reader's
+// history read never evaluates the author endpoints, and the other way round.
 const ROUTES = {
-  '/api/suggest-edit': suggestEdit,
-  '/api/propose-edit': proposeEdit,
-  '/api/page-revision': pageRevision,
-  '/api/github-auth': githubAuth,
-  '/api/request-book': requestBook,
-  '/api/author': author,
+  '/api/suggest-edit': () => import('../api/suggest-edit.js'),
+  '/api/propose-edit': () => import('../api/propose-edit.js'),
+  '/api/page-revision': () => import('../api/page-revision.js'),
+  '/api/github-auth': () => import('../api/github-auth.js'),
+  '/api/request-book': () => import('../api/request-book.js'),
+  '/api/author': () => import('../api/author.js'),
 };
 
 // Subrequests per request (the free plan allows 50), logged with each request so
@@ -52,8 +49,8 @@ function cacheKey(request) {
   return new Request(url.toString());
 }
 
-async function keep(key, response) {
-  const sMaxAge = /(?:^|,)\s*s-maxage=(\d+)/.exec(response.headers.get('cache-control') ?? '')?.[1];
+async function keep(key, response, seconds) {
+  const sMaxAge = seconds ?? /(?:^|,)\s*s-maxage=(\d+)/.exec(response.headers.get('cache-control') ?? '')?.[1];
   if (response.status !== 200 || !sMaxAge || response.headers.has('set-cookie')) return;
   const copy = new Response(response.body, response);
   copy.headers.set('Cache-Control', `public, max-age=${sMaxAge}`);
@@ -105,10 +102,19 @@ export default {
       console.log(`c4n-api ${request.method} ${path} ${hit.status} subrequests=0 cold=${wasCold ? 1 : 0} cache=hit`);
       return forClient(hit);
     }
+    const kvKey = key && path === '/api/history' ? await historyKey(key.url) : null;
+    const kept = kvKey && (await fromKv(env.CACHE, kvKey));
+    if (kept) {
+      console.log(`c4n-api ${request.method} ${path} ${kept.response.status} subrequests=0 cold=${wasCold ? 1 : 0} cache=kv`);
+      ctx.waitUntil(keep(key, kept.response.clone(), kept.left));
+      return forClient(kept.response);
+    }
 
     const store = { n: 0 };
-    const response = await counter.run(store, () => serve(handler, request, url));
+    const { default: run } = await handler();
+    const response = await counter.run(store, () => serve(run, request, url));
     console.log(`c4n-api ${request.method} ${path} ${response.status} subrequests=${store.n} cold=${wasCold ? 1 : 0}`);
+    if (kvKey) ctx.waitUntil(toKv(env.CACHE, kvKey, response.clone()));
     if (key) ctx.waitUntil(keep(key, response.clone()));
     return forClient(response);
   },

@@ -13,7 +13,7 @@ const json = (status, body) => ({ ok: status < 300, status, json: async () => bo
 
 export function createFakeGitHub() {
   const repos = new Map();
-  const state = { calls: [], tokenRequests: [], nextNumber: 100, clock: Date.parse('2026-09-28T10:00:00Z'), hooks: {}, users: new Map(), autoMerge: [] };
+  const state = { calls: [], tokenRequests: [], nextNumber: 100, clock: Date.parse('2026-09-28T10:00:00Z'), hooks: {}, users: new Map(), autoMerge: [], dispatches: [] };
 
   function repo(full) {
     const key = full.toLowerCase();
@@ -136,6 +136,13 @@ export function createFakeGitHub() {
       const user = state.users.get(decodeURIComponent(m[1]).toLowerCase());
       return user ? json(200, user) : json(404, { message: 'Not Found' });
     }
+    if (u.pathname === '/graphql' && method === 'POST' && body.query.includes('byteSize')) {
+      // Blob sizes by oid (lib/common.mjs blobSizes): p0, p1, … in the order asked.
+      const r = repos.get(`${body.variables.owner}/${body.variables.name}`.toLowerCase());
+      const oids = [...body.query.matchAll(/(p\d+): object\(oid: "([0-9a-f]{40})"\)/g)];
+      const repository = Object.fromEntries(oids.map(([, k, sha]) => [k, r?.blobs.has(sha) ? { byteSize: r.blobs.get(sha).length } : null]));
+      return json(200, { data: { repository } });
+    }
     if (u.pathname === '/graphql' && method === 'POST') {
       // Only enablePullRequestAutoMerge: remember which pull request, and how.
       state.autoMerge.push(body.variables);
@@ -147,6 +154,15 @@ export function createFakeGitHub() {
     const q = u.searchParams;
 
     if (rest === '/installation') return json(200, { id: 4242 });
+    if (rest === '/dispatches' && method === 'POST') {
+      state.dispatches.push({ repo: r.full, ...body });
+      return { ok: true, status: 204, json: async () => null, text: async () => '' };
+    }
+    if ((m = /^\/contents\/(.+)$/.exec(rest)) && method === 'GET' && opts.headers?.Accept === 'application/vnd.github.raw') {
+      const head = r.refs.get(q.get('ref') ?? '') ?? q.get('ref');
+      const id = r.commits.has(head) ? filesAt(r, head).get(decodeURIComponent(m[1])) : undefined;
+      return id ? new Response(r.blobs.get(id), { status: 200 }) : json(404, { message: 'Not Found' });
+    }
 
     // --- git data
     if ((m = /^\/git\/ref\/heads\/(.+)$/.exec(rest)) && method === 'GET') {
@@ -201,6 +217,7 @@ export function createFakeGitHub() {
     }
     if ((m = /^\/git\/blobs\/([0-9a-f]{40})$/.exec(rest)) && method === 'GET') {
       const b = r.blobs.get(m[1]);
+      if (b && opts.headers?.Accept === 'application/vnd.github.raw') return new Response(b, { status: 200 });
       return b ? json(200, { encoding: 'base64', content: b.toString('base64').replace(/.{60}/g, '$&\n') }) : json(404, {});
     }
 

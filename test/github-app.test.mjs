@@ -485,3 +485,28 @@ test('no response ever leaks the private key, the JWT, or an installation token'
     for (const secret of secrets) assert.ok(!s.includes(secret), `response must not contain ${secret}`);
   }
 });
+
+test('the app JWT is signed once per 6 minutes: a mint and a burst of mints share it', async () => {
+  const { app } = readCredentialConfig(APP_ENV);
+  let t = Date.UTC(2026, 9, 11, 12, 0, 0);
+  const seen = [];
+  const saved = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    seen.push(init.headers.Authorization);
+    if (String(url).endsWith('/installation')) return Response.json({ id: 42 });
+    const repo = JSON.parse(init.body).repositories[0];
+    return Response.json({ token: `t-${repo}`, expires_at: new Date(t + 3600e3).toISOString(), repositories: [{ full_name: `o/${repo}` }] });
+  };
+  try {
+    const source = createInstallationTokenSource({ app, api: 'https://api.github.test', headers: {}, timeoutMs: 1000, now: () => t });
+    await source.get('o/a');
+    await source.get('o/b');
+    assert.equal(seen.length, 4);
+    assert.equal(new Set(seen).size, 1, 'four App calls, one signature');
+    t += 7 * 60 * 1000;
+    await source.get('o/c');
+    assert.equal(new Set(seen).size, 2, 'a new JWT after 6 minutes');
+  } finally {
+    globalThis.fetch = saved;
+  }
+});

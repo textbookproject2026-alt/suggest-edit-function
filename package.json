@@ -10,9 +10,5 @@
     "registry:bundle": "node scripts/bundle-registry.mjs",
     "vercel-build": "node scripts/bundle-registry.mjs && npm test",
     "test:worker": "node --import ./test/via-worker.mjs --test test/*.test.mjs"
-  },
-  "dependencies": {
-    "js-yaml": "4.1.0",
-    "markdownlint": "0.38.0"
   }
 }

@@ -8,7 +8,7 @@ Which books exist, and where each one's issues go, comes from the
 [textbook registry](https://github.com/textbookproject2026-alt/textbook-registry), baked
 in at build time. No book is hardcoded here.
 
-Two dependencies (`js-yaml`, `markdownlint`); otherwise Node 22 / Workers built-ins (`fetch`, WebCrypto), plain ES modules.
+No dependencies: Node 22 / Workers built-ins (`fetch`, WebCrypto), plain ES modules. (The publish lint, which needs markdownlint, runs in book-requests' author-lint workflow: `lib/lint-job.mjs`.)
 
 ```
 api/suggest-edit.js            suggest an edit: reader text -> issue

@@ -34,10 +34,11 @@ import {
   SHA_RE, appCredentials, authorise, blobBytes, bookFor, booksFor, budget, draftsHead, encodePath, fail, ghJson,
   isAuthorPath, isTextPath, limits, query, treeAt, wrap, Refusal,
 } from '../lib/author.mjs';
-import { send } from '../lib/common.mjs';
+import { jsonWithBase64, send } from '../lib/common.mjs';
 import { SUGGESTED, describeChange, parseSuggestion, readableChange } from '../lib/author-console.mjs';
 import { acceptedAt, changesSince, draftsDiff, publishState, suggestion } from '../lib/author-console-reads.mjs';
 import { declinedChange, declinedItems } from '../lib/declined.mjs';
+import { lintAt } from '../lib/lint-job.mjs';
 
 const appToken = appCredentials({ contents: 'read', pull_requests: 'read', issues: 'read' });
 const MAX_FILE = 5 * 1024 * 1024;
@@ -87,7 +88,7 @@ async function file(book, token, left, params) {
     // sent back as one, changing a line nobody meant to touch.
     if (text !== null) return { path, sha: entry.sha, text, last };
   }
-  return { path, sha: entry.sha, base64: bytes.toString('base64'), last };
+  return jsonWithBase64({ path, sha: entry.sha, last }, bytes.toString('base64'));
 }
 
 async function suggestions(book, token, left) {
@@ -123,7 +124,13 @@ const READS = { tree, file, drafts: draftsDiff, suggestions, 'suggestion-changes
     const d = await declinedChange(book, Number(params.get('number')), token, left);
     if (!d) throw new Refusal(404, 'not declined', "That isn't a declined proposal of this book.");
     return d;
-  }, publish: (book, token, left) => publishState(book, token, left, 1) };
+  }, publish: (book, token, left) => publishState(book, token, left, 1),
+  // The author site polls this while `publish` says the lint is being checked. It only
+  // reads: the job was asked for when `publish` was read.
+  lint: async (book, token, left, params) => {
+    const l = await lintAt(book, params.get('sha'), left);
+    return { lint: l.state === 'done' ? { state: 'done', problems: l.problems.slice(0, 100), count: l.problems.length } : { state: l.state } };
+  } };
 
 export default wrap(async (req, res) => {
   const auth = await authorise(req, res, 'GET');
