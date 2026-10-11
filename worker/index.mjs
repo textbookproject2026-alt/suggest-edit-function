@@ -14,15 +14,24 @@ import { platform } from '../lib/platform.mjs';
 import { serve } from './adapter.mjs';
 import { fromKv, historyKey, toKv } from './history-cache.mjs';
 
-// Each route loads only its own modules, on its first request in an isolate: a reader's
-// history read never evaluates the author endpoints, and the other way round.
+// Every route is imported here, up front. Cloudflare evaluates this before the first
+// request and doesn't count it in any request's CPU time (measured 11 Oct: a fresh
+// isolate's first request costs 1 ms either way); loading a route on its first
+// request instead put 2-8 ms of evaluation into that request.
+import author from '../api/author.js';
+import githubAuth from '../api/github-auth.js';
+import pageRevision from '../api/page-revision.js';
+import proposeEdit from '../api/propose-edit.js';
+import requestBook from '../api/request-book.js';
+import suggestEdit from '../api/suggest-edit.js';
+
 const ROUTES = {
-  '/api/suggest-edit': () => import('../api/suggest-edit.js'),
-  '/api/propose-edit': () => import('../api/propose-edit.js'),
-  '/api/page-revision': () => import('../api/page-revision.js'),
-  '/api/github-auth': () => import('../api/github-auth.js'),
-  '/api/request-book': () => import('../api/request-book.js'),
-  '/api/author': () => import('../api/author.js'),
+  '/api/suggest-edit': suggestEdit,
+  '/api/propose-edit': proposeEdit,
+  '/api/page-revision': pageRevision,
+  '/api/github-auth': githubAuth,
+  '/api/request-book': requestBook,
+  '/api/author': author,
 };
 
 // Subrequests per request (the free plan allows 50), logged with each request so
@@ -31,8 +40,8 @@ const counter = new AsyncLocalStorage();
 // The first request an isolate serves pays for any lazy start-up work: logged as cold=1
 // so CPU can be measured cold and warm separately (scripts/cpu-summary.mjs).
 let cold = true;
-// Routes whose modules this isolate has loaded: the first request of each logs load=1,
-// since loading a route's code is part of that request's CPU time.
+// Routes this isolate has served: the first request of each logs load=1 (its code runs
+// for the first time, unoptimised), the rest load=0.
 const loaded = new Set();
 const realFetch = globalThis.fetch;
 globalThis.fetch = (...args) => {
@@ -125,8 +134,7 @@ export default {
     const store = { n: 0 };
     const load = !loaded.has(path);
     loaded.add(path);
-    const { default: run } = await handler();
-    const response = await counter.run(store, () => serve(run, request, url));
+    const response = await counter.run(store, () => serve(handler, request, url));
     console.log(`c4n-api ${request.method} ${label} ${response.status} subrequests=${store.n} cold=${wasCold ? 1 : 0} load=${load ? 1 : 0}`);
     if (kvKey) ctx.waitUntil(toKv(env.CACHE, kvKey, response.clone()));
     if (key) ctx.waitUntil(keep(key, response.clone()));
