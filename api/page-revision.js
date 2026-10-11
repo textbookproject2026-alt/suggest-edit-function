@@ -25,7 +25,8 @@
  * GET /api/page-revision?book=<slug>&sha=<commit>&path=<file>&base=<commit> — two
  * versions of one page, for the History panel's Compare (batch 2a): `before` is the
  * file at `base`, `after` at `sha` (either "" where the page didn't exist), status
- * "compared". Either may be any public version.
+ * "compared". Either may be any public version. `html` is "" here (the panel's Compare
+ * uses the texts only).
  *
  * GET /api/history?book=<slug>[&path=<file>] (vercel.json rewrites it here, as
  * mode=open) — what is proposed and not yet decided, for the History panel's and the
@@ -51,7 +52,7 @@
  * changes, so a 200 is cached at the edge for a year; refusals for five minutes.
  * Rate-limited per IP (best effort, as every limiter here: lib/common.mjs).
  */
-import { REGISTRY, SHA_RE, Refusal, appCredentials, budget, encodePath, gh, ghJson, query, wrap } from '../lib/author.mjs';
+import { REGISTRY, SHA_RE, Refusal, appCredentials, budget, encodePath, gh, ghJson, graphqlRepo, query, wrap } from '../lib/author.mjs';
 import { clientIp, createRateLimiter, isSafePath, send } from '../lib/common.mjs';
 import { declinedChange, declinedItems } from '../lib/declined.mjs';
 
@@ -91,10 +92,10 @@ export function proposerName(body) {
 }
 
 async function text(repo, path, ref, token, left) {
-  // The raw file: no JSON or base64 to undo. A path that is a folder is a 404 here too
-  // (raw serves files only).
+  // The raw file: no JSON or base64 to undo.
   const res = await gh(`/repos/${repo}/contents/${encodePath(path)}?ref=${ref}`, token, left, { accept: 'application/vnd.github.raw', allow: [404] });
-  if (res.status === 404) return '';
+  // A folder answers with its listing as JSON, raw or not: only a file is raw.
+  if (res.status === 404 || !(res.headers.get('content-type') ?? '').startsWith('application/vnd.github.raw')) return '';
   return (await res.text()).replace(/\r\n/g, '\n');
 }
 
@@ -115,13 +116,6 @@ async function proposalName(repo, sha, token, left) {
   return null;
 }
 
-async function graphql(query, variables, token, left) {
-  const res = await gh('/graphql', token, left, { method: 'POST', body: { query, variables } });
-  const out = await res.json();
-  if (out?.errors?.length || !out?.data?.repository) throw new Error(`graphql: ${out?.errors?.[0]?.message ?? 'no repository'}`);
-  return out.data.repository;
-}
-
 /**
  * Where each of `shas` is: 'live', 'drafts' (being edited, not yet published) or null
  * (neither: not public here). Two small GraphQL queries, which commits exist and then
@@ -129,21 +123,26 @@ async function graphql(query, variables, token, left) {
  * patch (hundreds of KB to parse for one word). A commit GitHub doesn't have would fail
  * the second query whole, hence the first. Live is remembered once true.
  */
-async function branchesOf(book, shas, token, left, { liveOnly = false } = {}) {
+async function branchesOf(book, shas, token, left, { liveOnly = false, names = null } = {}) {
   const repo = book.content.repo;
   const out = new Map(shas.map((s) => [s, onLive.has(`${repo}@${s}`) ? 'live' : null]));
-  const ask = shas.filter((s) => !out.get(s));
+  // With `names` (a Map), every commit is asked about, for its pull requests' bodies.
+  const ask = names ? shas : shas.filter((s) => !out.get(s));
   if (!ask.length) return out;
-  const [owner, name] = repo.split('/');
-  const vars = { owner, name, ...Object.fromEntries(ask.map((s, i) => [`s${i}`, s])) };
-  const objects = await graphql(`query($owner: String!, $name: String!, ${ask.map((_, i) => `$s${i}: GitObjectID!`).join(', ')}) { repository(owner: $owner, name: $name) { ${ask.map((_, i) => `c${i}: object(oid: $s${i}) { ... on Commit { oid } }`).join(' ')} } }`, vars, token, left);
-  const real = ask.filter((_, i) => objects[`c${i}`]?.oid);
+  const prs = names ? ' associatedPullRequests(first: 5) { nodes { author { __typename } body } }' : '';
+  const objects = await graphqlRepo(repo, `query($owner: String!, $name: String!, ${ask.map((_, i) => `$s${i}: GitObjectID!`).join(', ')}) { repository(owner: $owner, name: $name) { ${ask.map((_, i) => `c${i}: object(oid: $s${i}) { ... on Commit { oid${prs} } }`).join(' ')} } }`,
+    Object.fromEntries(ask.map((s, i) => [`s${i}`, s])), token, left);
+  if (names) {
+    // Only a body the App wrote itself is read as a proposal.
+    ask.forEach((s, i) => names.set(s, proposerName((objects[`c${i}`]?.associatedPullRequests?.nodes ?? []).find((pr) => pr?.author?.__typename === 'Bot')?.body)));
+  }
+  const real = ask.filter((s, i) => objects[`c${i}`]?.oid && !out.get(s));
   if (!real.length) return out;
   const branches = [book.content.live_branch, ...(liveOnly || !book.content.drafts_branch ? [] : [book.content.drafts_branch])];
-  const where = await graphql(
+  const where = await graphqlRepo(repo,
     `query($owner: String!, $name: String!, ${real.map((_, j) => `$h${j}: String!`).join(', ')}, ${branches.map((_, i) => `$b${i}: String!`).join(', ')}) { repository(owner: $owner, name: $name) { ${
       branches.map((_, i) => `r${i}: ref(qualifiedName: $b${i}) { ${real.map((_, j) => `c${j}: compare(headRef: $h${j}) { status }`).join(' ')} }`).join(' ')} } }`,
-    { owner, name, ...Object.fromEntries(real.map((s, j) => [`h${j}`, s])), ...Object.fromEntries(branches.map((b, i) => [`b${i}`, `refs/heads/${b}`])) },
+    { ...Object.fromEntries(real.map((s, j) => [`h${j}`, s])), ...Object.fromEntries(branches.map((b, i) => [`b${i}`, `refs/heads/${b}`])) },
     token, left,
   );
   // The branch's head compared with the commit: BEHIND or IDENTICAL means the commit
@@ -256,8 +255,10 @@ export default wrap(async (req, res) => {
     const { token } = credential;
 
     if (shas) {
-      const where = await branchesOf(book, shas, token, left, { liveOnly: true });
-      const found = await Promise.all(shas.map((s) => (where.get(s) === 'live' ? proposalName(repo, s, token, left) : null)));
+      // Where each commit is, and its pull requests' names, in the same two queries.
+      const names = new Map();
+      const where = await branchesOf(book, shas, token, left, { liveOnly: true, names });
+      const found = shas.map((s) => (where.get(s) === 'live' ? names.get(s) ?? null : null));
       res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=86400');
       return send(res, 200, { names: Object.fromEntries(shas.map((s, i) => [s, found[i]])) });
     }
@@ -274,11 +275,10 @@ export default wrap(async (req, res) => {
         return refuse(res, 404, 'not on the live branch', 'That revision isn’t part of the published book.');
       }
       const [before, after] = await Promise.all([text(repo, path, base, token, left), text(repo, path, sha, token, left)]);
-      const rendered = after
-        ? await gh('/markdown', token, left, { method: 'POST', body: { text: forPreview(after), mode: 'markdown' } })
-        : null;
       res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=31536000, immutable');
-      return send(res, 200, { sha, base, path, status: 'compared', branch, before, after, html: rendered ? await rendered.text() : '' });
+      // No html: the History panel's Compare shows the two texts' diff only, and
+      // rendering a chapter costs a GitHub call and its size twice over.
+      return send(res, 200, { sha, base, path, status: 'compared', branch, before, after, html: '' });
     }
 
     // ponytail: a commit's first 300 files only (GitHub's page size); a page edit is one.
