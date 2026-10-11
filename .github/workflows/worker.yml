@@ -104,9 +104,10 @@ jobs:
           set -euo pipefail
           # Every response carries the header, refusals included. Ten minutes at most:
           # the first deploy waits for the custom domain's certificate.
+          # || true: on the first deploy the name may not resolve yet (curl exit 6).
           for i in $(seq 30); do
             now="$(curl -s --max-time 20 -o /dev/null -D - -X OPTIONS "$ENDPOINT" | tr -d '\r' \
-              | awk 'tolower($1) == "x-function-version:" { print $2 }')"
+              | awk 'tolower($1) == "x-function-version:" { print $2 }' || true)"
             if [ "$now" = "$FUNCTION_SHA" ]; then echo "$ENDPOINT serves function $now."; exit 0; fi
             echo "  still serving ${now:-<no answer>}"
             sleep 20
