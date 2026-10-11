@@ -148,11 +148,14 @@ export function createFakeGitHub() {
           ? { oid: v[key], ...(prs ? { associatedPullRequests: { nodes: state.assocPulls?.(v[key]) ?? [] } } : {}) }
           : null;
       }
-      for (const [, ralias, bkey, inner] of body.query.matchAll(/(r\d+): ref\(qualifiedName: \$(b\d+)\) \{((?: c\d+: compare\(headRef: \$h\d+\) \{ status \})+) \}/g)) {
+      // As GitHub: a compare against a commit it doesn't have fails the whole query.
+      const compared = [...body.query.matchAll(/compare\(headRef: \$(h\d+)\)/g)].map(([, h]) => v[h]);
+      if (compared.some((sha) => !r?.commits.has(sha))) return json(200, { data: null, errors: [{ message: 'Something went wrong while executing your query.' }] });
+      for (const [, ralias, bkey, inner] of body.query.matchAll(/(r\d+): ref\(qualifiedName: \$(b\d+)\) \{((?: x\d+: compare\(headRef: \$h\d+\) \{ status \})+) \}/g)) {
         const head = r?.refs.get(v[bkey].replace(/^refs\/heads\//, ''));
         if (!head) { repository[ralias] = null; continue; }
         const history = new Set(ancestors(r, head));
-        repository[ralias] = Object.fromEntries([...inner.matchAll(/(c\d+): compare\(headRef: \$(h\d+)\)/g)].map(([, c, h]) => {
+        repository[ralias] = Object.fromEntries([...inner.matchAll(/(x\d+): compare\(headRef: \$(h\d+)\)/g)].map(([, c, h]) => {
           const sha = v[h];
           const status = sha === head ? 'IDENTICAL' : history.has(sha) ? 'BEHIND' : ancestors(r, sha).includes(head) ? 'AHEAD' : 'DIVERGED';
           return [c, { status }];

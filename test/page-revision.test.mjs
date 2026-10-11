@@ -116,6 +116,12 @@ test('names in one call: live-branch proposals only, cached a day, bounded', asy
   assert.deepEqual(res.payload.names, { [v2]: 'Jo Reader', [v3]: null, [draftsOnly]: null });
   assert.match(res.headers['cache-control'], /s-maxage=86400/);
   assert.equal(res.headers['access-control-allow-origin'], '*');
+  // A commit GitHub doesn't have fails GraphQL's one query whole: the two-query way
+  // still names the others.
+  const unknown = 'f'.repeat(40);
+  const mixed = await get({ book: BOOK.slug, shas: [v2, unknown].join(',') });
+  assert.deepEqual(mixed.payload.names, { [v2]: 'Jo Reader', [unknown]: null });
+  assert.equal((await get({ book: BOOK.slug, sha: unknown, path: PAGE })).statusCode, 404);
   assert.equal((await get({ book: BOOK.slug, shas: '' })).statusCode, 400);
   assert.equal((await get({ book: BOOK.slug, shas: `${v2},nope` })).statusCode, 400);
   assert.equal((await get({ book: BOOK.slug, shas: Array.from({ length: 31 }, (_, i) => i.toString(16).padStart(40, 'a')).join(',') })).statusCode, 400);
