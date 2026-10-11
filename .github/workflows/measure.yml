@@ -1,0 +1,85 @@
+# By hand: CPU time per route on the c4n-api Worker, cold, first load and warm, against
+# the free plan's 10 ms (the target is p95 under 8). Each round deploys the same code
+# again as a new version, so it runs in fresh isolates: the round's first request of
+# each route then loads that route's code (load=1), and the rest are warm
+# (scripts/measure-load.mjs). `wrangler tail` records every request; the summary is
+# scripts/cpu-summary.mjs, and the raw tail is kept as an artifact.
+#
+# It deploys the ref it runs on (normally main). Nothing is written anywhere: the
+# traffic carries the honeypot, and history and revision reads only read.
+name: measure
+
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: Fresh deployments to measure (each gives every route one first load)
+        default: '8'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: c4n-api-deploy
+  cancel-in-progress: false
+
+env:
+  WRANGLER: wrangler@4.142.0
+  WRANGLER_SEND_METRICS: 'false'
+  BASE: https://api.confused4now.org
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Bundle the registry, find the bindings, start the tail
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_TOKEN }}
+        run: |
+          set -euo pipefail
+          npm ci
+          FUNCTION_SHA="$(git rev-parse HEAD)" npm run registry:bundle
+          scripts/cloudflare-bindings.sh
+          export CLOUDFLARE_ACCOUNT_ID="$(sed -n 's/^CLOUDFLARE_ACCOUNT_ID=//p' "$GITHUB_ENV" | tail -1)"
+          nohup timeout 2100 npx -y "$WRANGLER" tail c4n-api --format json > "$RUNNER_TEMP/tail.jsonl" 2> "$RUNNER_TEMP/tail.err" &
+          sleep 15
+      - name: Rounds
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          ROUNDS: ${{ inputs.rounds }}
+        run: |
+          set -euo pipefail
+          rounds=$(( ROUNDS > 20 ? 20 : ROUNDS ))
+          for round in $(seq "$rounds"); do
+            version="$(npx -y "$WRANGLER" versions upload --message "measure ${round}/${rounds}" 2>&1 | tee /dev/stderr | grep -oE 'Version ID: [0-9a-f-]{36}' | head -1 | cut -d' ' -f3)"
+            [ -n "$version" ] || { echo "::error::No version id from the upload."; exit 1; }
+            npx -y "$WRANGLER" versions deploy "${version}@100%" --yes --message "measure ${round}/${rounds}" > /dev/null
+            # A fixed wait, not a poll: a poll would be each fresh isolate's first request,
+            # and that request's cost (cold=1) is what the round's first route measures.
+            sleep 20
+            EXPECT="$version" node scripts/measure-load.mjs "$BASE" "$round"
+          done
+      - name: Summary
+        if: always()
+        run: |
+          set -uo pipefail
+          sleep 20
+          pkill -f "$WRANGLER tail" || true
+          node scripts/cpu-summary.mjs "$RUNNER_TEMP/tail.jsonl" 8 || status=$?
+          tail -5 "$RUNNER_TEMP/tail.err" || true
+          exit "${status:-0}"
+      - name: Keep the raw tail
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: c4n-api-measure
+          path: ${{ runner.temp }}/tail.jsonl
+          retention-days: 14
