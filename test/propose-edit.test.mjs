@@ -4,6 +4,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 
 for (const name of ['GITHUB_APP_ID', 'GITHUB_APP_INSTALLATION_ID', 'GITHUB_APP_PRIVATE_KEY']) delete process.env[name];
 process.env.BOT_TOKEN = 'test-token';
@@ -21,14 +22,17 @@ const REPO = BOOK.content.repo;
 const BASE = BOOK.content.drafts_branch || BOOK.content.live_branch;
 const PATH = 'chapters/chapter-03.md';
 const COMMIT = 'c'.repeat(40);
-const SHA0 = 'a'.repeat(40);
 const TEXT0 = '---\ntitle: T\n---\n\nFirst paragraph here.\n\nSecond paragraph, recieve.\n\nThird.\n';
+/** git's blob id: what GitHub calls a file with these contents. */
+const blobId = (text) => createHash('sha1').update(`blob ${Buffer.byteLength(text)}\0`).update(text).digest('hex');
+const SHA0 = blobId(TEXT0);
 
 // --- a small GitHub -----------------------------------------------------------
 const gh = {};
-function resetGitHub({ text = TEXT0, sha = SHA0, crlf = false } = {}) {
+function resetGitHub({ text = TEXT0, crlf = false } = {}) {
+  const served = crlf ? text.replace(/\n/g, '\r\n') : text;
   Object.assign(gh, {
-    text: crlf ? text.replace(/\n/g, '\r\n') : text, sha, commit: COMMIT, refs: [], puts: [], pulls: [], issues: [],
+    text: served, sha: blobId(served), commit: COMMIT, refs: [], puts: [], pulls: [], issues: [],
     deleted: [], labelled: [], putStatus: 200, prStatus: 201, calls: [],
   });
 }
@@ -48,7 +52,7 @@ globalThis.fetch = async (url, opts = {}) => {
   const rest = url.slice(api.length);
   if (method === 'GET' && rest === `/git/ref/heads/${BASE}`) return json(200, { object: { sha: gh.commit } });
   if (method === 'GET' && rest.startsWith(`/contents/${PATH}?ref=`)) {
-    return json(200, { type: 'file', sha: gh.sha, encoding: 'base64', content: Buffer.from(gh.text).toString('base64') });
+    return new Response(gh.text, { status: 200, headers: { 'content-type': 'application/vnd.github.raw; charset=utf-8' } });
   }
   if (method === 'GET' && rest.startsWith('/contents/')) return json(404, { message: 'Not Found' });
   if (method === 'GET' && rest === `/git/blobs/${SHA0}`) {
@@ -204,7 +208,8 @@ test('no summary (a page built before it): accepted, "(no summary given)", the t
 test('page edit keeps the file\'s CRLF line endings', async () => {
   resetGitHub({ crlf: true });
   const content = TEXT0.replace('Third.', 'Third, edited.');
-  const r = await call({ body: { mode: 'page', path: PATH, baseSha: SHA0, content, title: 'Fix', ...ANON } });
+  // baseSha: the CRLF file's own blob, as GET gave it to the editor.
+  const r = await call({ body: { mode: 'page', path: PATH, baseSha: gh.sha, content, title: 'Fix', ...ANON } });
   assert.equal(r.statusCode, 201);
   assert.equal(decodePut(), content.replace(/\n/g, '\r\n'));
 });
@@ -273,7 +278,7 @@ test('the conflict check is the file\'s blob, not the drafts head: drafts moved 
     assert.equal(gh.puts[0].sha, SHA0);
   }
   // And the same blob check does catch the file itself changing.
-  resetGitHub({ sha: 'e'.repeat(40) });
+  resetGitHub({ text: `${TEXT0}A line added since.\n` });
   const moved = await call({ body: { mode: 'page', path: PATH, baseSha: SHA0, content: 'x', title: 'Fix', ...ANON } });
   assert.equal(moved.payload.fallback, true);
 });
@@ -281,7 +286,7 @@ test('the conflict check is the file\'s blob, not the drafts head: drafts moved 
 // --- POST: conflicts fall back to an issue -------------------------------------------------
 
 test('drafts moved but the paragraph is still there once: applied by text', async () => {
-  resetGitHub({ text: 'New intro.\n\n' + TEXT0, sha: 'b'.repeat(40) });
+  resetGitHub({ text: 'New intro.\n\n' + TEXT0 });
   const r = await call({ body: para() });
   assert.equal(r.statusCode, 201);
   assert.ok(r.payload.prUrl);
@@ -289,7 +294,7 @@ test('drafts moved but the paragraph is still there once: applied by text', asyn
 });
 
 test('drafts moved and the paragraph is gone: an issue with the reader\'s change, no branch', async () => {
-  resetGitHub({ text: TEXT0.replace('Second paragraph, recieve.', 'Rewritten.'), sha: 'b'.repeat(40) });
+  resetGitHub({ text: TEXT0.replace('Second paragraph, recieve.', 'Rewritten.') });
   const r = await call({ body: para() });
   assert.equal(r.statusCode, 201);
   assert.deepEqual(r.payload, { issueUrl: `https://github.com/${REPO}/issues/9`, fallback: true });
@@ -298,7 +303,7 @@ test('drafts moved and the paragraph is gone: an issue with the reader\'s change
 });
 
 test('page mode on a moved file: an issue with the diff against what they edited', async () => {
-  resetGitHub({ sha: 'b'.repeat(40) });
+  resetGitHub({ text: `${TEXT0}A line added since.\n` });
   const content = TEXT0.replace('Third.', 'Third, edited.');
   const r = await call({ body: { mode: 'page', path: PATH, baseSha: SHA0, content, ...ANON } });
   assert.equal(r.payload.fallback, true);

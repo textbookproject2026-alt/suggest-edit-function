@@ -36,6 +36,7 @@ const draftsOnly = gh.commitFiles(REPO, 'drafts-only', { [PAGE]: 'secret draft\n
 
 const r = gh.repo(REPO);
 const json = (status, body) => ({ ok: status < 300, status, json: async () => body, text: async () => (typeof body === 'string' ? body : JSON.stringify(body)) });
+gh.state.assocPulls = (sha) => (sha === v2 ? [{ author: { __typename: 'Bot' }, body: '**Proposed by:** `Jo Reader` (`j***@example.com`)' }] : []);
 gh.state.hooks = {
   '/markdown': ({ body }) => ({ ok: true, status: 200, text: async () => `<p>${body.text.length}</p>`, json: async () => ({}) }),
   '/pulls?per_page': ({ url }) => json(200, url.includes(v2) ? [{ user: { type: 'Bot' }, body: '**Proposed by:** `Jo Reader` (`j***@example.com`)' }] : []),

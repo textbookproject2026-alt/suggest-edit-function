@@ -47,7 +47,7 @@
  *
  * Needs the App's Contents and Pull requests permissions (README, "The App").
  */
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import BUNDLE from '../registry/bundled.mjs';
 import { validateRegistry, createResolver } from '../lib/registry.mjs';
 import {
@@ -62,6 +62,8 @@ import { notifyAuthors } from '../lib/member.mjs';
 
 const REGISTRY = validateRegistry(BUNDLE.registry);
 const RESOLVER = createResolver(REGISTRY);
+/** Larger than the contents API would return as text (1 MB): the editor refuses it. */
+const MAX_SOURCE_BYTES = 1024 * 1024;
 
 const CREDENTIALS = createCredentials(process.env, {
   contents: 'write',
@@ -153,15 +155,17 @@ async function readSource(book, path, token, left) {
   const commit = (await ref.json())?.object?.sha;
   if (typeof commit !== 'string') throw new Error('branch ref returned no sha');
 
-  const file = await gh(`/repos/${book.content.repo}/contents/${encodePath(path)}?ref=${commit}`, token, left);
+  // The raw file (no JSON or base64 to undo); its blob sha is git's, computed here.
+  const file = await gh(`/repos/${book.content.repo}/contents/${encodePath(path)}?ref=${commit}`, token, left, { accept: 'application/vnd.github.raw' });
   if (file.status === 404) return { branch, commit, missing: true };
   if (!file.ok) throw await fail('read file', file);
-  const data = await file.json();
-  if (data?.type !== 'file' || typeof data.sha !== 'string') return { branch, commit, missing: true };
-  // The contents API leaves `content` empty for files over 1 MB.
-  if (data.encoding !== 'base64' || typeof data.content !== 'string') return { branch, commit, tooLarge: true };
-  const raw = Buffer.from(data.content, 'base64').toString('utf8');
-  return { branch, commit, sha: data.sha, raw, text: toLf(raw), crlf: raw.includes('\r\n') };
+  // A folder answers with its listing as JSON, raw or not: only a file is raw.
+  if (!(file.headers.get('content-type') ?? '').startsWith('application/vnd.github.raw')) return { branch, commit, missing: true };
+  const bytes = Buffer.from(await file.arrayBuffer());
+  if (bytes.length > MAX_SOURCE_BYTES) return { branch, commit, tooLarge: true };
+  const sha = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+  const raw = bytes.toString('utf8');
+  return { branch, commit, sha, raw, text: toLf(raw), crlf: raw.includes('\r\n') };
 }
 
 /**

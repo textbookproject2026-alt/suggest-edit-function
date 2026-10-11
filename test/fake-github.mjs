@@ -141,8 +141,12 @@ export function createFakeGitHub() {
       const r = repos.get(`${body.variables.owner}/${body.variables.name}`.toLowerCase());
       const v = body.variables;
       const repository = {};
+      const prs = body.query.includes('associatedPullRequests');
       for (const [, alias, key] of body.query.matchAll(/(c\d+): object\(oid: \$(s\d+)\)/g)) {
-        repository[alias] = r?.commits.has(v[key]) ? { oid: v[key] } : null;
+        // state.assocPulls(sha): a commit's pull requests, [{ author: { __typename }, body }].
+        repository[alias] = r?.commits.has(v[key])
+          ? { oid: v[key], ...(prs ? { associatedPullRequests: { nodes: state.assocPulls?.(v[key]) ?? [] } } : {}) }
+          : null;
       }
       for (const [, ralias, bkey, inner] of body.query.matchAll(/(r\d+): ref\(qualifiedName: \$(b\d+)\) \{((?: c\d+: compare\(headRef: \$h\d+\) \{ status \})+) \}/g)) {
         const head = r?.refs.get(v[bkey].replace(/^refs\/heads\//, ''));
@@ -181,7 +185,7 @@ export function createFakeGitHub() {
     if ((m = /^\/contents\/(.+)$/.exec(rest)) && method === 'GET' && opts.headers?.Accept === 'application/vnd.github.raw') {
       const head = r.refs.get(q.get('ref') ?? '') ?? q.get('ref');
       const id = r.commits.has(head) ? filesAt(r, head).get(decodeURIComponent(m[1])) : undefined;
-      return id ? new Response(r.blobs.get(id), { status: 200 }) : json(404, { message: 'Not Found' });
+      return id ? new Response(r.blobs.get(id), { status: 200, headers: { 'content-type': 'application/vnd.github.raw; charset=utf-8' } }) : json(404, { message: 'Not Found' });
     }
 
     // --- git data
@@ -237,7 +241,7 @@ export function createFakeGitHub() {
     }
     if ((m = /^\/git\/blobs\/([0-9a-f]{40})$/.exec(rest)) && method === 'GET') {
       const b = r.blobs.get(m[1]);
-      if (b && opts.headers?.Accept === 'application/vnd.github.raw') return new Response(b, { status: 200 });
+      if (b && opts.headers?.Accept === 'application/vnd.github.raw') return new Response(b, { status: 200, headers: { 'content-type': 'application/vnd.github.raw; charset=utf-8' } });
       return b ? json(200, { encoding: 'base64', content: b.toString('base64').replace(/.{60}/g, '$&\n') }) : json(404, {});
     }
 
