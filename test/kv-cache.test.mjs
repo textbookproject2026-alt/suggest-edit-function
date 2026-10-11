@@ -39,3 +39,26 @@ test('kv cache: KV failing (the daily write limit included) is never fatal', asy
   }
   assert.deepEqual(await kept('d', 90_000, async () => ['no KV at all']), ['no KV at all']);
 });
+
+test('labels: checked once a day per repository, and not remembered when a check fell short', async () => {
+  const { ensureLabels } = await import('../lib/common.mjs');
+  const saved = globalThis.fetch;
+  const calls = [];
+  let fail = true;
+  globalThis.fetch = async (url) => { calls.push(String(url)); return new Response('{}', { status: fail ? 500 : 200 }); };
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    const defaults = { 'suggested-edit': {}, 'needs-triage': {} };
+    await ensureLabels('o/labels-test', 't', defaults, 5000);
+    assert.equal(calls.length, 2);
+    fail = false;
+    await ensureLabels('o/labels-test', 't', defaults, 5000);
+    assert.equal(calls.length, 4, 'a failed check is not remembered');
+    await ensureLabels('o/labels-test', 't', defaults, 5000);
+    assert.equal(calls.length, 4, 'a good one is');
+  } finally {
+    globalThis.fetch = saved;
+    console.warn = warn;
+  }
+});
