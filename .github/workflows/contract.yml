@@ -71,7 +71,7 @@ jobs:
           jq -s -r '
             map(select(.event.request?)) |
             map({ p: ((.event.request.method) + " " + (.event.request.url | sub("\\?.*"; "") | sub("^https://[^/]+"; ""))),
-                  cpu: (.cpuTime // -1), sub: ([.logs[]?.message[]? | tostring | capture("subrequests=(?<n>[0-9]+)")?.n | tonumber] | max // 0),
+                  cpu: (.cpuTime // -1), sub: ([.logs[]?.message[]? | tostring | (capture("subrequests=(?<n>[0-9]+)")? | .n | tonumber)] | max // 0),
                   outcome }) |
             group_by(.p)[] |
             (map(.cpu) | sort) as $c |
@@ -82,3 +82,11 @@ jobs:
           echo "Exceeded or errored:"
           jq -s -r 'map(select(.outcome != "ok")) | .[] | "\(.outcome) \(.event.request.url)"' "$f" | head -20
           tail -5 "$RUNNER_TEMP/tail.err" || true
+
+      - name: Keep the raw tail
+        if: always() && inputs.minutes != '0'
+        uses: actions/upload-artifact@v7
+        with:
+          name: c4n-api-tail
+          path: ${{ runner.temp }}/tail.jsonl
+          retention-days: 14
