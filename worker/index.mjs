@@ -116,8 +116,8 @@ export default {
     }
 
     const store = { n: 0 };
-    const load = !loaded.has(url.pathname);
-    loaded.add(url.pathname);
+    const load = !loaded.has(path);
+    loaded.add(path);
     const { default: run } = await handler();
     const response = await counter.run(store, () => serve(run, request, url));
     console.log(`c4n-api ${request.method} ${path} ${response.status} subrequests=${store.n} cold=${wasCold ? 1 : 0} load=${load ? 1 : 0}`);
