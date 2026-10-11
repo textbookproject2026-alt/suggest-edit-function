@@ -15,6 +15,7 @@ const origin = `https://${book.site.domain}`;
 const portal = `https://${BUNDLE.registry.platform.portal.domain}`;
 const author = 'https://author.confused4now.org';
 const slug = book.slug;
+const others = BUNDLE.registry.books.filter((b) => b.status !== 'retired' && b.site?.domain && b.slug !== slug);
 const json = { 'Content-Type': 'application/json' };
 
 const gh = async (path) => (await fetch(`https://api.github.com${path}`, {
@@ -36,6 +37,12 @@ const requests = () => [
   ['GET', '/api/propose-edit?path=index.md', { Origin: origin }],
   ['GET', `/api/github-auth?origin=${encodeURIComponent(origin)}`, {}],
   ['POST', '/api/request-book', { Origin: portal, ...json }, JSON.stringify({ title: 'A measurement', authors: 'Nobody', email: 'delivered@resend.dev', summary: 'A measurement of the API, discarded by the honeypot.', agreeLicence: true, website: 'x' })],
+  // Every live book's history: a book's lists are kept 90 s (120 with declined), so
+  // the rounds also measure working them out again (logged with subrequests > 0).
+  ...others.flatMap((b) => [
+    ['GET', `/api/history?book=${b.slug}&${fresh()}`, { Origin: `https://${b.site.domain}` }],
+    ['GET', `/api/history?book=${b.slug}&declined=1&${fresh()}`, { Origin: `https://${b.site.domain}` }],
+  ]),
   ['OPTIONS', '/api/author-read', { Origin: author, 'Access-Control-Request-Method': 'GET' }],
   ['GET', '/api/author-read?what=books', { Origin: author }],
   ['POST', '/api/author-act', { Origin: author, ...json }, '{}'],
