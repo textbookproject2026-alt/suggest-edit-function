@@ -31,6 +31,9 @@ const ROUTES = {
 // Subrequests per request (the free plan allows 50), logged with each request so
 // worker.yml's measurement and Workers Logs can see them beside CPU time.
 const counter = new AsyncLocalStorage();
+// The first request an isolate serves pays for any lazy start-up work: logged as cold=1
+// so CPU can be measured cold and warm separately (scripts/cpu-summary.mjs).
+let cold = true;
 const realFetch = globalThis.fetch;
 globalThis.fetch = (...args) => {
   const store = counter.getStore();
@@ -84,6 +87,8 @@ function route(url) {
 
 export default {
   async fetch(request, env, ctx) {
+    const wasCold = cold;
+    cold = false;
     platform.kv = env.TOKENS ?? null;
     platform.db = env.DB ?? null;
 
@@ -96,11 +101,14 @@ export default {
     const path = new URL(request.url).pathname; // before the rewrites
     const key = cacheKey(request);
     const hit = key && (await caches.default.match(key));
-    if (hit) return forClient(hit);
+    if (hit) {
+      console.log(`c4n-api ${request.method} ${path} ${hit.status} subrequests=0 cold=${wasCold ? 1 : 0} cache=hit`);
+      return forClient(hit);
+    }
 
     const store = { n: 0 };
     const response = await counter.run(store, () => serve(handler, request, url));
-    console.log(`c4n-api ${request.method} ${path} ${response.status} subrequests=${store.n}`);
+    console.log(`c4n-api ${request.method} ${path} ${response.status} subrequests=${store.n} cold=${wasCold ? 1 : 0}`);
     if (key) ctx.waitUntil(keep(key, response.clone()));
     return forClient(response);
   },
