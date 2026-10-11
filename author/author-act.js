@@ -404,7 +404,7 @@ export default wrap(async (req, res) => {
   const book = bookFor(body.book, auth, res);
   if (!book) return;
   const tag = `${auth.tag} book=${book.slug} action=${body.action}`;
-  if (limits.write(auth.identity.login.toLowerCase(), Date.now())) {
+  if (await limits.write(auth.identity.login.toLowerCase(), Date.now())) {
     console.warn(`rate limit: ${tag}`);
     send(res, 429, { error: 'rate limit exceeded', userMessage: "You're doing a lot very quickly — please wait a little while." });
     return;

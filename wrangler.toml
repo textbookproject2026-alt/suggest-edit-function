@@ -1,0 +1,31 @@
+# c4n-api: the suggest-edit function as a Cloudflare Worker (worker/index.mjs).
+# Deployed only by .github/workflows/worker.yml (CI), never from a laptop.
+# The KV and D1 ids are filled in by that workflow, which finds or creates them by name.
+name = "c4n-api"
+main = "worker/index.mjs"
+compatibility_date = "2025-09-01"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+routes = [{ pattern = "api.confused4now.org", custom_domain = true }]
+
+[observability]
+enabled = true
+
+[triggers]
+crons = ["17 3 * * *"]
+
+[[kv_namespaces]]
+binding = "TOKENS"
+id = "TOKENS_ID"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "c4n-api"
+database_id = "DB_ID"
+migrations_dir = "migrations"
+
+# Not secret. The OAuth App is "Textbook sign-in (api.confused4now.org)"; its secret is
+# set by worker-secrets.yml. The redirect URI defaults to this host's /api/github-auth.
+[vars]
+GITHUB_APP_ID = "4951384"
+GITHUB_OAUTH_CLIENT_ID = "Ov23li2HSqm1hbY1ui7r"

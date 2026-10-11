@@ -132,7 +132,7 @@ export default wrap(async (req, res) => {
   const what = params.get('what') ?? '';
   const { identity, tag } = auth;
 
-  if (limits.read(identity.login.toLowerCase(), Date.now())) {
+  if (await limits.read(identity.login.toLowerCase(), Date.now())) {
     send(res, 429, { error: 'rate limit exceeded', userMessage: 'Too many requests — try again in a little while.' });
     return;
   }

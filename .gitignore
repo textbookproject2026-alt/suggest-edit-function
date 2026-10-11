@@ -9,3 +9,7 @@ node_modules/
 
 .DS_Store
 /node_modules
+
+# Cloudflare (wrangler dev)
+.wrangler
+.dev.vars

@@ -19,8 +19,8 @@ import { REGISTRY_REPO, registryCredential } from '../lib/author-people.mjs';
 import { AUTHOR_SITE_ORIGIN } from '../lib/member.mjs';
 
 const appToken = appCredentials({ contents: 'write', pull_requests: 'write' });
-const perBook = createRateLimiter(20, 60 * 60 * 1000);
-const overall = createRateLimiter(100, 60 * 60 * 1000);
+const perBook = createRateLimiter(20, 60 * 60 * 1000, 'sync-book');
+const overall = createRateLimiter(100, 60 * 60 * 1000, 'sync-all');
 const ID_RE = /^m-[0-9a-f]{10}$/;
 const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
 
@@ -117,7 +117,7 @@ export default async function handler(req, res) {
   const book = REGISTRY.books.find((b) => b.slug === slug && b.status !== 'retired');
   if (!book) return send(res, 404, { error: 'no such book' });
   const now = Date.now();
-  if (overall('all', now) || perBook(slug, now)) return send(res, 429, { error: 'rate limit exceeded' });
+  if ((await overall("all", now)) || (await perBook(slug, now))) return send(res, 429, { error: 'rate limit exceeded' });
   const tag = `sync book=${slug}`;
   let credential;
   try {

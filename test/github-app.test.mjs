@@ -85,10 +85,10 @@ const authOf = (q) => q.headers.Authorization;
 // JWT
 // ---------------------------------------------------------------------------
 
-test('the app JWT is RS256, signed by the private key, issued by the app, and under 10 minutes', () => {
+test('the app JWT is RS256, signed by the private key, issued by the app, and under 10 minutes', async () => {
   const now = Date.UTC(2026, 8, 15, 12, 0, 0);
   const { app } = readCredentialConfig(APP_ENV);
-  const jwt = createAppJwt({ appId: app.appId, privateKey: app.privateKey, now });
+  const jwt = await createAppJwt({ appId: app.appId, privateKey: app.privateKey, now });
 
   const [h, p, s] = jwt.split('.');
   assert.deepEqual(JSON.parse(Buffer.from(h, 'base64url')), { alg: 'RS256', typ: 'JWT' });

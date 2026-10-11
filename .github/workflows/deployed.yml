@@ -13,8 +13,8 @@
 # set (the same hook URL as in textbook-registry), the hook is fired once, in case
 # Vercel missed the push. Without the secret this job only watches.
 #
-# The endpoint is read from platform.suggest_edit_endpoint in the registry, as
-# deploy.yml does.
+# This watches the Vercel deployment, the fallback until it is retired (README,
+# "Where the API lives"); worker.yml deploys and watches api.confused4now.org.
 name: deployed
 
 on:
@@ -45,7 +45,7 @@ jobs:
           HOOK: ${{ secrets.SUGGEST_EDIT_DEPLOY_HOOK }}
         run: |
           set -euo pipefail
-          url="$(curl -fsS --max-time 20 https://raw.githubusercontent.com/textbookproject2026-alt/textbook-registry/main/registry.json | jq -er '.platform.suggest_edit_endpoint')"
+          url=https://suggest-edit-function.vercel.app/api/suggest-edit
           # No Origin, so the function refuses with a 403 before doing anything.
           # Every response carries the header, refusals included.
           served() {

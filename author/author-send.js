@@ -151,7 +151,7 @@ export default wrap(async (req, res) => {
   const book = bookFor(body.book, auth, res);
   if (!book) return;
   const btag = `${tag} book=${book.slug}`;
-  if (limits.write(identity.login.toLowerCase(), Date.now())) {
+  if (await limits.write(identity.login.toLowerCase(), Date.now())) {
     console.warn(`rate limit: ${btag}`);
     send(res, 429, { error: 'rate limit exceeded', userMessage: "You're sending changes very quickly — please wait a little while." });
     return;
