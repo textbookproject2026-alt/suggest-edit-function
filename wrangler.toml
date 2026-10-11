@@ -40,3 +40,5 @@ migrations_dir = "migrations"
 [vars]
 GITHUB_APP_ID = "4951384"
 GITHUB_OAUTH_CLIENT_ID = "Ov23li2HSqm1hbY1ui7r"
+# MEASUREMENT BUILD ONLY: an anonymous in-site proposal, to measure a real one.
+PROPOSE_EDIT_ANONYMOUS = "on"
