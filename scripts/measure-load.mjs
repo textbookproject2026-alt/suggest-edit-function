@@ -47,7 +47,10 @@ for (let pass = 0; pass < 4; pass++) {
   const list = requests();
   // A different route first each round, so each gets to be an isolate's very first.
   const shift = Number(round) % list.length;
-  for (const [method, p, headers, body] of [...list.slice(shift), ...list.slice(0, shift)]) {
+  // A fresh isolate's very first request: a path with no route, so its CPU is the
+  // isolate's start alone (logged cold=1); every route after it then loads (load=1).
+  const first = pass === 0 ? [['GET', '/api/nope', {}]] : [];
+  for (const [method, p, headers, body] of [...first, ...list.slice(shift), ...list.slice(0, shift)]) {
     const res = await fetch(base + p, { method, headers, body, redirect: 'manual' });
     await res.arrayBuffer();
     statuses.push(`${method} ${p.split('?')[0]} ${res.status}`);
