@@ -81,10 +81,10 @@ async function hit(base, [, method, path, headers, body]) {
   const text = await res.text();
   let json;
   try { json = JSON.parse(text); } catch { json = undefined; }
-  const headers = Object.fromEntries(HEADERS.map((h) => [h, res.headers.get(h)]));
+  const seen = Object.fromEntries(HEADERS.map((h) => [h, res.headers.get(h)]));
   // The hosts deploy separately (Vercel skips workflow-only commits): compare presence, not the sha.
-  if (headers['x-function-version']) headers['x-function-version'] = '<sha>';
-  return { status: res.status, headers, text, json, ms: Date.now() - t };
+  if (seen['x-function-version']) seen['x-function-version'] = '<sha>';
+  return { status: res.status, headers: seen, text, json, ms: Date.now() - t };
 }
 
 const canon = (v) => JSON.stringify(v, (k, x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort()) : x));
