@@ -40,7 +40,7 @@ import BUNDLE from '../registry/bundled.mjs';
 import { validateRegistry, createPortalResolver } from '../lib/registry.mjs';
 import {
   EMAIL_RE, asString, clientIp, corsHeaders, createCredentials, createRateLimiter, detailOf, ensureLabels,
-  fence, githubFetch, inlineCode, isJsonContentType, parseBody, send,
+  blobJson, blobSizes, fence, githubFetch, inlineCode, isBase64, isJsonContentType, parseBody, send,
 } from '../lib/common.mjs';
 
 const REGISTRY = validateRegistry(BUNDLE.registry);
@@ -63,10 +63,12 @@ const MIN_SUMMARY = 20;
 const MAX_FILES = 5;
 const MAX_TOTAL_BYTES = 20 * 1024 * 1024;
 const TOTAL_TEXT = '20 MB';
-const PART_BYTES = 2.5 * 1024 * 1024; // base64 3.4 MB: under Vercel's 4.5 MB body limit
-const MAX_PARTS = Math.ceil(MAX_TOTAL_BYTES / PART_BYTES);
+// The largest part taken (base64 3.4 MB: under Vercel's 4.5 MB body limit). The
+// portal sends 1 MB parts, which keep each request well inside the Worker's CPU limit,
+// so a file may have up to 20 of them; the total is checked from the parts' sizes.
+const PART_BYTES = 2.5 * 1024 * 1024;
+const MAX_PARTS = 20;
 const SHA_RE = /^[0-9a-f]{40}$/;
-const B64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 const LOGIN_RE = /^[A-Za-z0-9](-?[A-Za-z0-9]){0,38}$/;
 // Hostname labels the platform uses or may want; a book never gets one.
 const RESERVED_SLUGS = new Set(['www', 'api', 'admin', 'portal', 'mail', 'cms', 'status', 'docs', 'help', 'static']);
@@ -111,8 +113,9 @@ function safeName(name) {
 }
 
 /**
- * Names, types and shape. A file arrives either whole (data) or as part SHAs whose
- * bytes are fetched later (loadParts); either way checkBytes runs on the bytes.
+ * Names, types and shape. A file arrives either whole (data) or as part SHAs, which
+ * are checked where they are (checkParts) and committed unjoined: book-requests'
+ * join-parts workflow joins them. Either way checkAll runs the content checks.
  */
 function checkFiles(raw) {
   if (raw === undefined || raw === null) return { ok: true, files: [] };
@@ -136,41 +139,45 @@ function checkFiles(raw) {
       continue;
     }
     const data = typeof f?.data === 'string' ? f.data : '';
-    if (!B64_RE.test(data) || data.length % 4 !== 0) return { ok: false, why: 'file not base64' };
-    files.push({ name, ext, bytes: Buffer.from(data, 'base64') });
+    if (!isBase64(data)) return { ok: false, why: 'file not base64' };
+    const bytes = Buffer.from(data, 'base64');
+    files.push({ name, ext, data, size: bytes.length, start: bytes.subarray(0, 4), text: ext === 'docx' || isUtf8(bytes) });
   }
-  const whole = files.filter((f) => f.bytes);
-  if (whole.length === files.length) return checkBytes(files);
-  const early = checkBytes(whole); // reject a bad whole file before any fetching
+  const whole = files.filter((f) => f.data !== undefined);
+  if (whole.length === files.length) return checkAll(files);
+  const early = checkAll(whole); // reject a bad whole file before any fetching
   return early.ok ? { ok: true, files } : early;
 }
 
-/** Content checks, total size and unique names, once every file has its bytes. */
-function checkBytes(loaded) {
+/**
+ * Content checks, total size and unique names, once every file has its size, its
+ * first bytes (start) and, for Markdown, whether it is UTF-8 (text).
+ */
+function checkAll(checked) {
   const files = [];
   let total = 0;
   const seen = new Set();
-  for (const { name, ext, bytes } of loaded) {
-    if (bytes.length === 0) return { ok: false, why: 'empty file', user: `${name} is empty.` };
-    if (ext === 'docx' && bytes.subarray(0, 4).toString('binary') !== 'PK\x03\x04') {
+  for (const { name, ext, data, parts, size, start, text } of checked) {
+    if (size === 0) return { ok: false, why: 'empty file', user: `${name} is empty.` };
+    if (ext === 'docx' && start.toString('binary') !== 'PK\x03\x04') {
       return { ok: false, why: 'docx not a zip', user: `${name} does not look like a Word document.` };
     }
-    if (ext !== 'docx' && !isUtf8(bytes)) return { ok: false, why: 'md not utf-8', user: `${name} is not a text file.` };
-    total += bytes.length;
+    if (!text) return { ok: false, why: 'md not utf-8', user: `${name} is not a text file.` };
+    total += size;
     if (total > MAX_TOTAL_BYTES) {
       return { ok: false, why: 'files too large', user: `The files come to more than ${TOTAL_TEXT}. Attach fewer, or share a link to them instead.` };
     }
     let unique = name;
     for (let n = 2; seen.has(unique.toLowerCase()); n++) unique = name.replace(/(\.[a-z]+)$/i, `-${n}$1`);
     seen.add(unique.toLowerCase());
-    files.push({ name: unique, data: bytes.toString('base64'), size: bytes.length });
+    files.push({ name: unique, size, ...(parts ? { parts } : { data }) });
   }
   return { ok: true, files };
 }
 
-function isUtf8(bytes) {
+function isUtf8(bytes, decoder = new TextDecoder('utf-8', { fatal: true }), stream = false) {
   try {
-    new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    decoder.decode(bytes, { stream });
     return true;
   } catch {
     return false;
@@ -237,35 +244,61 @@ async function gh(path, token, init = {}) {
 // About 12 s for a small file, growing with size: a 20 MB blob is ~27 MB of JSON.
 const blobTimeout = (base64Length) => 12000 + Math.ceil(base64Length / (1024 * 1024)) * 1500;
 
+const raw = (sha, token, timeoutMs = 15000) =>
+  githubFetch(`/repos/${REQUESTS_REPO}/git/blobs/${sha}`, { token, accept: 'application/vnd.github.raw', timeoutMs });
+
 /**
- * Joins each file's parts into its bytes. Parts never committed stay unreachable
- * blobs, which GitHub garbage-collects; an abandoned upload leaves nothing behind.
+ * What checkAll needs of each file sent as parts, without joining them (that takes
+ * more CPU than a request has; book-requests' join-parts does it): every part's size
+ * in one GraphQL query, a Word file's first bytes, and a Markdown file read through a
+ * streaming UTF-8 check. Parts never committed stay unreachable blobs, which GitHub
+ * garbage-collects; an abandoned upload leaves nothing behind.
  */
-async function loadParts(token, files) {
+async function checkParts(token, files) {
+  const sizes = await blobSizes(REQUESTS_REPO, files.flatMap((f) => f.parts ?? []), { token, timeoutMs: 15000 });
+
   return Promise.all(files.map(async (f) => {
-    if (f.bytes) return f;
-    const chunks = [];
-    for (const sha of f.parts) {
-      const blob = await gh(`/git/blobs/${sha}`, token, { timeoutMs: 15000 });
-      if (blob.encoding !== 'base64') throw new Error(`github blob ${sha} has encoding ${blob.encoding}`);
-      chunks.push(Buffer.from(String(blob.content).replace(/\s+/g, ''), 'base64'));
+    if (!f.parts) return f;
+    const size = f.parts.reduce((n, sha) => n + sizes.get(sha), 0);
+    if (f.ext === 'docx') {
+      const res = await raw(f.parts[0], token);
+      if (!res.ok) throw Object.assign(new Error(`github blob ${f.parts[0]} returned ${res.status}`), { status: res.status });
+      const reader = res.body.getReader();
+      const { value } = await reader.read();
+      await reader.cancel().catch(() => {});
+      return { ...f, size, start: Buffer.from(value ?? []).subarray(0, 4), text: true };
     }
-    return { name: f.name, ext: f.ext, bytes: Buffer.concat(chunks) };
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    let text = true;
+    for (const [i, sha] of f.parts.entries()) {
+      const res = await raw(sha, token);
+      if (!res.ok) throw Object.assign(new Error(`github blob ${sha} returned ${res.status}`), { status: res.status });
+      text = text && isUtf8(new Uint8Array(await res.arrayBuffer()), decoder, i < f.parts.length - 1);
+    }
+    return { ...f, size, start: Buffer.alloc(0), text };
   }));
 }
 
 /** Every file in one commit on the requests repo's main. Returns the commit SHA. */
 async function commitFiles(token, reference, files) {
-  const blobs = await Promise.all(
-    files.map((f) => gh('/git/blobs', token, { method: 'POST', body: { content: f.data, encoding: 'base64' }, timeoutMs: blobTimeout(f.data.length) })),
-  );
+  // A file sent whole becomes one blob; one sent as parts goes in as its parts, by sha
+  // (<name>.parts/000, 001, …), for join-parts to join.
+  const entries = [];
+  for (const f of files) {
+    if (f.parts) {
+      f.parts.forEach((sha, i) => entries.push({ path: `requests/${reference}/${f.name}.parts/${String(i).padStart(3, '0')}`, sha }));
+    } else {
+      const blob = await gh('/git/blobs', token, { method: 'POST', body: blobJson(f.data), timeoutMs: blobTimeout(f.data.length) });
+      entries.push({ path: `requests/${reference}/${f.name}`, sha: blob.sha });
+    }
+  }
   const ref = await gh(`/git/ref/heads/${REQUESTS_BRANCH}`, token);
   const parent = await gh(`/git/commits/${ref.object.sha}`, token);
   const tree = await gh('/git/trees', token, {
     method: 'POST',
     body: {
       base_tree: parent.tree.sha,
-      tree: files.map((f, i) => ({ path: `requests/${reference}/${f.name}`, mode: '100644', type: 'blob', sha: blobs[i].sha })),
+      tree: entries.map((e) => ({ ...e, mode: '100644', type: 'blob' })),
     },
   });
   const commit = await gh('/git/commits', token, {
@@ -349,7 +382,7 @@ async function handlePart(part, ip, res) {
     send(res, 429, { error: 'rate limit exceeded', userMessage: "You've sent a lot of files already. Please try again in an hour." });
     return;
   }
-  if (!part || part.length % 4 !== 0 || !B64_RE.test(part) || Buffer.byteLength(part) > Math.ceil(PART_BYTES / 3) * 4) {
+  if (!part || part.length > Math.ceil(PART_BYTES / 3) * 4 || !isBase64(part)) {
     send(res, 400, { error: 'validation: part', userMessage: 'One of the files could not be read.' });
     return;
   }
@@ -359,7 +392,7 @@ async function handlePart(part, ip, res) {
     return;
   }
   try {
-    const blob = await gh('/git/blobs', credential.token, { method: 'POST', body: { content: part, encoding: 'base64' }, timeoutMs: blobTimeout(part.length) });
+    const blob = await gh('/git/blobs', credential.token, { method: 'POST', body: blobJson(part), timeoutMs: blobTimeout(part.length) });
     send(res, 201, { sha: blob.sha });
   } catch (err) {
     if (err.status === 401) CREDENTIALS.refused(REQUESTS_BOOK, credential);
@@ -441,7 +474,7 @@ async function handle(req, res) {
   let partsError = null;
   if (d.files.some((f) => f.parts)) {
     try {
-      const checked = checkBytes(await loadParts(credential.token, d.files));
+      const checked = checkAll(await checkParts(credential.token, d.files));
       if (!checked.ok) {
         console.warn(`validation: ${checked.why} (ip=${ip})`);
         send(res, 400, { error: `validation: ${checked.why}`, userMessage: checked.user ?? 'One of the files could not be read.' });

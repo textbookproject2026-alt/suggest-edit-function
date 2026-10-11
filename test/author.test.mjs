@@ -60,7 +60,18 @@ const tokenFor = (who, origin = ORIGIN) => issueIdentity(SECRET, who, origin);
 
 const CH3 = '# Chapter 3\n\nThe the domains of reality.\n\nSecond paragraph.\n';
 let BASE;
+
+// book-requests' author-lint workflow, answering each dispatch at once with LINT (what
+// the real one does in about a minute): the first read says 'checking', the next 'done'.
+let LINT = [];
+gh.state.hooks['/book-requests/dispatches'] = ({ body }) => {
+  const { book, sha } = body.client_payload;
+  gh.commitFiles(REQUESTS, `author-lint/${book}/${sha}`, { 'lint/result.json': JSON.stringify({ version: 1, book, sha, ok: true, problems: LINT, files: 3 }) });
+};
+const MD036 = [{ path: 'chapters/chapter-03.md', line: 9, rule: 'MD036', description: 'Emphasis used instead of a heading', detail: 'Bold as a heading', fixable: false }];
+
 function resetBook() {
+  LINT = [];
   const r = gh.repo(REPO);
   r.refs.clear();
   gh.commitFiles(REPO, LIVE, {
@@ -87,7 +98,8 @@ function mockRes() {
     setHeader(k, v) { this.headers[k.toLowerCase()] = v; return this; },
     status(c) { this.statusCode = c; return this; },
     json(p) { this.payload = p; this.ended = true; return this; },
-    end(b) { if (b) this.body = b; this.ended = true; return this; },
+    // A body written by send() as JSON already (RawJson) reads back as the payload.
+    end(b) { if (b) this.body = b; if (b && /json/.test(this.headers['content-type'] ?? '')) this.payload = JSON.parse(b); this.ended = true; return this; },
     get headersSent() { return this.ended; },
   };
 }
@@ -298,7 +310,7 @@ async function upload(buf, who = AUTHOR) {
   return receipts;
 }
 
-test('import: parts are reassembled into source.docx on the import\'s own branch in the private requests repo', async () => {
+test('import: the parts go on the import\'s own branch in the private requests repo as they came, for the workflow to join', async () => {
   resetBook();
   const receipts = await upload(DOCX);
   assert.equal(receipts.length, 2);
@@ -308,8 +320,9 @@ test('import: parts are reassembled into source.docx on the import\'s own branch
   assert.equal(r.payload.base, BASE);
   const branchHead = gh.repo(REQUESTS).refs.get(`author-imports/${r.payload.id}`);
   const files = gh.filesAt(REQUESTS, branchHead);
-  assert.deepEqual([...files.keys()].sort(), ['README.md', 'import/request.json', 'import/source.docx']);
-  assert.ok(gh.repo(REQUESTS).blobs.get(files.get('import/source.docx')).equals(DOCX));
+  assert.deepEqual([...files.keys()].sort(), ['README.md', 'import/request.json', 'import/source.parts/000', 'import/source.parts/001']);
+  const blobs = gh.repo(REQUESTS).blobs;
+  assert.ok(Buffer.concat([blobs.get(files.get('import/source.parts/000')), blobs.get(files.get('import/source.parts/001'))]).equals(DOCX));
   const request = JSON.parse(gh.textAt(REQUESTS, branchHead, 'import/request.json'));
   assert.equal(request.login, 'brandonandcaroline');
   assert.equal(request.book, BOOK.slug);
@@ -688,6 +701,7 @@ test('publishing: the tick box, the one request shown, a clean merge — then a 
   const n = prep.payload.publish.number;
   const state = await get('publish', { book: BOOK.slug });
   assert.equal(state.payload.publish?.can_publish, true, JSON.stringify([prep.payload, state.payload]));
+  assert.equal(gh.state.dispatches.at(-1).event_type, 'author-lint');
 
   assert.equal((await call(act, { body: { book: BOOK.slug, action: 'publish', number: n } })).statusCode, 400, 'no tick');
   assert.equal((await call(act, { body: { book: BOOK.slug, action: 'publish', number: n + 1, confirm: true } })).statusCode, 409, 'another request');
@@ -707,14 +721,45 @@ test('publishing: the tick box, the one request shown, a clean merge — then a 
   assert.equal(gh.textAt(REPO, gh.repo(REPO).refs.get(LIVE), 'chapters/chapter-03.md'), NEW3);
 });
 
-test('publishing stops on the book\'s own lint, with the problems listed; its config is the book\'s; dead links are only a notice', async () => {
+test('publishing stops on the book\'s lint (the author-lint job), with the problems listed; dead links are only a notice', async () => {
   resetBook();
   gh.commitFiles(REPO, DRAFTS, { 'chapters/chapter-03.md': `${NEW3}\n**Bold as a heading**\n\nText.\n` });
-  const prep = await call(act, { body: { book: BOOK.slug, action: 'publish-prepare' } });
-  const n = prep.payload.publish.number;
-  const pr = gh.repo(REPO).pulls.get(n);
-  pr.head.sha = gh.repo(REPO).refs.get(DRAFTS);
-  pr.comments.push(`<!-- link-check sha=${pr.head.sha} -->\nLinks that didn't work:\n- https://gone.example/x in chapters/chapter-03.md (404 Not Found)`);
+  LINT = MD036;
+  // The job doesn't answer yet.
+  const workflow = gh.state.hooks['/book-requests/dispatches'];
+  gh.state.hooks['/book-requests/dispatches'] = () => {};
+  let n;
+  let pr;
+  try {
+    const prep = await call(act, { body: { book: BOOK.slug, action: 'publish-prepare' } });
+    n = prep.payload.publish.number;
+    pr = gh.repo(REPO).pulls.get(n);
+    pr.head.sha = gh.repo(REPO).refs.get(DRAFTS);
+    pr.comments.push(`<!-- link-check sha=${pr.head.sha} -->\nLinks that didn't work:\n- https://gone.example/x in chapters/chapter-03.md (404 Not Found)`);
+    gh.state.dispatches.length = 0;
+
+    // Not answered yet: being checked, the job asked for with the book and commit, and
+    // publishing refused until it answers.
+    const checking = (await get('publish', { book: BOOK.slug })).payload.publish;
+    assert.equal(checking.state, 'checking');
+    assert.equal(checking.can_publish, false);
+    assert.deepEqual(checking.lint_job, { sha: pr.head.sha });
+    assert.deepEqual(gh.state.dispatches.map((d) => [d.repo, d.event_type, d.client_payload]),
+      [[REQUESTS, 'author-lint', { book: BOOK.slug, repo: REPO, sha: pr.head.sha }]]);
+    const early = await call(act, { body: { book: BOOK.slug, action: 'publish', number: n, confirm: true } });
+    assert.equal(early.statusCode, 409);
+    assert.equal(early.payload.state, 'checking');
+    const poll = (await get('lint', { book: BOOK.slug, sha: pr.head.sha })).payload;
+    assert.deepEqual(poll, { lint: { state: 'checking' } });
+    assert.equal(gh.state.dispatches.length, 2, 'the poll only reads: only publish and the refused publish asked');
+  } finally {
+    gh.state.hooks['/book-requests/dispatches'] = workflow;
+  }
+
+  // Answered: the problems come back, and stop publishing.
+  await get('publish', { book: BOOK.slug });
+  assert.deepEqual((await get('lint', { book: BOOK.slug, sha: pr.head.sha })).payload,
+    { lint: { state: 'done', problems: MD036, count: 1 } });
   const state = (await get('publish', { book: BOOK.slug })).payload.publish;
   assert.equal(state.state, 'lint');
   assert.equal(state.can_publish, false);
@@ -724,25 +769,29 @@ test('publishing stops on the book\'s own lint, with the problems listed; its co
   const refused = await call(act, { body: { book: BOOK.slug, action: 'publish', number: n, confirm: true } });
   assert.equal(refused.statusCode, 409);
   assert.equal(refused.payload.state, 'lint');
-  assert.match(refused.payload.userMessage, /1 formatting problem in 1 page.*chapters\/chapter-03\.md line \d+ \(emphasis used instead of a heading\)/);
+  assert.match(refused.payload.userMessage, /1 formatting problem in 1 page.*chapters\/chapter-03\.md line 9 \(emphasis used instead of a heading\)/);
   assert.equal(gh.repo(REPO).refs.get(LIVE), BASE, 'nothing went live');
 
-  // The book's own config decides: with MD036 off, it publishes, dead link and all.
-  gh.commitFiles(REPO, DRAFTS, { '.markdownlint-cli2.yaml': 'config:\n  default: true\n  MD036: false\nignores:\n  - "templates/**"\n' });
+  // A new commit with nothing to fix publishes, dead link and all.
+  LINT = [];
+  gh.commitFiles(REPO, DRAFTS, { 'chapters/chapter-03.md': NEW3 });
   pr.head.sha = gh.repo(REPO).refs.get(DRAFTS);
+  await get('publish', { book: BOOK.slug });
   const after = (await get('publish', { book: BOOK.slug })).payload.publish;
   assert.equal(after.state, 'clean');
   assert.equal(after.links.checked, false, 'the link check spoke of an earlier commit');
   assert.equal((await call(act, { body: { book: BOOK.slug, action: 'publish', number: n, confirm: true } })).statusCode, 200);
 });
 
-test('lint ignores: the config\'s globs and node_modules are skipped', async () => {
-  const { lintTexts, parseConfig } = await import('../lib/book-lint.mjs');
-  const bad = '# A\n\n**B**\n';
-  const found = await lintTexts({ 'templates/x.md': bad, 'node_modules/y.md': bad, 'scripts/seed-index.md': bad, 'chapters/z.md': bad },
-    parseConfig('config:\n  default: true\nignores:\n  - "templates/**"\n  - "scripts/seed-index.md"\n'));
-  assert.deepEqual(found.map((p) => p.path), ['chapters/z.md']);
-  assert.deepEqual(parseConfig('').config, { default: true });
+test('lint: an answer for another book or commit, or a failed run, is never taken as clean', async () => {
+  resetBook();
+  const sha = gh.repo(REPO).refs.get(DRAFTS);
+  const answer = (o) => gh.commitFiles(REQUESTS, `author-lint/${BOOK.slug}/${sha}`, { 'lint/result.json': JSON.stringify({ version: 1, book: BOOK.slug, sha, ok: true, problems: [], files: 1, ...o }) });
+  for (const [o, want] of [[{ ok: false }, 'failed'], [{ book: 'another' }, 'failed'], [{ sha: 'a'.repeat(40) }, 'failed'], [{}, 'done']]) {
+    answer(o);
+    assert.equal((await get('lint', { book: BOOK.slug, sha })).payload.lint.state, want, JSON.stringify(o));
+  }
+  assert.equal((await get('lint', { book: BOOK.slug, sha: 'nope' })).payload.lint.state, 'failed');
 });
 
 // --- the credential ---------------------------------------------------------------------------
@@ -820,7 +869,10 @@ test('drafts: what drafts hold beyond live, readers\' files only, each with who 
 test('publish: with no request open yet, the drafts\' own lint comes back', async () => {
   resetBook();
   gh.commitFiles(REPO, DRAFTS, { 'chapters/chapter-03.md': NEW3 });
+  const first = (await get('publish', { book: BOOK.slug })).payload.publish;
+  assert.equal(first.state, 'not_open');
+  assert.deepEqual(first.lint_job, { sha: gh.repo(REPO).refs.get(DRAFTS) }, JSON.stringify(first));
   const p = (await get('publish', { book: BOOK.slug })).payload.publish;
-  assert.equal(p.state, 'not_open');
   assert.ok(Array.isArray(p.lint), JSON.stringify(p));
+  assert.equal(p.lint_job, undefined);
 });

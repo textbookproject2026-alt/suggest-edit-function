@@ -19,6 +19,12 @@ globalThis.fetch = async (url, opts = {}) => {
   const method = opts.method ?? 'GET';
   const body = opts.body ? JSON.parse(opts.body) : undefined;
   gh.calls.push({ method, url, body });
+  if (url === 'https://api.github.com/graphql') {
+    // Blob sizes by oid (checkParts): p0, p1, … in the order asked.
+    const oids = [...body.query.matchAll(/(p\d+): object\(oid: "([0-9a-f]{40})"\)/g)];
+    const repository = Object.fromEntries(oids.map(([, k, sha]) => [k, gh.blobs.has(sha) ? { byteSize: Buffer.from(gh.blobs.get(sha), 'base64').length } : null]));
+    return json(200, { data: { repository } });
+  }
   const api = `https://api.github.com/repos/${REPO}`;
   if (!url.startsWith(api)) throw new Error(`unexpected ${method} ${url}`);
   const rest = url.slice(api.length);
@@ -30,6 +36,7 @@ globalThis.fetch = async (url, opts = {}) => {
   }
   if (rest.startsWith('/git/blobs/')) {
     const content = gh.blobs.get(rest.slice('/git/blobs/'.length));
+    if (content !== undefined && opts.headers?.Accept === 'application/vnd.github.raw') return new Response(Buffer.from(content, 'base64'), { status: 200 });
     // GitHub wraps base64 at 60 columns; the handler must cope.
     return content === undefined ? json(404, {}) : json(200, { encoding: 'base64', content: content.replace(/.{60}/g, '$&\n') });
   }
@@ -151,20 +158,23 @@ async function upload(bytes) {
   return shas;
 }
 
-test('a file sent in parts is joined into one committed blob', async () => {
+test('a file sent in parts is committed as its parts, for join-parts to join', async () => {
   const bytes = Buffer.concat([Buffer.from('PK\x03\x04', 'binary'), Buffer.alloc(7 * 1024 * 1024, 7)]);
   const parts = await upload(bytes);
   assert.equal(parts.length, 3);
   const r = await call({ body: { ...VALID, files: [{ name: 'Chapter 3.docx', parts }, { name: 'notes.md', data: 'aGk=' }] } });
   assert.equal(r.statusCode, 201, JSON.stringify(r.payload));
-  const [joined, md] = gh.trees[0].tree;
-  assert.equal(joined.path, `requests/${r.payload.reference}/Chapter 3.docx`);
-  assert.ok(Buffer.from(gh.blobs.get(joined.sha), 'base64').equals(bytes));
-  assert.equal(Buffer.from(gh.blobs.get(md.sha), 'base64').toString(), 'hi');
+  const tree = gh.trees[0].tree;
+  const at = `requests/${r.payload.reference}`;
+  assert.deepEqual(tree.map((e) => e.path), [`${at}/Chapter 3.docx.parts/000`, `${at}/Chapter 3.docx.parts/001`, `${at}/Chapter 3.docx.parts/002`, `${at}/notes.md`]);
+  assert.deepEqual(tree.slice(0, 3).map((e) => e.sha), parts, 'the uploaded blobs themselves: no bytes sent again');
+  assert.ok(Buffer.concat(parts.map((sha) => Buffer.from(gh.blobs.get(sha), 'base64'))).equals(bytes));
+  assert.equal(Buffer.from(gh.blobs.get(tree[3].sha), 'base64').toString(), 'hi');
+  assert.ok(gh.calls.every((c) => !(c.method === 'GET' && c.url.endsWith(parts[1]))), 'only the first part is read, and only its start');
   assert.match(gh.issues[0].body, /Chapter 3\.docx.*\(7169 KB\)/);
 });
 
-test('parts: checks on the joined bytes, and on the parts themselves', async () => {
+test('parts: checks on the parts where they are, and on the parts themselves', async () => {
   const notDocx = await upload(Buffer.from('plain text, not a zip'));
   let r = await call({ body: { ...VALID, files: [{ name: 'a.docx', parts: notDocx }] } });
   assert.equal(r.statusCode, 400);
@@ -174,6 +184,14 @@ test('parts: checks on the joined bytes, and on the parts themselves', async () 
   r = await call({ body: { ...VALID, files: [{ name: 'a.md', parts: tooBig }, { name: 'b.md', parts: tooBig }] } });
   assert.equal(r.statusCode, 400);
   assert.match(r.payload.userMessage, /20 MB/);
+
+  // UTF-8 is checked across the parts: a character split by the boundary is fine.
+  const text = Buffer.concat([Buffer.alloc(PART - 1, 97), Buffer.from('é and more', 'utf8')]);
+  r = await call({ body: { ...VALID, files: [{ name: 'a.md', parts: await upload(text) }] } });
+  assert.equal(r.statusCode, 201, JSON.stringify(r.payload));
+  r = await call({ body: { ...VALID, files: [{ name: 'a.md', parts: await upload(Buffer.concat([text, Buffer.from([0xff])])) }] } });
+  assert.equal(r.statusCode, 400);
+  assert.match(r.payload.userMessage, /not a text file/);
 
   assert.equal((await call({ body: { ...VALID, files: [{ name: 'a.md', parts: ['nope'] }] } })).statusCode, 400);
   assert.equal((await call({ body: { ...VALID, files: [{ name: 'a.md', parts: [] }] } })).statusCode, 400);

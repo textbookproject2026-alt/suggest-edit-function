@@ -66,22 +66,11 @@ jobs:
           sleep $(( m * 60 + 15 ))
           pkill -f "wrangler@4.142.0 tail" || true
           f="$RUNNER_TEMP/tail.jsonl"
-          echo "$(grep -c '"scriptName"' "$f" || true) events. CPU ms by path (count, median, max) and the most subrequests:"
-          # A pretty-printed stream of objects: jq -s reads them all.
-          jq -s -r '
-            map(select(.event.request?)) |
-            map({ p: ((.event.request.method) + " " + (.event.request.url | sub("\\?.*"; "") | sub("^https://[^/]+"; ""))),
-                  cpu: (.cpuTime // -1), sub: ([.logs[]?.message[]? | tostring | (capture("subrequests=(?<n>[0-9]+)")? | .n | tonumber)] | max // 0),
-                  outcome }) |
-            group_by(.p)[] |
-            (map(.cpu) | sort) as $c |
-            "\(.[0].p)\t\(length)\t\($c[(length/2|floor)])\t\($c[-1])\tsubrequests \(map(.sub) | max)\t\([.[].outcome] | unique | join(","))"
-          ' "$f" | column -t -s $'\t'
-          echo "Over 10 ms CPU (the free plan's limit):"
-          jq -s -r 'map(select((.cpuTime // 0) > 10)) | .[] | "\(.cpuTime) ms \(.event.request.method) \(.event.request.url | sub("\\?.*"; ""))"' "$f" | sort -rn | head -20
-          echo "Exceeded or errored:"
-          jq -s -r 'map(select(.outcome != "ok")) | .[] | "\(.outcome) \(.event.request.url)"' "$f" | head -20
+          # Per route, cold and warm: p50, p95, max CPU ms and the most subrequests.
+          # Red when any p95 is 8 ms or more (the free plan allows 10).
+          node scripts/cpu-summary.mjs "$f" 8 || status=$?
           tail -5 "$RUNNER_TEMP/tail.err" || true
+          exit "${status:-0}"
 
       - name: Keep the raw tail
         if: always() && inputs.minutes != '0'

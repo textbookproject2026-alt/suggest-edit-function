@@ -1,7 +1,7 @@
 /**
  * CPU time and subrequests per route, cold and warm, from a `wrangler tail --format json`
  * capture (a stream of pretty-printed JSON objects). Each request's own log line
- * (worker/index.mjs) gives the route, cold=0|1, cache=hit and the subrequest count.
+ * (worker/index.mjs) gives the route, cold=0|1, cache=hit|kv and the subrequest count.
  *
  *   node scripts/cpu-summary.mjs tail.jsonl [limitMs]
  *
@@ -27,13 +27,13 @@ function* objects(text) {
   }
 }
 
-const LINE = /^c4n-api (\S+) (\S+) (\d+) subrequests=(\d+) cold=([01])( cache=hit)?/;
+const LINE = /^c4n-api (\S+) (\S+) (\d+) subrequests=(\d+) cold=([01])(?: cache=(\w+))?/;
 const rows = [];
 for (const e of objects(readFileSync(file, 'utf8'))) {
   const line = (e.logs ?? []).flatMap((l) => l.message ?? []).map(String).map((m) => LINE.exec(m)).find(Boolean);
   if (!line || typeof e.cpuTime !== 'number') continue;
   const [, method, path, status, sub, cold, hit] = line;
-  rows.push({ key: `${method} ${path}${hit ? ' (cache)' : ''}`, cold: cold === '1', cpu: e.cpuTime, sub: Number(sub), status, outcome: e.outcome });
+  rows.push({ key: `${method} ${path}${hit ? ` (${hit})` : ''}`, cold: cold === '1', cpu: e.cpuTime, sub: Number(sub), status, outcome: e.outcome });
 }
 
 const pct = (xs, p) => xs[Math.min(xs.length - 1, Math.ceil((p / 100) * xs.length) - 1)];

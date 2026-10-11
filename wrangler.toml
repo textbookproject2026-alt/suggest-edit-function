@@ -20,6 +20,11 @@ crons = ["17 3 * * *"]
 binding = "TOKENS"
 id = "TOKENS_ID"
 
+# /api/history answers, shared by every data centre (worker/history-cache.mjs).
+[[kv_namespaces]]
+binding = "CACHE"
+id = "CACHE_ID"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "c4n-api"

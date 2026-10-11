@@ -27,19 +27,18 @@
  * it was started for.
  */
 import {
-  REQUESTS_BOOK, REQUESTS_REPO, Refusal, appCredentials, authorise, blobBytes, bookFor, booksFor, budget, byline, draftsHead,
+  REQUESTS_BOOK, REQUESTS_REPO, Refusal, appCredentials, authorise, blobBytes, blobStart, bookFor, booksFor, budget, byline, draftsHead,
   encodePath, fail, ghJson, isAuthorPath, limits, query, wrap, IDENTITY_SECRET,
 } from '../lib/author.mjs';
-import { asString, createRateLimiter, isJsonContentType, parseBody, send } from '../lib/common.mjs';
+import { asString, blobJson, blobSizes, createRateLimiter, isBase64, isJsonContentType, jsonWithBase64, parseBody, send } from '../lib/common.mjs';
 import {
-  IMPORT_DIR, MAX_BYTES, MAX_PARTS, PART_BYTES, branchOf, checkOwner, checkedResult, destination, newId, partReceipt,
+  IMPORT_DIR, MAGIC_BYTES, MAX_BYTES, MAX_PARTS, PART_BYTES, branchOf, checkOwner, checkedResult, destination, newId, partReceipt,
   WORD_WORDS, looksLike, readImport, readReceipt, safeWordName, stagedAt,
 } from '../lib/author-import.mjs';
 
 const requestsToken = appCredentials({ contents: 'write' });
 const bookToken = appCredentials({ contents: 'read' });
 
-const B64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 // Three imports' worth of parts at the full 20 MB, plus retries; and starts.
 const partLimited = createRateLimiter(3 * MAX_PARTS + 6, 60 * 60 * 1000, 'import-part');
 const startLimited = createRateLimiter(20, 60 * 60 * 1000, 'import-start');
@@ -60,14 +59,14 @@ async function handlePart(part, auth, res, used) {
     send(res, 429, { error: 'rate limit exceeded', userMessage: "You've uploaded a lot already. Please try again in an hour." });
     return;
   }
-  if (!part || part.length % 4 !== 0 || !B64_RE.test(part) || Buffer.byteLength(part) > Math.ceil(PART_BYTES / 3) * 4) {
+  if (!part || part.length > Math.ceil(PART_BYTES / 3) * 4 || !isBase64(part)) {
     send(res, 400, { error: 'validation: part', userMessage: 'The Word document could not be read.' });
     return;
   }
   try {
     const credential = await requestsToken(REQUESTS_BOOK, auth.tag, used);
     const left = budget(blobBudget(part.length) + 2000, blobBudget(part.length));
-    const blob = await ghJson(`/repos/${REQUESTS_REPO}/git/blobs`, credential.token, left, { method: 'POST', body: { content: part, encoding: 'base64' } });
+    const blob = await ghJson(`/repos/${REQUESTS_REPO}/git/blobs`, credential.token, left, { method: 'POST', body: blobJson(part) });
     send(res, 201, { receipt: partReceipt(IDENTITY_SECRET, blob.sha, auth.identity) });
   } catch (err) {
     fail(res, err, `${auth.tag} part`, () => used.forEach((c) => c.refused()));
@@ -85,8 +84,9 @@ async function commitImport(id, token, left, files, parent, message) {
   if (fresh) parent = (await ghJson(`/repos/${REQUESTS_REPO}/git/ref/heads/main`, token, left))?.object?.sha;
   const blobs = [];
   for (const f of files) {
-    const made = await ghJson(`/repos/${REQUESTS_REPO}/git/blobs`, token, left, { method: 'POST', body: { content: f.bytes.toString('base64'), encoding: 'base64' } });
-    blobs.push({ path: `${IMPORT_DIR}${f.path}`, mode: '100644', type: 'blob', sha: made.sha });
+    // An uploaded part is a blob already: it goes in by its sha, with no bytes sent again.
+    const sha = f.blob ?? (await ghJson(`/repos/${REQUESTS_REPO}/git/blobs`, token, left, { method: 'POST', body: blobJson(f.bytes.toString('base64')) })).sha;
+    blobs.push({ path: `${IMPORT_DIR}${f.path}`, mode: '100644', type: 'blob', sha });
   }
   const baseTree = (await ghJson(`/repos/${REQUESTS_REPO}/git/commits/${parent}`, token, left))?.tree?.sha;
   const tree = await ghJson(`/repos/${REQUESTS_REPO}/git/trees`, token, left, { method: 'POST', body: { base_tree: baseTree, tree: blobs } });
@@ -119,12 +119,14 @@ async function start(body, auth, book, res, used) {
   }
   const btag = `${auth.tag} book=${book.slug}`;
   const req = await requestsToken(REQUESTS_BOOK, btag, used);
-  const left = budget(55_000, 20_000);
-  const chunks = [];
-  for (const sha of shas) chunks.push(await blobBytes(REQUESTS_REPO, sha, req.token, left));
-  const docx = Buffer.concat(chunks);
-  if (docx.length === 0 || docx.length > MAX_BYTES) throw new Refusal(400, 'validation: size', 'The document must be under 20 MB.');
-  if (!looksLike(name, docx)) throw new Refusal(400, 'validation: not docx', `${name} doesn't look like the kind of document its name says. Open it, save it again, and bring that in.`);
+  const left = budget(30_000, 20_000);
+  // The parts stay as they are (import-chapter joins them): their sizes come from one
+  // query, and only the document's first bytes are read, to check what it is.
+  const sizes = await blobSizes(REQUESTS_REPO, shas, { token: req.token, timeoutMs: left() });
+  const size = shas.reduce((n, sha) => n + sizes.get(sha), 0);
+  if (size === 0 || size > MAX_BYTES) throw new Refusal(400, 'validation: size', 'The document must be under 20 MB.');
+  const start = await blobStart(REQUESTS_REPO, shas[0], req.token, left, MAGIC_BYTES);
+  if (!looksLike(name, start)) throw new Refusal(400, 'validation: not docx', `${name} doesn't look like the kind of document its name says. Open it, save it again, and bring that in.`);
 
   const bt = await bookToken(book, btag, used);
   const base = await draftsHead(book, bt.token, left);
@@ -137,9 +139,9 @@ async function start(body, auth, book, res, used) {
   };
   await commitImport(id, req.token, left, [
     { path: 'request.json', bytes: requestJson(request) },
-    { path: 'source.docx', bytes: docx },
+    ...shas.map((sha, i) => ({ path: `source.parts/${String(i).padStart(3, '0')}`, blob: sha })),
   ], null, `Import ${id}: ${name} for ${book.slug}, ${byline(identity)}`);
-  console.log(`import ${id} started: ${name} (${docx.length} bytes) for ${book.slug} at ${base.slice(0, 7)} ${btag}`);
+  console.log(`import ${id} started: ${name} (${size} bytes, ${shas.length} part(s)) for ${book.slug} at ${base.slice(0, 7)} ${btag}`);
   send(res, 201, { id, attempt: 1, base });
 }
 
@@ -169,7 +171,7 @@ async function status(params, auth, book, res, used) {
     const entry = isAuthorPath(file) ? imp.files.get(stagedAt(`out/${file}`)) : null;
     if (!entry) throw new Refusal(404, 'staged file not found', "That picture isn't part of this import.");
     if (entry.size > MAX_PREVIEW_FILE) throw new Refusal(413, 'staged file too large', 'That picture is too large to show here.');
-    send(res, 200, { path: file, base64: (await blobBytes(REQUESTS_REPO, entry.sha, req.token, left)).toString('base64') });
+    send(res, 200, jsonWithBase64({ path: file }, (await blobBytes(REQUESTS_REPO, entry.sha, req.token, left)).toString('base64')));
     return;
   }
   const result = checkedResult(imp);
