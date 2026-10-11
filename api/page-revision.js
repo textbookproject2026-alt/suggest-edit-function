@@ -116,41 +116,61 @@ async function proposalName(repo, sha, token, left) {
 
 /**
  * Where each of `shas` is: 'live', 'drafts' (being edited, not yet published) or null
- * (neither: not public here). Two small GraphQL queries, which commits exist and then
- * where they are, instead of REST's compare, whose answer carries every changed file's
- * patch (hundreds of KB to parse for one word). A commit GitHub doesn't have would fail
- * the second query whole, hence the first. Live is remembered once true.
+ * (neither: not public here). By GraphQL, not REST's compare, whose answer carries
+ * every changed file's patch (hundreds of KB to parse for one word). One query does it
+ * when every commit exists; a commit GitHub doesn't have fails that query whole, and
+ * then two do it (which exist, then where those are). With `names` (a Map), each
+ * commit's App-written pull request's name comes in the same query. Live is
+ * remembered once true.
  */
 async function branchesOf(book, shas, token, left, { liveOnly = false, names = null } = {}) {
   const repo = book.content.repo;
   const out = new Map(shas.map((s) => [s, onLive.has(`${repo}@${s}`) ? 'live' : null]));
-  // With `names` (a Map), every commit is asked about, for its pull requests' bodies.
   const ask = names ? shas : shas.filter((s) => !out.get(s));
   if (!ask.length) return out;
+  const branches = [book.content.live_branch, ...(liveOnly || !book.content.drafts_branch ? [] : [book.content.drafts_branch])];
   const prs = names ? ' associatedPullRequests(first: 5) { nodes { author { __typename } body } }' : '';
-  const objects = await graphqlRepo(repo, `query($owner: String!, $name: String!, ${ask.map((_, i) => `$s${i}: GitObjectID!`).join(', ')}) { repository(owner: $owner, name: $name) { ${ask.map((_, i) => `c${i}: object(oid: $s${i}) { ... on Commit { oid${prs} } }`).join(' ')} } }`,
-    Object.fromEntries(ask.map((s, i) => [`s${i}`, s])), token, left);
+  const objects = (list) => list.map((_, i) => `c${i}: object(oid: $s${i}) { ... on Commit { oid${prs} } }`).join(' ');
+  const compares = (list) => branches.map((_, i) => `r${i}: ref(qualifiedName: $b${i}) { ${list.map((_, j) => `x${j}: compare(headRef: $h${j}) { status }`).join(' ')} }`).join(' ');
+  const vars = (list, withObjects) => ({
+    ...(withObjects ? Object.fromEntries(list.map((s, i) => [`s${i}`, s])) : {}),
+    ...Object.fromEntries(list.map((s, j) => [`h${j}`, s])),
+    ...Object.fromEntries(branches.map((b, i) => [`b${i}`, `refs/heads/${b}`])),
+  });
+  const decl = (list, withObjects) => [
+    ...(withObjects ? list.map((_, i) => `$s${i}: GitObjectID!`) : []),
+    ...list.map((_, j) => `$h${j}: String!`),
+    ...branches.map((_, i) => `$b${i}: String!`),
+  ].join(', ');
+
+  let found;
+  let where;
+  let real;
+  try {
+    const both = await graphqlRepo(repo, `query($owner: String!, $name: String!, ${decl(ask, true)}) { repository(owner: $owner, name: $name) { ${objects(ask)} ${compares(ask)} } }`,
+      vars(ask, true), token, left);
+    [found, where, real] = [both, both, ask];
+  } catch {
+    // A commit GitHub doesn't have: which exist first, then where those are.
+    found = await graphqlRepo(repo, `query($owner: String!, $name: String!, ${ask.map((_, i) => `$s${i}: GitObjectID!`).join(', ')}) { repository(owner: $owner, name: $name) { ${objects(ask)} } }`,
+      Object.fromEntries(ask.map((s, i) => [`s${i}`, s])), token, left);
+    real = ask.filter((_, i) => found[`c${i}`]?.oid);
+    where = real.length
+      ? await graphqlRepo(repo, `query($owner: String!, $name: String!, ${decl(real, false)}) { repository(owner: $owner, name: $name) { ${compares(real)} } }`, vars(real, false), token, left)
+      : {};
+  }
   if (names) {
     // Only a body the App wrote itself is read as a proposal.
-    ask.forEach((s, i) => names.set(s, proposerName((objects[`c${i}`]?.associatedPullRequests?.nodes ?? []).find((pr) => pr?.author?.__typename === 'Bot')?.body)));
+    ask.forEach((s, i) => names.set(s, proposerName((found[`c${i}`]?.associatedPullRequests?.nodes ?? []).find((pr) => pr?.author?.__typename === 'Bot')?.body)));
   }
-  const real = ask.filter((s, i) => objects[`c${i}`]?.oid && !out.get(s));
-  if (!real.length) return out;
-  const branches = [book.content.live_branch, ...(liveOnly || !book.content.drafts_branch ? [] : [book.content.drafts_branch])];
-  const where = await graphqlRepo(repo,
-    `query($owner: String!, $name: String!, ${real.map((_, j) => `$h${j}: String!`).join(', ')}, ${branches.map((_, i) => `$b${i}: String!`).join(', ')}) { repository(owner: $owner, name: $name) { ${
-      branches.map((_, i) => `r${i}: ref(qualifiedName: $b${i}) { ${real.map((_, j) => `c${j}: compare(headRef: $h${j}) { status }`).join(' ')} }`).join(' ')} } }`,
-    { ...Object.fromEntries(real.map((s, j) => [`h${j}`, s])), ...Object.fromEntries(branches.map((b, i) => [`b${i}`, `refs/heads/${b}`])) },
-    token, left,
-  );
   // The branch's head compared with the commit: BEHIND or IDENTICAL means the commit
   // is in the branch's history (REST's compare/<sha>...<branch> said ahead or identical).
-  const on = (i, j) => ['BEHIND', 'IDENTICAL'].includes(where[`r${i}`]?.[`c${j}`]?.status);
+  const on = (i, j) => ['BEHIND', 'IDENTICAL'].includes(where[`r${i}`]?.[`x${j}`]?.status);
   real.forEach((s, j) => {
     if (on(0, j)) {
       out.set(s, 'live');
       onLive.add(`${repo}@${s}`);
-    } else if (branches.length > 1 && on(1, j)) out.set(s, 'drafts');
+    } else if (!out.get(s) && branches.length > 1 && on(1, j)) out.set(s, 'drafts');
   });
   return out;
 }
