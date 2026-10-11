@@ -24,7 +24,7 @@ crons = ["17 3 * * *"]
 binding = "TOKENS"
 id = "TOKENS_ID"
 
-# /api/history answers, shared by every data centre (worker/history-cache.mjs).
+# A book's history lists, shared by every data centre (lib/kv-cache.mjs).
 [[kv_namespaces]]
 binding = "CACHE"
 id = "CACHE_ID"

@@ -55,6 +55,7 @@
 import { REGISTRY, SHA_RE, Refusal, appCredentials, budget, encodePath, gh, ghJson, graphqlRepo, query, wrap } from '../lib/author.mjs';
 import { clientIp, createRateLimiter, isSafePath, send } from '../lib/common.mjs';
 import { declinedChange, declinedItems } from '../lib/declined.mjs';
+import { kept } from '../lib/kv-cache.mjs';
 
 // issues: read for /api/history's notes and suggestions: without it GitHub lists none (no error).
 const appToken = appCredentials({ contents: 'read', pull_requests: 'read', issues: 'read' });
@@ -64,12 +65,9 @@ const MAX_SHAS = 30;
 
 /** Commits already shown to be on a live branch: "<repo>@<sha>". Never stops being true. */
 const onLive = new Set();
-/** The open-items answer per book (and page), for OPEN_TTL_MS: { at, items }. */
-const openCache = new Map();
+/** How long a book's open items and declined items are kept (lib/kv-cache.mjs). */
 const OPEN_TTL_MS = 90_000;
 const OPEN_MAX = 100;
-/** The declined answer per book: { at, items }. */
-const declinedCache = new Map();
 const DECLINED_TTL_MS = 120_000;
 
 /** Obsidian syntax GitHub doesn't know, reduced to what a reader would see (editor.ts forPreview). */
@@ -194,19 +192,21 @@ export function openItem(item, kind) {
   };
 }
 
-/** The book's open proposals and notes (all pages), newest first. */
+const OPEN_FIELDS = 'number url title body createdAt labels(first: 20) { nodes { name } }';
+
+/** The book's open proposals and notes (all pages), newest first: one GraphQL query, only the fields used. */
 async function openItems(book, token, left) {
-  const repo = book.content.repo;
-  const [pulls, notes, suggestions] = await Promise.all([
-    ghJson(`/repos/${repo}/pulls?state=open&per_page=${OPEN_MAX}`, token, left),
-    ghJson(`/repos/${repo}/issues?state=open&labels=section-note&per_page=${OPEN_MAX}`, token, left),
-    ghJson(`/repos/${repo}/issues?state=open&labels=suggested-edit&per_page=${OPEN_MAX}`, token, left),
-  ]);
+  const order = `first: ${OPEN_MAX}, orderBy: { field: CREATED_AT, direction: DESC }`;
+  const open = await graphqlRepo(book.content.repo, `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {
+    pulls: pullRequests(states: OPEN, labels: ["proposed-edit"], ${order}) { nodes { ${OPEN_FIELDS} } }
+    notes: issues(states: OPEN, labels: ["section-note"], ${order}) { nodes { ${OPEN_FIELDS} } }
+    suggestions: issues(states: OPEN, labels: ["suggested-edit"], ${order}) { nodes { ${OPEN_FIELDS} } }
+  } }`, {}, token, left);
+  const rest = (n) => ({ number: n.number, html_url: n.url, title: n.title, body: n.body, created_at: n.createdAt, labels: n.labels?.nodes ?? [] });
   const seen = new Set();
-  const items = [];
-  for (const pr of pulls ?? []) if (labelled(pr, 'proposed-edit')) items.push(openItem(pr, 'edit'));
-  for (const i of [...(notes ?? []), ...(suggestions ?? [])]) {
-    if (i.pull_request || seen.has(i.number)) continue;
+  const items = (open.pulls?.nodes ?? []).map((n) => openItem(rest(n), 'edit'));
+  for (const i of [...(open.notes?.nodes ?? []), ...(open.suggestions?.nodes ?? [])].map(rest)) {
+    if (seen.has(i.number)) continue;
     seen.add(i.number);
     items.push(openItem(i, labelled(i, 'section-note') ? 'note' : labelled(i, 'proposed-edit') ? 'edit' : 'suggestion'));
   }
@@ -374,31 +374,34 @@ async function open(req, res, q) {
   const change = q.has('change') ? Number(q.get('change')) : null;
   if (change !== null) return declinedDiff(req, res, book, change);
   const withDeclined = q.get('declined') === '1';
-  const hit = openCache.get(key);
-  let items = hit && Date.now() - hit.at < OPEN_TTL_MS ? hit.items : null;
-  const dHit = declinedCache.get(key);
-  let declined = withDeclined && dHit && Date.now() - dHit.at < DECLINED_TTL_MS ? dHit.items : null;
-  if (!items || (withDeclined && !declined)) {
+  // The book's lists, shared by every page of it (and on Cloudflare by every data
+  // centre, through KV): only a request that finds them older than their TTL asks GitHub.
+  const tag = `[history ${slug}]`;
+  let credential;
+  let limited = false;
+  const fromGitHub = (list) => async () => {
     if (await isRateLimited(clientIp(req), Date.now())) {
+      limited = true;
+      throw new Refusal(429, 'rate limit exceeded');
+    }
+    credential ??= await appToken(book, tag);
+    return list(book, credential.token, budget(20_000));
+  };
+  let items;
+  let declined;
+  try {
+    [items, declined] = await Promise.all([
+      kept(`history:${key}:open`, OPEN_TTL_MS, fromGitHub(openItems)),
+      withDeclined ? kept(`history:${key}:declined`, DECLINED_TTL_MS, fromGitHub(declinedItems)) : null,
+    ]);
+  } catch (err) {
+    if (limited) {
       res.setHeader('Retry-After', '600');
       return refuse(res, 429, 'rate limit exceeded', 'Too many requests from here in the last hour. Please try again later.');
     }
-    const tag = `[history ${slug}]`;
-    let credential;
-    try {
-      credential = await appToken(book, tag);
-      const left = budget(20_000);
-      [items, declined] = await Promise.all([
-        items ?? openItems(book, credential.token, left),
-        withDeclined ? declined ?? declinedItems(book, credential.token, left) : null,
-      ]);
-      openCache.set(key, { at: Date.now(), items });
-      if (withDeclined) declinedCache.set(key, { at: Date.now(), items: declined });
-    } catch (err) {
-      if (err.status === 401) credential?.refused();
-      console.error(`history: ${err.message} ${tag}`);
-      return refuse(res, err instanceof Refusal ? err.status : 502, `github: ${err.message}`, 'GitHub couldn’t be reached just now. Please try again in a moment.');
-    }
+    if (err.status === 401) credential?.refused();
+    console.error(`history: ${err.message} ${tag}`);
+    return refuse(res, err instanceof Refusal ? err.status : 502, `github: ${err.message}`, 'GitHub couldn’t be reached just now. Please try again in a moment.');
   }
   res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=90');
   const onPage = (list) => (path ? list.filter((i) => i.files.includes(path)) : list);
