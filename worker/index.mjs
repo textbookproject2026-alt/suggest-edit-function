@@ -9,6 +9,7 @@
  * handlers through lib/platform.mjs. Secrets and vars arrive as process.env
  * (nodejs_compat), which the handlers read at import, as on Vercel.
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { platform } from '../lib/platform.mjs';
 import { serve } from './adapter.mjs';
 import author from '../api/author.js';
@@ -27,6 +28,46 @@ const ROUTES = {
   '/api/author': author,
 };
 
+// Subrequests per request (the free plan allows 50), logged with each request so
+// worker.yml's measurement and Workers Logs can see them beside CPU time.
+const counter = new AsyncLocalStorage();
+const realFetch = globalThis.fetch;
+globalThis.fetch = (...args) => {
+  const store = counter.getStore();
+  if (store) store.n += 1;
+  return realFetch(...args);
+};
+
+// Vercel's CDN: a GET answered 200 with `s-maxage=N` is served from the edge for N
+// seconds without running the function (history 90 s, revisions up to a year), and
+// the browser never sees s-maxage. The same here with the Cache API, per data centre.
+// The key carries the Origin, since CORS headers depend on it.
+function cacheKey(request) {
+  if (request.method !== 'GET') return null;
+  const url = new URL(request.url);
+  url.searchParams.set('__origin', request.headers.get('origin') ?? '');
+  return new Request(url.toString());
+}
+
+async function keep(key, response) {
+  const sMaxAge = /(?:^|,)\s*s-maxage=(\d+)/.exec(response.headers.get('cache-control') ?? '')?.[1];
+  if (response.status !== 200 || !sMaxAge || response.headers.has('set-cookie')) return;
+  const copy = new Response(response.body, response);
+  copy.headers.set('Cache-Control', `public, max-age=${sMaxAge}`);
+  copy.headers.set('X-Edge-Cache-Control', response.headers.get('cache-control'));
+  await caches.default.put(key, copy);
+}
+
+/** What the browser sees, as on Vercel: no s-maxage, and Vercel's default when unset. */
+function forClient(response) {
+  const out = new Response(response.body, response);
+  const cc = out.headers.get('x-edge-cache-control') ?? out.headers.get('cache-control');
+  out.headers.delete('x-edge-cache-control');
+  if (!cc) out.headers.set('Cache-Control', 'public, max-age=0, must-revalidate');
+  else out.headers.set('Cache-Control', cc.split(',').map((d) => d.trim()).filter((d) => !/^s-maxage=/i.test(d)).join(', '));
+  return out;
+}
+
 /** vercel.json's rewrites: the handler sees the rewritten URL, as on Vercel. */
 function route(url) {
   if (url.pathname === '/api/history') {
@@ -42,16 +83,26 @@ function route(url) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     platform.kv = env.TOKENS ?? null;
     platform.db = env.DB ?? null;
 
     const url = new URL(request.url);
     const handler = route(url);
     if (!handler) {
-      return Response.json({ error: 'not found' }, { status: 404, headers: { 'Cache-Control': 'no-store' } });
+      // As Vercel's own 404 for a path with no function.
+      return forClient(new Response('The page could not be found\n\nNOT_FOUND\n', { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8' } }));
     }
-    return serve(handler, request, url);
+    const path = new URL(request.url).pathname; // before the rewrites
+    const key = cacheKey(request);
+    const hit = key && (await caches.default.match(key));
+    if (hit) return forClient(hit);
+
+    const store = { n: 0 };
+    const response = await counter.run(store, () => serve(handler, request, url));
+    console.log(`c4n-api ${request.method} ${path} ${response.status} subrequests=${store.n}`);
+    if (key) ctx.waitUntil(keep(key, response.clone()));
+    return forClient(response);
   },
 
   /** Daily: drop rate-limit windows that have closed. */

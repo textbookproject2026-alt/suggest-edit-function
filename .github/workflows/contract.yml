@@ -1,0 +1,84 @@
+# By hand: the contract test (scripts/contract.mjs) between two hosts, and optionally
+# CPU time and subrequests per request on the Worker, from `wrangler tail` while the
+# test runs and for `minutes` after (so an end-to-end run elsewhere is measured too).
+name: contract
+
+on:
+  workflow_dispatch:
+    inputs:
+      a:
+        description: Host A
+        default: https://suggest-edit-function.vercel.app
+      b:
+        description: Host B
+        default: https://api.confused4now.org
+      minutes:
+        description: Keep tailing c4n-api this many minutes after the test (0 = no tail), at most 30
+        default: '0'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Start the tail
+        if: inputs.minutes != '0'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_TOKEN }}
+          WRANGLER_SEND_METRICS: 'false'
+        run: |
+          set -euo pipefail
+          account="$(curl -fsS --max-time 20 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            'https://api.cloudflare.com/client/v4/zones?name=confused4now.org' | jq -er '.result[0].account.id')"
+          echo "CLOUDFLARE_ACCOUNT_ID=$account" >> "$GITHUB_ENV"
+          npx -y wrangler@4.142.0 --version > /dev/null
+          CLOUDFLARE_ACCOUNT_ID="$account" nohup timeout 2400 npx -y wrangler@4.142.0 tail c4n-api --format json > "$RUNNER_TEMP/tail.jsonl" 2> "$RUNNER_TEMP/tail.err" &
+          sleep 15
+
+      - name: Contract test
+        env:
+          A: ${{ inputs.a }}
+          B: ${{ inputs.b }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          npm ci
+          npm run registry:bundle
+          node scripts/contract.mjs "$A" "$B"
+
+      - name: Measure
+        if: always() && inputs.minutes != '0'
+        env:
+          MINUTES: ${{ inputs.minutes }}
+        run: |
+          set -uo pipefail
+          m=$(( MINUTES > 30 ? 30 : MINUTES ))
+          echo "Tailing $m more minute(s)."
+          sleep $(( m * 60 + 15 ))
+          pkill -f "wrangler@4.142.0 tail" || true
+          f="$RUNNER_TEMP/tail.jsonl"
+          echo "$(grep -c '"scriptName"' "$f" || true) events. CPU ms by path (count, median, max) and the most subrequests:"
+          # A pretty-printed stream of objects: jq -s reads them all.
+          jq -s -r '
+            map(select(.event.request?)) |
+            map({ p: ((.event.request.method) + " " + (.event.request.url | sub("\\?.*"; "") | sub("^https://[^/]+"; ""))),
+                  cpu: (.cpuTime // -1), sub: ([.logs[]?.message[]? | tostring | capture("subrequests=(?<n>[0-9]+)")?.n | tonumber] | max // 0),
+                  outcome }) |
+            group_by(.p)[] |
+            (map(.cpu) | sort) as $c |
+            "\(.[0].p)\t\(length)\t\($c[(length/2|floor)])\t\($c[-1])\tsubrequests \(map(.sub) | max)\t\([.[].outcome] | unique | join(","))"
+          ' "$f" | column -t -s $'\t'
+          echo "Over 10 ms CPU (the free plan's limit):"
+          jq -s -r 'map(select((.cpuTime // 0) > 10)) | .[] | "\(.cpuTime) ms \(.event.request.method) \(.event.request.url | sub("\\?.*"; ""))"' "$f" | sort -rn | head -20
+          echo "Exceeded or errored:"
+          jq -s -r 'map(select(.outcome != "ok")) | .[] | "\(.outcome) \(.event.request.url)"' "$f" | head -20
+          tail -5 "$RUNNER_TEMP/tail.err" || true
