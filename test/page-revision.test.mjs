@@ -39,12 +39,6 @@ const json = (status, body) => ({ ok: status < 300, status, json: async () => bo
 gh.state.hooks = {
   '/markdown': ({ body }) => ({ ok: true, status: 200, text: async () => `<p>${body.text.length}</p>`, json: async () => ({}) }),
   '/pulls?per_page': ({ url }) => json(200, url.includes(v2) ? [{ user: { type: 'Bot' }, body: '**Proposed by:** `Jo Reader` (`j***@example.com`)' }] : []),
-  '/contents/': ({ url }) => {
-    const u = new URL(url);
-    const path = decodeURIComponent(u.pathname.split('/contents/')[1]);
-    const t = gh.textAt(REPO, u.searchParams.get('ref'), path);
-    return t === undefined ? json(404, {}) : json(200, { type: 'file', content: Buffer.from(t).toString('base64') });
-  },
   [`/repos/${REPO}/commits/`]: ({ url }) => {
     const sha = /\/commits\/([0-9a-f]{40})$/.exec(new URL(url).pathname)?.[1];
     if (!sha) return null;
