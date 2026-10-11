@@ -2,7 +2,7 @@
  * CPU time and subrequests per route, cold and warm, from a `wrangler tail --format json`
  * capture (a stream of pretty-printed JSON objects). Each request's own log line
  * (worker/index.mjs) gives the route, cold=0|1 (the isolate's first request), load=0|1
- * (the route's first in the isolate, which loads its code), cache=hit|kv and the
+ * (the route's first in the isolate, which loads its code), cache=hit and the
  * subrequest count.
  *
  *   node scripts/cpu-summary.mjs tail.jsonl [limitMs]

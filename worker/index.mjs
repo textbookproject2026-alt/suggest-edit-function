@@ -12,7 +12,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { platform } from '../lib/platform.mjs';
 import { serve } from './adapter.mjs';
-import { fromKv, historyKey, toKv } from './history-cache.mjs';
 
 // Every route is imported here, up front. Cloudflare evaluates this before the first
 // request and doesn't count it in any request's CPU time (measured 11 Oct: a fresh
@@ -61,8 +60,8 @@ function cacheKey(request) {
   return new Request(url.toString());
 }
 
-async function keep(key, response, seconds) {
-  const sMaxAge = seconds ?? /(?:^|,)\s*s-maxage=(\d+)/.exec(response.headers.get('cache-control') ?? '')?.[1];
+async function keep(key, response) {
+  const sMaxAge = /(?:^|,)\s*s-maxage=(\d+)/.exec(response.headers.get('cache-control') ?? '')?.[1];
   if (response.status !== 200 || !sMaxAge || response.headers.has('set-cookie')) return;
   const copy = new Response(response.body, response);
   copy.headers.set('Cache-Control', `public, max-age=${sMaxAge}`);
@@ -101,6 +100,7 @@ export default {
     const wasCold = cold;
     cold = false;
     platform.kv = env.TOKENS ?? null;
+    platform.cache = env.CACHE ?? null;
     platform.db = env.DB ?? null;
 
     const url = new URL(request.url);
@@ -123,20 +123,12 @@ export default {
       console.log(`c4n-api ${request.method} ${label} ${hit.status} subrequests=0 cold=${wasCold ? 1 : 0} cache=hit`);
       return forClient(hit, env.VERSION?.id);
     }
-    const kvKey = key && path === '/api/history' ? await historyKey(key.url) : null;
-    const kept = kvKey && (await fromKv(env.CACHE, kvKey));
-    if (kept) {
-      console.log(`c4n-api ${request.method} ${label} ${kept.response.status} subrequests=0 cold=${wasCold ? 1 : 0} cache=kv`);
-      ctx.waitUntil(keep(key, kept.response.clone(), kept.left));
-      return forClient(kept.response, env.VERSION?.id);
-    }
 
     const store = { n: 0 };
     const load = !loaded.has(path);
     loaded.add(path);
     const response = await counter.run(store, () => serve(handler, request, url));
     console.log(`c4n-api ${request.method} ${label} ${response.status} subrequests=${store.n} cold=${wasCold ? 1 : 0} load=${load ? 1 : 0}`);
-    if (kvKey) ctx.waitUntil(toKv(env.CACHE, kvKey, response.clone()));
     if (key) ctx.waitUntil(keep(key, response.clone()));
     return forClient(response, env.VERSION?.id);
   },

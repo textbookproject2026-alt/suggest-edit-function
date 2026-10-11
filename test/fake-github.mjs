@@ -160,6 +160,34 @@ export function createFakeGitHub() {
       }
       return json(200, { data: { repository } });
     }
+    if (u.pathname === '/graphql' && method === 'POST' && /(?:pullRequests|issues)\(states:|(?:issue|pullRequest)\(number:/.test(body.query)) {
+      // History lists (page-revision openItems, lib/declined.mjs), from the REST data.
+      const r = repos.get(`${body.variables.owner}/${body.variables.name}`.toLowerCase());
+      const gqlUser = (x) => (x ? { __typename: x.type === 'Bot' ? 'Bot' : 'User', login: String(x.login).replace(/\[bot\]$/, '') } : null);
+      const node = (x, pull) => ({
+        number: x.number, url: x.html_url, title: x.title ?? '', body: x.body ?? '',
+        createdAt: x.created_at ?? null, closedAt: x.closed_at ?? null, updatedAt: x.updated_at ?? x.closed_at ?? x.created_at ?? null,
+        labels: { nodes: (x.labels ?? []).map((l) => ({ name: typeof l === 'string' ? l : l.name })) },
+        ...(pull ? {} : { stateReason: x.state_reason ? x.state_reason.toUpperCase() : null }),
+        timelineItems: { nodes: x.closed_by ? [{ actor: gqlUser(x.closed_by) }] : [] },
+        comments: { nodes: (x.comments ?? []).map((text, k) => ({ databaseId: x.commentMeta?.[k]?.id ?? k + 1, author: gqlUser(x.commentMeta?.[k]?.user ?? { login: 'someone', type: 'User' }), body: text, createdAt: x.commentMeta?.[k]?.created_at ?? null })) },
+      });
+      const repository = {};
+      const lists = /(?:(\w+): )?(pullRequests|issues)\(states: (OPEN|CLOSED)(?:, labels: \["([^"]+)"\])?, first: (\d+), orderBy: \{ field: (CREATED_AT|UPDATED_AT), direction: DESC \}\)/g;
+      for (const [, alias, field, st, label, first, by] of body.query.matchAll(lists)) {
+        const pull = field === 'pullRequests';
+        const all = [...(pull ? r.pulls : r.issues).values()]
+          .filter((x) => x.state === st.toLowerCase() && !(pull && x.merged_at) && (!label || (x.labels ?? []).some((l) => (l.name ?? l) === label)))
+          .map((x) => node(x, pull));
+        all.sort((a, b) => (by === 'CREATED_AT' ? b.number - a.number : String(b.updatedAt).localeCompare(String(a.updatedAt))));
+        repository[alias ?? field] = { nodes: all.slice(0, Number(first)) };
+      }
+      for (const [, alias, kind, n] of body.query.matchAll(/(\w\d+): (issue|pullRequest)\(number: (\d+)\)/g)) {
+        const x = (kind === 'pullRequest' ? r.pulls : r.issues).get(Number(n));
+        repository[alias] = x ? node(x, kind === 'pullRequest') : null;
+      }
+      return json(200, { data: { repository } });
+    }
     if (u.pathname === '/graphql' && method === 'POST' && body.query.includes('byteSize')) {
       // Blob sizes by oid (lib/common.mjs blobSizes): p0, p1, … in the order asked.
       const r = repos.get(`${body.variables.owner}/${body.variables.name}`.toLowerCase());
