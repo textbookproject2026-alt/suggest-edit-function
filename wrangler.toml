@@ -13,6 +13,10 @@ routes = [{ pattern = "api.confused4now.org", custom_domain = true }]
 [observability]
 enabled = true
 
+# The deployed version's id, sent as X-Worker-Version.
+[version_metadata]
+binding = "VERSION"
+
 [triggers]
 crons = ["17 3 * * *"]
 

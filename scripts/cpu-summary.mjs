@@ -1,7 +1,9 @@
 /**
  * CPU time and subrequests per route, cold and warm, from a `wrangler tail --format json`
  * capture (a stream of pretty-printed JSON objects). Each request's own log line
- * (worker/index.mjs) gives the route, cold=0|1, cache=hit|kv and the subrequest count.
+ * (worker/index.mjs) gives the route, cold=0|1 (the isolate's first request), load=0|1
+ * (the route's first in the isolate, which loads its code), cache=hit|kv and the
+ * subrequest count.
  *
  *   node scripts/cpu-summary.mjs tail.jsonl [limitMs]
  *
@@ -27,26 +29,28 @@ function* objects(text) {
   }
 }
 
-const LINE = /^c4n-api (\S+) (\S+) (\d+) subrequests=(\d+) cold=([01])(?: cache=(\w+))?/;
+const LINE = /^c4n-api (\S+) (\S+) (\d+) subrequests=(\d+) cold=([01])(?: cache=(\w+))?(?: load=([01]))?/;
 const rows = [];
 for (const e of objects(readFileSync(file, 'utf8'))) {
   const line = (e.logs ?? []).flatMap((l) => l.message ?? []).map(String).map((m) => LINE.exec(m)).find(Boolean);
   if (!line || typeof e.cpuTime !== 'number') continue;
-  const [, method, path, status, sub, cold, hit] = line;
-  rows.push({ key: `${method} ${path}${hit ? ` (${hit})` : ''}`, cold: cold === '1', cpu: e.cpuTime, sub: Number(sub), status, outcome: e.outcome });
+  const [, method, path, status, sub, cold, hit, load] = line;
+  // cold: the isolate's first request; load: the first of this route in the isolate.
+  const temp = cold === '1' ? 'cold' : load === '1' ? 'load' : 'warm';
+  rows.push({ key: `${method} ${path}${hit ? ` (${hit})` : ''}`, temp, cpu: e.cpuTime, sub: Number(sub), status, outcome: e.outcome });
 }
 
 const pct = (xs, p) => xs[Math.min(xs.length - 1, Math.ceil((p / 100) * xs.length) - 1)];
 let over = 0;
 const out = [['route', 'temp', 'n', 'p50', 'p95', 'max', 'subreq max', 'outcomes']];
 for (const key of [...new Set(rows.map((r) => r.key))].sort()) {
-  for (const cold of [true, false]) {
-    const set = rows.filter((r) => r.key === key && r.cold === cold);
+  for (const temp of ['cold', 'load', 'warm']) {
+    const set = rows.filter((r) => r.key === key && r.temp === temp);
     if (!set.length) continue;
     const cpu = set.map((r) => r.cpu).sort((a, b) => a - b);
     const p95 = pct(cpu, 95);
     if (p95 >= LIMIT) over++;
-    out.push([key, cold ? 'cold' : 'warm', set.length, pct(cpu, 50), p95 >= LIMIT ? `${p95} !` : p95, cpu.at(-1),
+    out.push([key, temp, set.length, pct(cpu, 50), p95 >= LIMIT ? `${p95} !` : p95, cpu.at(-1),
       Math.max(...set.map((r) => r.sub)), [...new Set(set.map((r) => r.outcome))].join(',')]);
   }
 }

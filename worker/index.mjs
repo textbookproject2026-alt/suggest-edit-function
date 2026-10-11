@@ -31,6 +31,9 @@ const counter = new AsyncLocalStorage();
 // The first request an isolate serves pays for any lazy start-up work: logged as cold=1
 // so CPU can be measured cold and warm separately (scripts/cpu-summary.mjs).
 let cold = true;
+// Routes whose modules this isolate has loaded: the first request of each logs load=1,
+// since loading a route's code is part of that request's CPU time.
+const loaded = new Set();
 const realFetch = globalThis.fetch;
 globalThis.fetch = (...args) => {
   const store = counter.getStore();
@@ -59,8 +62,10 @@ async function keep(key, response, seconds) {
 }
 
 /** What the browser sees, as on Vercel: no s-maxage, and Vercel's default when unset. */
-function forClient(response) {
+function forClient(response, version) {
   const out = new Response(response.body, response);
+  // Which deployed version answered (scripts/measure-load.mjs waits for a new one).
+  if (version) out.headers.set('X-Worker-Version', version);
   const cc = out.headers.get('x-edge-cache-control') ?? out.headers.get('cache-control');
   out.headers.delete('x-edge-cache-control');
   if (!cc) out.headers.set('Cache-Control', 'public, max-age=0, must-revalidate');
@@ -93,30 +98,32 @@ export default {
     const handler = route(url);
     if (!handler) {
       // As Vercel's own 404 for a path with no function.
-      return forClient(new Response('The page could not be found\n\nNOT_FOUND\n', { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8' } }));
+      return forClient(new Response('The page could not be found\n\nNOT_FOUND\n', { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8' } }), env.VERSION?.id);
     }
     const path = new URL(request.url).pathname; // before the rewrites
     const key = cacheKey(request);
     const hit = key && (await caches.default.match(key));
     if (hit) {
       console.log(`c4n-api ${request.method} ${path} ${hit.status} subrequests=0 cold=${wasCold ? 1 : 0} cache=hit`);
-      return forClient(hit);
+      return forClient(hit, env.VERSION?.id);
     }
     const kvKey = key && path === '/api/history' ? await historyKey(key.url) : null;
     const kept = kvKey && (await fromKv(env.CACHE, kvKey));
     if (kept) {
       console.log(`c4n-api ${request.method} ${path} ${kept.response.status} subrequests=0 cold=${wasCold ? 1 : 0} cache=kv`);
       ctx.waitUntil(keep(key, kept.response.clone(), kept.left));
-      return forClient(kept.response);
+      return forClient(kept.response, env.VERSION?.id);
     }
 
     const store = { n: 0 };
+    const load = !loaded.has(url.pathname);
+    loaded.add(url.pathname);
     const { default: run } = await handler();
     const response = await counter.run(store, () => serve(run, request, url));
-    console.log(`c4n-api ${request.method} ${path} ${response.status} subrequests=${store.n} cold=${wasCold ? 1 : 0}`);
+    console.log(`c4n-api ${request.method} ${path} ${response.status} subrequests=${store.n} cold=${wasCold ? 1 : 0} load=${load ? 1 : 0}`);
     if (kvKey) ctx.waitUntil(toKv(env.CACHE, kvKey, response.clone()));
     if (key) ctx.waitUntil(keep(key, response.clone()));
-    return forClient(response);
+    return forClient(response, env.VERSION?.id);
   },
 
   /** Daily: drop rate-limit windows that have closed. */
