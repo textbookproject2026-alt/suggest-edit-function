@@ -34,7 +34,8 @@ lib/author-people.mjs          author site: authors changed by registry pull req
 lib/author-console.mjs         author site: the console's wording (from the desktop app)
 lib/author-console-reads.mjs   author site: suggestion and publish reads shared by two endpoints
 registry/bundled.mjs           GENERATED registry snapshot, pinned to a registry commit
-scripts/bundle-registry.mjs    writes registry/bundled.mjs (the Vercel build step)
+scripts/bundle-registry.mjs    writes registry/bundled.mjs (the Vercel build step, and worker.yml's)
+scripts/contract.mjs           the same read-only requests to two hosts, compared
 test/assertions.test.mjs       abuse-test assertion suite
 test/registry.test.mjs         book resolution
 test/github-app.test.mjs       App credential path, token exchange stubbed
@@ -86,6 +87,17 @@ database `c4n-api`, applies `migrations/`, runs `wrangler deploy`, and waits for
   limiter and key (an IP or a login), shared by every isolate. A daily cron deletes
   closed windows. A D1 failure lets the request through (logged). Under Node the
   limiters stay in memory, per instance.
+
+**Edge cache, as on Vercel.** A GET answered 200 with `s-maxage=N` (history 90 s,
+revisions up to a year) is kept N seconds in Cloudflare's cache per data centre, keyed by
+URL and Origin, and served without running a handler; the browser never sees
+`s-maxage`. A response with no `Cache-Control` gets Vercel's default.
+
+**Checking it.** `contract.yml` (by hand) runs `scripts/contract.mjs`: the same
+read-only requests to two hosts, comparing status, the handlers' headers and the JSON;
+with `minutes` it also tails the Worker and reports CPU time and subrequests per path
+(the free plan allows 10 ms CPU and 50 subrequests per request). Each request logs
+`c4n-api <method> <path> <status> subrequests=<n>` (Workers Logs).
 
 **Where its secrets live.** Set on the Worker by `.github/workflows/worker-secrets.yml`
 (by hand, prints nothing) from this repo's Actions secrets:

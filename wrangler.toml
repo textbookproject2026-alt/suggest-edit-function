@@ -4,7 +4,9 @@
 name = "c4n-api"
 main = "worker/index.mjs"
 compatibility_date = "2025-09-01"
-compatibility_flags = ["nodejs_compat"]
+# global_fetch_strictly_public: the Worker reads assertions back from the author site
+# (a Pages project on the same zone); without it a same-zone fetch can fail (error 1042).
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
 workers_dev = false
 routes = [{ pattern = "api.confused4now.org", custom_domain = true }]
 
