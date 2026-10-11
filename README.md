@@ -1,13 +1,14 @@
 # suggest-edit-function
 
-Vercel serverless function behind the textbooks' **suggest an edit** form. It takes a
+The platform's API (**c4n-api**, served at `https://api.confused4now.org` by a Cloudflare
+Worker; see "Where the API lives") behind the textbooks' **suggest an edit** form. It takes a
 reader's suggestion, works out which book it is for from the request's `Origin`, and
 files it as a GitHub issue on that book's content repo, authenticated as a GitHub App.
 Which books exist, and where each one's issues go, comes from the
 [textbook registry](https://github.com/textbookproject2026-alt/textbook-registry), baked
 in at build time. No book is hardcoded here.
 
-Zero dependencies — Node 22 with built-in `fetch` and `node:crypto`, plain ES modules.
+Two dependencies (`js-yaml`, `markdownlint`); otherwise Node 22 / Workers built-ins (`fetch`, WebCrypto), plain ES modules.
 
 ```
 api/suggest-edit.js            suggest an edit: reader text -> issue
@@ -25,7 +26,8 @@ author/author-history.js       author site: drafts' revision history, one revisi
 lib/common.mjs                 what the endpoints share (fetch, credential, limiter, helpers)
 lib/identity.mjs               signed identity tokens (sign-in without keeping GitHub tokens)
 lib/registry.mjs               registry validation and Origin -> book resolution
-lib/github-app.mjs             App JWT (RS256 via node:crypto) and installation tokens
+lib/github-app.mjs             App JWT (RS256 via WebCrypto) and installation tokens (memory, and KV on Cloudflare)
+lib/platform.mjs               the Worker's KV and D1 bindings, null under Node
 lib/author.mjs                 author site: who may, paths, the App, the drafts commit
 lib/author-import.mjs          author site: the import staging layout and part receipts
 lib/author-people.mjs          author site: authors changed by registry pull request
@@ -41,7 +43,12 @@ test/propose-edit.test.mjs     propose-edit and github-auth against an in-memory
 test/request-book.test.mjs     request-book against an in-memory GitHub
 test/author.test.mjs           the author endpoints against test/fake-github.mjs
 test/fake-github.mjs           an in-memory GitHub with real git object ids
-vercel.json                    maxDuration only
+worker/index.mjs               the Cloudflare Worker: routes (vercel.json's rewrites) and the daily D1 cleanup
+worker/adapter.mjs             a Fetch Request to the handlers' Node-style req/res, and back
+wrangler.toml                  the Worker: api.confused4now.org, KV TOKENS, D1 DB, vars
+migrations/                    D1 schema (rate-limit windows)
+test/via-worker.mjs            `npm run test:worker`: the whole suite through worker/adapter.mjs
+vercel.json                    the Vercel fallback: maxDuration and the two rewrites
 package.json                   pins Node 22 via engines; test and build scripts
 ```
 
@@ -53,6 +60,57 @@ Node setting in the Vercel dashboard). Do **not** add a `runtime` key to
 `vercel.json` — that field is only for versioned community-runtime packages
 (`now-php@1.0.0`), and setting it on a first-party Node function fails the build
 with "Function Runtimes must have a valid version".
+
+---
+
+## Where the API lives
+
+**Production: the Cloudflare Worker `c4n-api` at `https://api.confused4now.org`** (since
+batch 2d, October 2026). `registry.json`'s `platform.suggest_edit_endpoint` is what every
+book, the portal and the author site's proxy use. The same handlers (`api/`, `author/`)
+run on both hosts; `worker/` only adapts a Fetch Request to them and does vercel.json's
+rewrites.
+
+**How it deploys: only from CI.** `.github/workflows/worker.yml` runs on every push to
+`main`, by hand, and from textbook-registry's `deploy.yml` after every registry change
+(the registry is baked in at build time). It bundles the registry, runs `npm test` and
+`npm run test:worker`, finds or creates the KV namespace `c4n-api-tokens` and the D1
+database `c4n-api`, applies `migrations/`, runs `wrangler deploy`, and waits for
+`X-Function-Version` to be the new commit. Never deploy from a laptop. `wrangler dev
+--local` is fine for trying things; stop it afterwards.
+
+**Where its state lives.**
+- KV `c4n-api-tokens` (binding `TOKENS`): installation tokens, per repository and
+  permission set, until 5 minutes before they expire. Memory caches in front of it.
+- D1 `c4n-api` (binding `DB`), table `hits`: rate limits, one fixed one-hour window per
+  limiter and key (an IP or a login), shared by every isolate. A daily cron deletes
+  closed windows. A D1 failure lets the request through (logged). Under Node the
+  limiters stay in memory, per instance.
+
+**Where its secrets live.** Set on the Worker by `.github/workflows/worker-secrets.yml`
+(by hand, prints nothing) from this repo's Actions secrets:
+
+| Worker secret | From | |
+| --- | --- | --- |
+| `GITHUB_APP_PRIVATE_KEY` | `SUGGEST_EDIT_APP_PRIVATE_KEY` (the raw `.pem`) | base64-encoded by the workflow |
+| `GITHUB_OAUTH_CLIENT_SECRET` | `SIGNIN_OAUTH_CLIENT_SECRET` | the OAuth App "Textbook sign-in (api.confused4now.org)", callback `https://api.confused4now.org/api/github-auth` |
+| `IDENTITY_SECRET` | generated by the workflow | kept on later runs unless `rotate_identity` is ticked |
+
+`GITHUB_APP_ID` and `GITHUB_OAUTH_CLIENT_ID` are plain vars in `wrangler.toml`. The
+deploy token is `CLOUDFLARE_WORKERS_TOKEN` (here and in textbook-registry); the account
+id is read from the zone. `PROPOSE_EDIT_ANONYMOUS` is unset (off) on both hosts.
+
+**Fallback: the Vercel project `suggest-edit-function`** at
+`https://suggest-edit-function.vercel.app` keeps running, untouched, until it is retired
+(see the batch 2d report for the date). Pushes to `main` still deploy it, the registry's
+deploy hook still rebuilds it, and `deployed.yml` watches it. GitHub sign-in on it uses
+the old OAuth App "Textbook sign-in".
+
+**Roll back** by pointing the registry at Vercel: in textbook-registry set
+`platform.suggest_edit_endpoint` to `https://suggest-edit-function.vercel.app/api/suggest-edit`
+and merge. Its `validate` and `deploy` runs, then each book's next build (and the
+portal's and author site's next deploy), pick it up. The author site's proxy has a
+fixed upstream (`functions/` in author-site): change it there too.
 
 ---
 

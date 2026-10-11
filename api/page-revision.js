@@ -57,7 +57,7 @@ import { declinedChange, declinedItems } from '../lib/declined.mjs';
 
 // issues: read for /api/history's notes and suggestions: without it GitHub lists none (no error).
 const appToken = appCredentials({ contents: 'read', pull_requests: 'read', issues: 'read' });
-const isRateLimited = createRateLimiter(120, 60 * 60 * 1000);
+const isRateLimited = createRateLimiter(120, 60 * 60 * 1000, 'page-revision');
 const MAX_NAME = 80;
 const MAX_SHAS = 30;
 
@@ -223,7 +223,7 @@ export default wrap(async (req, res) => {
   if (shas
     ? !shas.length || shas.length > MAX_SHAS || !shas.every((s) => SHA_RE.test(s))
     : !SHA_RE.test(sha) || !isSafePath(path) || (base !== null && !SHA_RE.test(base))) return refuse(res, 400, 'bad request', 'That revision link isn’t valid.');
-  if (isRateLimited(clientIp(req), Date.now())) {
+  if (await isRateLimited(clientIp(req), Date.now())) {
     res.setHeader('Retry-After', '600');
     return refuse(res, 429, 'rate limit exceeded', 'Too many revisions opened from here in the last hour. Please try again later.');
   }
@@ -314,7 +314,7 @@ async function item(req, res, q) {
   const number = Number(q.get('number'));
   const book = REGISTRY.books.find((b) => b.slug === slug && b.status !== 'retired');
   if (!book || !Number.isInteger(number) || number < 1 || number > 1e7) return refuse(res, 404, 'not found', 'Not found.');
-  if (isRateLimited(clientIp(req), Date.now())) {
+  if (await isRateLimited(clientIp(req), Date.now())) {
     res.setHeader('Retry-After', '600');
     return refuse(res, 429, 'rate limit exceeded', 'Too many requests from here in the last hour. Please try again later.');
   }
@@ -359,7 +359,7 @@ async function open(req, res, q) {
   const dHit = declinedCache.get(key);
   let declined = withDeclined && dHit && Date.now() - dHit.at < DECLINED_TTL_MS ? dHit.items : null;
   if (!items || (withDeclined && !declined)) {
-    if (isRateLimited(clientIp(req), Date.now())) {
+    if (await isRateLimited(clientIp(req), Date.now())) {
       res.setHeader('Retry-After', '600');
       return refuse(res, 429, 'rate limit exceeded', 'Too many requests from here in the last hour. Please try again later.');
     }
@@ -388,7 +388,7 @@ async function open(req, res, q) {
 /** &change=<n>: a declined proposal's change (its pull request's files, before and after). */
 async function declinedDiff(req, res, book, n) {
   if (!Number.isInteger(n) || n < 1 || n > 1e7) return refuse(res, 400, 'bad request', 'That isn’t a proposal.');
-  if (isRateLimited(clientIp(req), Date.now())) {
+  if (await isRateLimited(clientIp(req), Date.now())) {
     res.setHeader('Retry-After', '600');
     return refuse(res, 429, 'rate limit exceeded', 'Too many requests from here in the last hour. Please try again later.');
   }

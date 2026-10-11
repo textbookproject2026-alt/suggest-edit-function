@@ -93,8 +93,8 @@ const SHA_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const BUDGET_MS = 20_000;
 const LABEL_BUDGET_MS = 2500;
 
-const writeLimited = createRateLimiter(5, 60 * 60 * 1000);
-const readLimited = createRateLimiter(60, 60 * 60 * 1000);
+const writeLimited = createRateLimiter(5, 60 * 60 * 1000, 'propose-write');
+const readLimited = createRateLimiter(60, 60 * 60 * 1000, 'propose-read');
 
 const GENERIC = 'Something went wrong sending your edit. Please try again.';
 // Setup problems a book owner has to fix (the App not installed, or its permissions
@@ -464,7 +464,7 @@ async function fileFallbackIssue(book, token, left, current, data) {
 
 async function handleGet(req, res, book, tag) {
   const ip = clientIp(req);
-  if (readLimited(ip, Date.now())) {
+  if (await readLimited(ip, Date.now())) {
     send(res, 429, { error: 'rate limit exceeded', userMessage: 'Too many requests — try again in a little while.' });
     return;
   }
@@ -522,7 +522,7 @@ async function handlePost(req, res, book, origin, tag) {
     send(res, 201, { prUrl: `https://github.com/${book.content.repo}/pulls` });
     return;
   }
-  if (writeLimited(ip, Date.now())) {
+  if (await writeLimited(ip, Date.now())) {
     console.warn(`rate limit: ip=${ip} ${tag}`);
     send(res, 429, { error: 'rate limit exceeded', userMessage: "You're sending edits too quickly — try again in a little while." });
     return;

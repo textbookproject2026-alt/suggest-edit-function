@@ -41,8 +41,8 @@ const bookToken = appCredentials({ contents: 'read' });
 
 const B64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 // Three imports' worth of parts at the full 20 MB, plus retries; and starts.
-const partLimited = createRateLimiter(3 * MAX_PARTS + 6, 60 * 60 * 1000);
-const startLimited = createRateLimiter(20, 60 * 60 * 1000);
+const partLimited = createRateLimiter(3 * MAX_PARTS + 6, 60 * 60 * 1000, 'import-part');
+const startLimited = createRateLimiter(20, 60 * 60 * 1000, 'import-start');
 const MAX_PREVIEW_FILE = 5 * 1024 * 1024;
 
 // About 12 s for a small blob, growing with size (as request-book).
@@ -56,7 +56,7 @@ async function handlePart(part, auth, res, used) {
     send(res, 403, { error: 'not an author', userMessage: "Your account isn't one of any book's authors." });
     return;
   }
-  if (partLimited(auth.identity.login.toLowerCase(), Date.now())) {
+  if (await partLimited(auth.identity.login.toLowerCase(), Date.now())) {
     send(res, 429, { error: 'rate limit exceeded', userMessage: "You've uploaded a lot already. Please try again in an hour." });
     return;
   }
@@ -195,7 +195,7 @@ export default wrap(async (req, res) => {
   const used = [];
   try {
     if (req.method === 'GET') {
-      if (limits.read(auth.identity.login.toLowerCase(), Date.now())) {
+      if (await limits.read(auth.identity.login.toLowerCase(), Date.now())) {
         send(res, 429, { error: 'rate limit exceeded', userMessage: 'Too many requests — try again in a little while.' });
         return;
       }
@@ -226,7 +226,7 @@ export default wrap(async (req, res) => {
     }
     const book = bookFor(body.book, auth, res);
     if (!book) return;
-    if (startLimited(auth.identity.login.toLowerCase(), Date.now())) {
+    if (await startLimited(auth.identity.login.toLowerCase(), Date.now())) {
       send(res, 429, { error: 'rate limit exceeded', userMessage: "You've brought in a lot of documents already. Please try again in an hour." });
       return;
     }

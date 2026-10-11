@@ -73,9 +73,9 @@ const RESERVED_SLUGS = new Set(['www', 'api', 'admin', 'portal', 'mail', 'cms', 
 
 const CREDENTIALS = createCredentials(process.env, { issues: 'write', contents: 'write' });
 const REQUESTS_BOOK = { slug: 'book-requests', content: { repo: REQUESTS_REPO } };
-const isRateLimited = createRateLimiter(3, 60 * 60 * 1000);
+const isRateLimited = createRateLimiter(3, 60 * 60 * 1000, 'request-book');
 // Three requests' worth of parts at the full 20 MB, plus retries.
-const isPartRateLimited = createRateLimiter(3 * MAX_PARTS + 6, 60 * 60 * 1000);
+const isPartRateLimited = createRateLimiter(3 * MAX_PARTS + 6, 60 * 60 * 1000, 'request-book-part');
 
 // ---------------------------------------------------------------------------
 // Validation
@@ -345,7 +345,7 @@ export function buildIssueBody(reference, d, { slug, committed, fileError }) {
 // ---------------------------------------------------------------------------
 
 async function handlePart(part, ip, res) {
-  if (isPartRateLimited(ip, Date.now())) {
+  if (await isPartRateLimited(ip, Date.now())) {
     send(res, 429, { error: 'rate limit exceeded', userMessage: "You've sent a lot of files already. Please try again in an hour." });
     return;
   }
@@ -419,7 +419,7 @@ async function handle(req, res) {
     send(res, 201, { reference: 'received' });
     return;
   }
-  if (isRateLimited(ip, Date.now())) {
+  if (await isRateLimited(ip, Date.now())) {
     send(res, 429, { error: 'rate limit exceeded', userMessage: "You've sent several requests already. Please try again in an hour." });
     return;
   }

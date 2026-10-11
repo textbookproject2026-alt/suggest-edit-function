@@ -19,7 +19,7 @@ export default wrap(async (req, res) => {
   const book = bookFor(query(req).get('book'), auth, res);
   if (!book) return;
   const tag = `${auth.tag} book=${book.slug} people`;
-  if (limits.read(auth.identity.login.toLowerCase(), Date.now())) {
+  if (await limits.read(auth.identity.login.toLowerCase(), Date.now())) {
     send(res, 429, { error: 'rate limit exceeded', userMessage: 'Too many requests — try again in a little while.' });
     return;
   }

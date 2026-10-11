@@ -1,0 +1,115 @@
+# c4n-api: tests and deploys the function as the Cloudflare Worker at
+# api.confused4now.org (wrangler.toml, worker/index.mjs). The only way it deploys:
+# never from a laptop.
+#
+# Runs on every push to main here, by hand, and from textbook-registry's deploy.yml
+# (workflow_call) after every registry change, because the registry is baked in at
+# build time (scripts/bundle-registry.mjs), as on Vercel. Either way it deploys this
+# repo's main (or the pushed commit) with the registry's main.
+#
+# Needs CLOUDFLARE_WORKERS_TOKEN (Workers Scripts, Workers KV and D1 edit on the
+# account; Workers Routes edit and Zone read on confused4now.org). The account id is
+# read from the zone. Without the token the tests still run and the deploy is skipped
+# with a warning. The Worker's secrets are set by worker-secrets.yml, by hand; a
+# deploy keeps them.
+name: worker
+
+on:
+  push:
+    branches: [main]
+  pull_request: # the tests only
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      CLOUDFLARE_WORKERS_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('c4n-api-test-{0}', github.ref) || 'c4n-api-deploy' }}
+  cancel-in-progress: false
+
+env:
+  WRANGLER: wrangler@4.142.0
+  WRANGLER_SEND_METRICS: 'false'
+  ENDPOINT: https://api.confused4now.org/api/suggest-edit
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: textbookproject2026-alt/suggest-edit-function
+          # Called from the registry, github.sha is the registry's commit: deploy main.
+          ref: ${{ github.repository == 'textbookproject2026-alt/suggest-edit-function' && github.sha || 'main' }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Bundle the registry and run the tests, directly and through the Worker's adapter
+        run: |
+          set -euo pipefail
+          npm ci
+          FUNCTION_SHA="$(git rev-parse HEAD)" npm run registry:bundle
+          npm test
+          npm run test:worker
+          echo "FUNCTION_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Find the account, the KV namespace and the D1 database
+        id: cf
+        if: github.event_name != 'pull_request'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "::warning::CLOUDFLARE_WORKERS_TOKEN is not set here, so c4n-api was NOT deployed. The tests passed."
+            echo "ready=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          account="$(curl -fsS --max-time 20 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            'https://api.cloudflare.com/client/v4/zones?name=confused4now.org' | jq -er '.result[0].account.id')"
+          echo "CLOUDFLARE_ACCOUNT_ID=$account" >> "$GITHUB_ENV"
+          export CLOUDFLARE_ACCOUNT_ID="$account"
+
+          kv() { npx -y "$WRANGLER" kv namespace list | jq -r '.[] | select(.title == "c4n-api-tokens") | .id'; }
+          kv_id="$(kv)"
+          if [ -z "$kv_id" ]; then npx -y "$WRANGLER" kv namespace create c4n-api-tokens > /dev/null; kv_id="$(kv)"; fi
+          d1() { npx -y "$WRANGLER" d1 list --json | jq -r '.[] | select(.name == "c4n-api") | .uuid'; }
+          db_id="$(d1)"
+          if [ -z "$db_id" ]; then npx -y "$WRANGLER" d1 create c4n-api > /dev/null; db_id="$(d1)"; fi
+          [ -n "$kv_id" ] && [ -n "$db_id" ] || { echo "::error::Could not find or create the KV namespace or the D1 database."; exit 1; }
+          sed -i "s/\"TOKENS_ID\"/\"$kv_id\"/; s/\"DB_ID\"/\"$db_id\"/" wrangler.toml
+          echo "KV c4n-api-tokens $kv_id, D1 c4n-api $db_id"
+          echo "ready=yes" >> "$GITHUB_OUTPUT"
+
+      - name: Migrate D1 and deploy
+        if: steps.cf.outputs.ready
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_TOKEN }}
+        run: |
+          set -euo pipefail
+          npx -y "$WRANGLER" d1 migrations apply c4n-api --remote
+          npx -y "$WRANGLER" deploy
+
+      - name: Wait for api.confused4now.org to serve this commit
+        if: steps.cf.outputs.ready
+        run: |
+          set -euo pipefail
+          # Every response carries the header, refusals included. Ten minutes at most:
+          # the first deploy waits for the custom domain's certificate.
+          for i in $(seq 30); do
+            now="$(curl -s --max-time 20 -o /dev/null -D - -X OPTIONS "$ENDPOINT" | tr -d '\r' \
+              | awk 'tolower($1) == "x-function-version:" { print $2 }')"
+            if [ "$now" = "$FUNCTION_SHA" ]; then echo "$ENDPOINT serves function $now."; exit 0; fi
+            echo "  still serving ${now:-<no answer>}"
+            sleep 20
+          done
+          echo "::error::$ENDPOINT is not serving function $FUNCTION_SHA ten minutes after the deploy."
+          exit 1

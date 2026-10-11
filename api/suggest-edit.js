@@ -90,7 +90,7 @@ const CREDENTIALS = createCredentials(process.env);
 // Real hardening (shared store / KV or Redis, plus edge-level limits) is Day 28.
 // ---------------------------------------------------------------------------
 
-const isRateLimited = createRateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+const isRateLimited = createRateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS, 'suggest');
 
 // ---------------------------------------------------------------------------
 // Validation
@@ -331,7 +331,7 @@ async function handle(req, res) {
   }
 
   // --- Rate limit ---------------------------------------------------------
-  if (isRateLimited(ip, Date.now())) {
+  if (await isRateLimited(ip, Date.now())) {
     console.warn(`rate limit: ip=${ip} exceeded ${RATE_LIMIT_MAX}/hour ${tag}`);
     send(res, 429, {
       error: 'rate limit exceeded',

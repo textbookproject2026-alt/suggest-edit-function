@@ -45,7 +45,7 @@ export default wrap(async (req, res) => {
     const login = asString(body.login).trim().replace(/^@/, '');
     if (!['add', 'remove', ...MENTION_ACTIONS].includes(action)) throw new Refusal(400, 'validation: action', "That isn't something the People panel does.");
     if (!LOGIN_RE.test(login)) throw new Refusal(400, 'validation: login', "That isn't a GitHub username: letters, numbers and single hyphens, at most 39.");
-    if (limits.people(auth.identity.login.toLowerCase(), Date.now())) {
+    if (await limits.people(auth.identity.login.toLowerCase(), Date.now())) {
       console.warn(`rate limit: ${tag}`);
       throw new Refusal(429, 'rate limit exceeded', "You've made a lot of changes to people very quickly. Please wait a while.");
     }
