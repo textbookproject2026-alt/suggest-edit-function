@@ -15,6 +15,10 @@ on:
       rounds:
         description: Fresh deployments to measure (each gives every route one first load)
         default: '8'
+      notes:
+        description: One real note per round on the platform test book (close and label them platform-test afterwards)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -55,6 +59,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
           ROUNDS: ${{ inputs.rounds }}
+          NOTES: ${{ inputs.notes && '1' || '0' }}
         run: |
           set -euo pipefail
           rounds=$(( ROUNDS > 20 ? 20 : ROUNDS ))

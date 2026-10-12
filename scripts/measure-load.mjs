@@ -3,7 +3,9 @@
  * more times. Run it right after a new version is deployed and each route's first
  * request loads its code (load=1 in the log); the rest are warm. History and revision
  * reads carry a fresh `_m` so no cache answers them: their full cost is measured.
- * Nothing here writes anything: suggestion and request bodies carry the honeypot.
+ * Nothing here writes anything: suggestion and request bodies carry the honeypot. With
+ * NOTES=1, one real note per round goes to the platform test book (an issue, to close
+ * and label platform-test afterwards), so a note's write is measured too.
  *
  *
  * Paced (GAP_MS, default 400 ms between requests): sent back to back (~25 a second),
@@ -56,6 +58,12 @@ const requests = () => [
   ['POST', '/api/author-act', { Origin: author, ...json }, '{}'],
 ];
 
+const test = BUNDLE.registry.books.find((b) => b.slug === 'platform-test-book');
+const note = () => ['POST', '/api/suggest-edit?mode=note', { Origin: `https://${test.site.domain}`, ...json }, JSON.stringify({
+  name: 'CPU measurement', path: 'chapters/chapter-01.md', page: '/chapters/chapter-01', paragraph: 1, quote: 'measurement',
+  suggestion: `A measurement of the API's CPU (round ${round}): please ignore, it is closed and labelled platform-test afterwards.`,
+})];
+
 const statuses = [];
 const versions = new Set();
 for (let pass = 0; pass < 4; pass++) {
@@ -65,6 +73,7 @@ for (let pass = 0; pass < 4; pass++) {
   // A fresh isolate's very first request: a path with no route, so its CPU is the
   // isolate's start alone (logged cold=1); every route after it then loads (load=1).
   const first = pass === 0 ? [['GET', '/api/nope', {}]] : [];
+  if (pass === 1 && process.env.NOTES === '1') list.push(note());
   for (const [method, p, headers, body] of [...first, ...list.slice(shift), ...list.slice(0, shift)]) {
     const res = await fetch(base + p, { method, headers, body, redirect: 'manual' });
     await res.arrayBuffer();
