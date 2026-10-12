@@ -10,6 +10,7 @@
  * (nodejs_compat), which the handlers read at import, as on Vercel.
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { forwardIpHeaders } from '../lib/common.mjs';
 import { platform } from '../lib/platform.mjs';
 import { serve } from './adapter.mjs';
 
@@ -32,6 +33,30 @@ const ROUTES = {
   '/api/request-book': requestBook,
   '/api/author': author,
 };
+
+/**
+ * The split (batch 2d): every route that commits to GitHub stays on Vercel, because a
+ * commit's work doesn't fit the free plan's 10 ms CPU (measured 12 Oct: an author's
+ * save 12-35 ms). The Worker forwards these unchanged, with the reader's own address
+ * signed (lib/common.mjs forwardIpHeaders), and serves everything else itself.
+ * Moving them here too needs Workers Paid.
+ */
+export const WRITE_BACKEND = 'https://suggest-edit-function.vercel.app';
+const WRITES = new Set(['/api/propose-edit', '/api/author-send', '/api/author-import', '/api/author-act', '/api/author-people-change']);
+/** Forwarded to Vercel: a POST to a route that commits (OPTIONS and GETs are served here). */
+export const isForwarded = (method, pathname) => method === 'POST' && WRITES.has(pathname);
+// Not passed on: the hop's own, Cloudflare's, and any forwarding header a client made up.
+const NOT_FORWARDED = /^(?:host|connection|content-length|accept-encoding|x-forwarded-.*|x-real-ip|true-client-ip|cf-.*|x-c4n-.*)$/i;
+
+async function forward(request, url) {
+  const headers = new Headers();
+  for (const [k, v] of request.headers) if (!NOT_FORWARDED.test(k)) headers.set(k, v);
+  for (const [k, v] of Object.entries(forwardIpHeaders(request.headers.get('cf-connecting-ip') ?? ''))) headers.set(k, v);
+  const res = await fetch(`${WRITE_BACKEND}${url.pathname}${url.search}`, {
+    method: request.method, headers, body: await request.arrayBuffer(), redirect: 'manual',
+  });
+  return new Response(res.body, res);
+}
 
 // Subrequests per request (the free plan allows 50), logged with each request so
 // worker.yml's measurement and Workers Logs can see them beside CPU time.
@@ -104,6 +129,12 @@ export default {
     platform.db = env.DB ?? null;
 
     const url = new URL(request.url);
+    if (isForwarded(request.method, url.pathname)) {
+      const out = await forward(request, url);
+      console.log(`c4n-api ${request.method} ${url.pathname} ${out.status} forwarded=vercel cold=${wasCold ? 1 : 0}`);
+      out.headers.set('X-Served-By', 'vercel');
+      return forClient(out, env.VERSION?.id);
+    }
     const handler = route(url);
     if (!handler) {
       // As Vercel's own 404 for a path with no function. Logged too: as an isolate's

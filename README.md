@@ -72,6 +72,37 @@ book, the portal and the author site's proxy use. The same handlers (`api/`, `au
 run on both hosts; `worker/` only adapts a Fetch Request to them and does vercel.json's
 rewrites.
 
+**What runs where (the split).** The Worker is on Cloudflare's free plan: 10 ms of CPU a
+request. Reads and small writes fit; a commit to GitHub doesn't (measured 12 Oct: an
+author's save 12–35 ms). So the Worker forwards every route that commits to
+`https://suggest-edit-function.vercel.app` (Vercel stays as the write back end, not
+retired) and serves the rest itself:
+
+| On the Worker | Forwarded to Vercel, unchanged |
+|---|---|
+| `/api/history`, `/api/page-revision` (compare, Show changes, names) | `POST /api/propose-edit` (a reader's proposal) |
+| `GET /api/propose-edit` (the editor's page) | `POST /api/author-send` (an author's save, a decision's change) |
+| `/api/github-auth` (sign-in) | `POST /api/author-import` (an import) |
+| `/api/suggest-edit` (suggestions, notes) | `POST /api/author-act` (accept, decline, comment, publish) |
+| `/api/request-book` | `POST /api/author-people-change` (people, via a registry pull request) |
+| `/api/author-sync`, `author-read`, `author-history`, `author-people`, `GET author-import` | |
+| every `OPTIONS` preflight | |
+
+A forwarded request keeps its path, query, body and headers (identity, Origin, content
+type); Vercel's answer (CORS included) comes back as it is, marked `X-Served-By:
+vercel`. The reader's own address goes along in `x-c4n-client-ip`, signed with
+`FORWARD_SECRET` (`x-c4n-forward`, five minutes): Vercel's `clientIp` trusts it only with
+a valid signature, so its limits are per reader, as before. Both hosts hold the same
+`FORWARD_SECRET` and the same `IDENTITY_SECRET` (sign-in is served by the Worker, the
+proposal it signs is checked on Vercel): repository secrets here, copied to the Worker by
+`worker-secrets.yml`, and set on Vercel by hand (`vercel env`). Moving the writes onto the
+Worker too needs Workers Paid (30 s CPU); then empty `WRITES` in `worker/index.mjs`.
+
+**Rolling back.** Set `platform.suggest_edit_endpoint` in textbook-registry's
+`registry.json` back to `https://suggest-edit-function.vercel.app/api/suggest-edit` and
+let it rebuild the books; point the author site's proxy (`functions/_lib/core.js`
+`UPSTREAM`, `site/index.html` `tb-api`) back too. Vercel serves every route already.
+
 **How it deploys: only from CI.** `.github/workflows/worker.yml` runs on every push to
 `main`, by hand, and from textbook-registry's `deploy.yml` after every registry change
 (the registry is baked in at build time). It bundles the registry, runs `npm test` and
