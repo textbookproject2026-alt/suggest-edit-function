@@ -19,6 +19,9 @@ on:
         description: One real note per round on the platform test book (close and label them platform-test afterwards)
         type: boolean
         default: false
+      record_minutes:
+        description: Only record (no deploys, no traffic) for this many minutes, up to 35, while someone uses the Worker by hand
+        default: '0'
 
 permissions:
   contents: read
@@ -47,6 +50,7 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_TOKEN }}
           APP_KEY: ${{ secrets.SUGGEST_EDIT_APP_PRIVATE_KEY }}
+          RECORD: ${{ inputs.record_minutes || '0' }}
         run: |
           set -euo pipefail
           npm ci
@@ -58,9 +62,20 @@ jobs:
           GITHUB_APP_ID="$(sed -n 's/^GITHUB_APP_ID = "\([0-9]*\)"/\1/p' wrangler.toml)" \
           GITHUB_APP_PRIVATE_KEY="$(printf '%s\n' "$APP_KEY" | base64 -w0)" \
             node scripts/refresh.mjs
-          nohup timeout 2100 npx -y "$WRANGLER" tail c4n-api --format json > "$RUNNER_TEMP/tail.jsonl" 2> "$RUNNER_TEMP/tail.err" &
+          [[ "$RECORD" =~ ^[0-9]{1,2}$ ]] || { echo "::error::record_minutes must be a number of minutes."; exit 1; }
+          record=$(( RECORD > 35 ? 35 : RECORD ))
+          nohup timeout $(( record > 0 ? record * 60 + 60 : 2100 )) npx -y "$WRANGLER" tail c4n-api --format json > "$RUNNER_TEMP/tail.jsonl" 2> "$RUNNER_TEMP/tail.err" &
           sleep 15
+      - name: Record
+        if: inputs.record_minutes != '' && inputs.record_minutes != '0'
+        env:
+          RECORD: ${{ inputs.record_minutes }}
+        run: |
+          minutes=$(( RECORD > 35 ? 35 : RECORD ))
+          echo "::notice::Recording the Worker for $minutes minutes, from $(date -u +%H:%M) UTC."
+          sleep $(( minutes * 60 ))
       - name: Rounds
+        if: inputs.record_minutes == '' || inputs.record_minutes == '0'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
