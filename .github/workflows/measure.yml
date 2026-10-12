@@ -15,6 +15,10 @@ on:
       rounds:
         description: Fresh deployments to measure (each gives every route one first load)
         default: '8'
+      notes:
+        description: One real note per round on the platform test book (close and label them platform-test afterwards)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -55,17 +59,25 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
           ROUNDS: ${{ inputs.rounds }}
+          NOTES: ${{ inputs.notes && '1' || '0' }}
         run: |
           set -euo pipefail
           rounds=$(( ROUNDS > 20 ? 20 : ROUNDS ))
           for round in $(seq "$rounds"); do
-            version="$(npx -y "$WRANGLER" versions upload --message "measure ${round}/${rounds}" 2>&1 | tee /dev/stderr | grep -oE 'Version ID: [0-9a-f-]{36}' | head -1 | cut -d' ' -f3)"
+            # Up to three tries: Cloudflare's API sometimes answers an upload with a
+            # malformed response (12 Oct), which shouldn't end the whole measurement.
+            version=""
+            for try in 1 2 3; do
+              version="$(npx -y "$WRANGLER" versions upload --message "measure ${round}/${rounds}" 2>&1 | tee /dev/stderr | grep -oE 'Version ID: [0-9a-f-]{36}' | head -1 | cut -d' ' -f3 || true)"
+              [ -n "$version" ] && break
+              sleep 10
+            done
             [ -n "$version" ] || { echo "::error::No version id from the upload."; exit 1; }
             npx -y "$WRANGLER" versions deploy "${version}@100%" --yes --message "measure ${round}/${rounds}" > /dev/null
             # A fixed wait, not a poll: a poll would be each fresh isolate's first request,
             # and that request's cost (cold=1) is what the round's first route measures.
             sleep 20
-            EXPECT="$version" node scripts/measure-load.mjs "$BASE" "$round"
+            EXPECT="$version" SENT_FILE="$RUNNER_TEMP/sent" node scripts/measure-load.mjs "$BASE" "$round"
           done
       - name: Summary
         if: always()
@@ -73,7 +85,9 @@ jobs:
           set -uo pipefail
           sleep 20
           pkill -f "$WRANGLER tail" || true
-          node scripts/cpu-summary.mjs "$RUNNER_TEMP/tail.jsonl" 8 || status=$?
+          sent="$(awk '{ s += $1 } END { print s + 0 }' "$RUNNER_TEMP/sent" 2>/dev/null || echo 0)"
+          # Exit 1: a route at or over 8 ms (the gate). Exit 2: the tail sampled, so no verdict.
+          node scripts/cpu-summary.mjs "$RUNNER_TEMP/tail.jsonl" 8 "$sent" || status=$?
           tail -5 "$RUNNER_TEMP/tail.err" || true
           exit "${status:-0}"
       - name: Keep the raw tail

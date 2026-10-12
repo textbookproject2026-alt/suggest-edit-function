@@ -39,7 +39,7 @@
 import BUNDLE from '../registry/bundled.mjs';
 import { validateRegistry, createPortalResolver } from '../lib/registry.mjs';
 import {
-  EMAIL_RE, asString, clientIp, corsHeaders, createCredentials, createRateLimiter, detailOf, ensureLabels,
+  EMAIL_RE, asString, clientIp, corsHeaders, createCredentials, createRateLimiter, detailOf, fieldsOf, withLabels,
   blobJson, blobSizes, fence, githubFetch, inlineCode, isBase64, isJsonContentType, parseBody, send,
 } from '../lib/common.mjs';
 
@@ -506,11 +506,16 @@ async function handle(req, res) {
   }
 
   try {
-    await ensureLabels(REQUESTS_REPO, credential.token, LABEL_DEFAULTS, 3000);
-    const issue = await gh('/issues', credential.token, {
+    const made = await withLabels(REQUESTS_REPO, credential.token, LABEL_DEFAULTS, () => githubFetch(`/repos/${REQUESTS_REPO}/issues`, {
+      token: credential.token,
       method: 'POST',
       body: { title: `Book request: ${d.title.slice(0, 180)}`, body: buildIssueBody(reference, d, { slug, committed, fileError }), labels: LABELS },
-    });
+    }));
+    if (!made.ok) {
+      console.error(`request-book: POST /issues returned ${made.status} — ${await detailOf(made)}`);
+      throw Object.assign(new Error(`github POST /issues failed (status ${made.status})`), { status: made.status });
+    }
+    const issue = await fieldsOf(made, ['html_url']);
     console.log(`book request ${reference} filed as ${issue.html_url} (files: ${committed ? d.files.length : fileError ? 'FAILED' : 0}, credential=${credential.kind})`);
     send(res, 201, {
       reference,

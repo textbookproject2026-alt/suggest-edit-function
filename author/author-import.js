@@ -28,9 +28,9 @@
  */
 import {
   REQUESTS_BOOK, REQUESTS_REPO, Refusal, appCredentials, authorise, blobBytes, blobStart, bookFor, booksFor, budget, byline, draftsHead,
-  encodePath, fail, ghJson, isAuthorPath, limits, query, wrap, IDENTITY_SECRET,
+  encodePath, fail, gh, ghJson, graphqlRepo, isAuthorPath, limits, query, wrap, IDENTITY_SECRET,
 } from '../lib/author.mjs';
-import { asString, blobJson, blobSizes, createRateLimiter, isBase64, isJsonContentType, jsonWithBase64, parseBody, send } from '../lib/common.mjs';
+import { asString, blobJson, createRateLimiter, fieldsOf, isBase64, isJsonContentType, jsonWithBase64, parseBody, send } from '../lib/common.mjs';
 import {
   IMPORT_DIR, MAGIC_BYTES, MAX_BYTES, MAX_PARTS, PART_BYTES, branchOf, checkOwner, checkedResult, destination, newId, partReceipt,
   WORD_WORDS, looksLike, readImport, readReceipt, safeWordName, stagedAt,
@@ -79,31 +79,35 @@ async function handlePart(part, auth, res, used) {
  * main's import-chapter workflow: a push runs the workflow file of the commit
  * pushed, and a branch without one would run nothing.
  */
-async function commitImport(id, token, left, files, parent, message) {
-  const fresh = !parent;
-  if (fresh) parent = (await ghJson(`/repos/${REQUESTS_REPO}/git/ref/heads/main`, token, left))?.object?.sha;
-  const blobs = [];
-  for (const f of files) {
-    // An uploaded part is a blob already: it goes in by its sha, with no bytes sent again.
-    const sha = f.blob ?? (await ghJson(`/repos/${REQUESTS_REPO}/git/blobs`, token, left, { method: 'POST', body: blobJson(f.bytes.toString('base64')) })).sha;
-    blobs.push({ path: `${IMPORT_DIR}${f.path}`, mode: '100644', type: 'blob', sha });
-  }
-  const baseTree = (await ghJson(`/repos/${REQUESTS_REPO}/git/commits/${parent}`, token, left))?.tree?.sha;
-  const tree = await ghJson(`/repos/${REQUESTS_REPO}/git/trees`, token, left, { method: 'POST', body: { base_tree: baseTree, tree: blobs } });
-  const commit = await ghJson(`/repos/${REQUESTS_REPO}/git/commits`, token, left, {
+async function commitImport(id, token, left, files, { parent, tree: baseTree, fresh }, message) {
+  // request.json inline; an uploaded part is a blob already, so it goes in by its sha.
+  const entries = files.map((f) => ({ path: `${IMPORT_DIR}${f.path}`, mode: '100644', type: 'blob', ...(f.blob ? { sha: f.blob } : { content: f.text }) }));
+  const tree = await fieldsOf(await gh(`/repos/${REQUESTS_REPO}/git/trees`, token, left, { method: 'POST', body: { base_tree: baseTree, tree: entries } }), ['sha']);
+  const commit = await fieldsOf(await gh(`/repos/${REQUESTS_REPO}/git/commits`, token, left, {
     method: 'POST', body: { message, tree: tree.sha, parents: [parent] },
-  });
+  }), ['sha']);
   if (fresh) {
-    await ghJson(`/repos/${REQUESTS_REPO}/git/refs`, token, left, { method: 'POST', body: { ref: `refs/heads/${branchOf(id)}`, sha: commit.sha } });
+    await gh(`/repos/${REQUESTS_REPO}/git/refs`, token, left, { method: 'POST', body: { ref: `refs/heads/${branchOf(id)}`, sha: commit.sha } });
   } else {
-    await ghJson(`/repos/${REQUESTS_REPO}/git/refs/heads/${encodePath(branchOf(id))}`, token, left, { method: 'PATCH', body: { sha: commit.sha, force: false } });
+    await gh(`/repos/${REQUESTS_REPO}/git/refs/heads/${encodePath(branchOf(id))}`, token, left, { method: 'PATCH', body: { sha: commit.sha, force: false } });
   }
   return commit.sha;
 }
 
-function requestJson(o) {
-  return Buffer.from(`${JSON.stringify(o, null, 2)}\n`, 'utf8');
+/** The parts' sizes and the requests repo's main (head and tree), in one query. */
+async function partsAndMain(shas, token, left) {
+  if (!shas.every((sha) => /^[0-9a-f]{40}$/.test(sha))) throw new Error('part sizes: not a sha');
+  const fields = shas.map((sha, i) => `p${i}: object(oid: "${sha}") { ... on Blob { byteSize } }`).join(' ');
+  const r = await graphqlRepo(REQUESTS_REPO, `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {
+    ${fields} main: ref(qualifiedName: "refs/heads/main") { target { oid ... on Commit { tree { oid } } } } } }`, {}, token, left);
+  const sizes = new Map(shas.map((sha, i) => [sha, r[`p${i}`]?.byteSize]));
+  if ([...sizes.values()].some((n) => !Number.isInteger(n))) throw new Error('part sizes: a part is not in the repository');
+  const t = r.main?.target;
+  if (!t?.tree?.oid) throw new Error('the requests repo has no main');
+  return { sizes, main: { parent: t.oid, tree: t.tree.oid } };
 }
+
+const requestJson = (o) => `${JSON.stringify(o, null, 2)}\n`;
 
 async function start(body, auth, book, res, used) {
   const { identity } = auth;
@@ -122,7 +126,8 @@ async function start(body, auth, book, res, used) {
   const left = budget(30_000, 20_000);
   // The parts stay as they are (import-chapter joins them): their sizes come from one
   // query, and only the document's first bytes are read, to check what it is.
-  const sizes = await blobSizes(REQUESTS_REPO, shas, { token: req.token, timeoutMs: left() });
+  // One query: the parts' sizes, and main's head and tree (the import branch starts there).
+  const { sizes, main } = await partsAndMain(shas, req.token, left);
   const size = shas.reduce((n, sha) => n + sizes.get(sha), 0);
   if (size === 0 || size > MAX_BYTES) throw new Refusal(400, 'validation: size', 'The document must be under 20 MB.');
   const start = await blobStart(REQUESTS_REPO, shas[0], req.token, left, MAGIC_BYTES);
@@ -138,9 +143,9 @@ async function start(body, auth, book, res, used) {
     docx: name, ...where, created: new Date().toISOString(),
   };
   await commitImport(id, req.token, left, [
-    { path: 'request.json', bytes: requestJson(request) },
+    { path: 'request.json', text: requestJson(request) },
     ...shas.map((sha, i) => ({ path: `source.parts/${String(i).padStart(3, '0')}`, blob: sha })),
-  ], null, `Import ${id}: ${name} for ${book.slug}, ${byline(identity)}`);
+  ], { ...main, fresh: true }, `Import ${id}: ${name} for ${book.slug}, ${byline(identity)}`);
   console.log(`import ${id} started: ${name} (${size} bytes, ${shas.length} part(s)) for ${book.slug} at ${base.slice(0, 7)} ${btag}`);
   send(res, 201, { id, attempt: 1, base });
 }
@@ -154,7 +159,7 @@ async function again(body, auth, book, res, used) {
   const bt = await bookToken(book, btag, used);
   const base = await draftsHead(book, bt.token, left);
   const request = { ...imp.request, attempt: imp.request.attempt + 1, base, again: new Date().toISOString() };
-  await commitImport(request.id, req.token, left, [{ path: 'request.json', bytes: requestJson(request) }], imp.head,
+  await commitImport(request.id, req.token, left, [{ path: 'request.json', text: requestJson(request) }], { parent: imp.head, tree: imp.tree },
     `Import ${request.id}: convert again (attempt ${request.attempt}), ${byline(auth.identity)}`);
   console.log(`import ${request.id} again: attempt ${request.attempt} at ${base.slice(0, 7)} ${btag}`);
   send(res, 201, { id: request.id, attempt: request.attempt, base });

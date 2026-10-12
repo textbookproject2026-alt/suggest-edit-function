@@ -52,8 +52,8 @@ import BUNDLE from '../registry/bundled.mjs';
 import { validateRegistry, createResolver } from '../lib/registry.mjs';
 import {
   EMAIL_RE, asString, clientIp, corsHeaders, createCredentials, createRateLimiter, detailOf,
-  ensureLabels, fence, fileUrl, githubFetch, inlineCode, isJsonContentType, isSafePath, maskEmail,
-  parseBody, resolveBook, send, sendLimited,
+  fence, fieldsOf, fileUrl, githubFetch, inlineCode, isJsonContentType, isSafePath, maskEmail,
+  parseBody, resolveBook, send, sendLimited, withLabels,
   AUTHOR_SITE,
   mentionLines,
 } from '../lib/common.mjs';
@@ -151,45 +151,58 @@ async function fail(what, res) {
   return err;
 }
 
-/** The branch head's commit sha, and the file's text and blob sha at that commit. */
+// A write's one read: the branch's head commit and the file in it, together (so they
+// always agree), with only the fields used.
+const SOURCE_QUERY = `query($owner: String!, $name: String!, $ref: String!, $path: String!) {
+  repository(owner: $owner, name: $name) { ref(qualifiedName: $ref) { target { oid ... on Commit {
+    file(path: $path) { object { ... on Blob { oid byteSize isBinary isTruncated text } } } } } } } }`;
+
 async function readSource(book, path, token, left, { readOnly = false } = {}) {
   const branch = baseBranch(book);
-  // Only a write needs the head commit (it branches from it); a read takes the file at
-  // the branch's name, one GitHub call fewer (the editor's own check is the blob sha).
-  let commit = null;
   if (!readOnly) {
-    const ref = await gh(`/repos/${book.content.repo}/git/ref/heads/${encodePath(branch)}`, token, left);
-    if (!ref.ok) {
-      const err = await fail(`read ${branch} ref`, ref);
-      if (ref.status === 404) err.userMessage = NO_BRANCH;
+    const [owner, name] = book.content.repo.split('/');
+    const res = await gh('/graphql', token, left, {
+      method: 'POST', body: { query: SOURCE_QUERY, variables: { owner, name, ref: `refs/heads/${branch}`, path } },
+    });
+    if (!res.ok) throw await fail('read source', res);
+    const out = await res.json();
+    // A path that isn't there is a NOT_FOUND error beside a null file: that is "missing".
+    const errors = (out?.errors ?? []).filter((e) => e?.type !== 'NOT_FOUND');
+    if (errors.length || !out?.data?.repository) throw new Error(`read source: ${errors[0]?.message ?? 'no repository'}`);
+    const target = out.data.repository.ref?.target;
+    if (!target) {
+      const err = new Error(`read source: no ${branch} branch`);
+      err.status = 404;
+      err.userMessage = NO_BRANCH;
       throw err;
     }
-    commit = (await ref.json())?.object?.sha;
-    if (typeof commit !== 'string') throw new Error('branch ref returned no sha');
+    const commit = target.oid;
+    const blob = target.file?.object;
+    if (!blob?.oid || blob.isBinary) return { branch, commit, missing: true };
+    if (blob.byteSize > MAX_SOURCE_BYTES || blob.isTruncated || typeof blob.text !== 'string') return { branch, commit, tooLarge: true };
+    const raw = blob.text;
+    return { branch, commit, sha: blob.oid, text: toLf(raw), crlf: raw.includes('\r\n') };
   }
-
-  // The raw file (no JSON or base64 to undo); its blob sha is git's, computed here.
-  const file = await gh(`/repos/${book.content.repo}/contents/${encodePath(path)}?ref=${encodeURIComponent(commit ?? branch)}`, token, left, { accept: 'application/vnd.github.raw' });
+  // The editor's GET: the raw file at the branch's name (no JSON or base64 to undo);
+  // its blob sha is git's, computed here.
+  const file = await gh(`/repos/${book.content.repo}/contents/${encodePath(path)}?ref=${encodeURIComponent(branch)}`, token, left, { accept: 'application/vnd.github.raw' });
   if (file.status === 404) {
-    // Read at the branch's name, a 404 is the file or the branch: only now ask which.
-    if (readOnly) {
-      const ref = await gh(`/repos/${book.content.repo}/git/ref/heads/${encodePath(branch)}`, token, left);
-      if (ref.status === 404) {
-        const err = await fail(`read ${branch} ref`, ref);
-        err.userMessage = NO_BRANCH;
-        throw err;
-      }
+    // A 404 is the file or the branch: only now ask which.
+    const ref = await gh(`/repos/${book.content.repo}/git/ref/heads/${encodePath(branch)}`, token, left);
+    if (ref.status === 404) {
+      const err = await fail(`read ${branch} ref`, ref);
+      err.userMessage = NO_BRANCH;
+      throw err;
     }
-    return { branch, commit, missing: true };
+    return { branch, missing: true };
   }
   if (!file.ok) throw await fail('read file', file);
   // A folder answers with its listing as JSON, raw or not: only a file is raw.
-  if (!(file.headers.get('content-type') ?? '').startsWith('application/vnd.github.raw')) return { branch, commit, missing: true };
+  if (!(file.headers.get('content-type') ?? '').startsWith('application/vnd.github.raw')) return { branch, missing: true };
   const bytes = Buffer.from(await file.arrayBuffer());
-  if (bytes.length > MAX_SOURCE_BYTES) return { branch, commit, tooLarge: true };
+  if (bytes.length > MAX_SOURCE_BYTES) return { branch, tooLarge: true };
   const sha = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
-  const raw = bytes.toString('utf8');
-  return { branch, commit, sha, raw, text: toLf(raw), crlf: raw.includes('\r\n') };
+  return { branch, sha, text: toLf(bytes.toString('utf8')) };
 }
 
 /**
@@ -430,19 +443,18 @@ async function openPullRequest(book, token, left, current, newText, data, tag) {
       body: { title: prTitle(data), head: branch, base: current.branch, body: prBody(book, current.branch, data) },
     });
     if (!pr.ok) throw await fail('open pull request', pr);
-    const opened = await pr.json();
-    if (!opened?.html_url) throw new Error('pull request returned no url');
-    if (String(opened.base?.repo?.full_name).toLowerCase() !== repo.toLowerCase()) {
-      console.error(`ROUTING: pull request ${opened.html_url} opened on ${opened.base?.repo?.full_name}, expected ${repo} ${tag}`);
+    const opened = await fieldsOf(pr, ['html_url', 'number']);
+    if (typeof opened.html_url !== 'string') throw new Error('pull request returned no url');
+    if (!opened.html_url.toLowerCase().startsWith(`https://github.com/${repo.toLowerCase()}/pull/`)) {
+      console.error(`ROUTING: pull request ${opened.html_url} opened outside ${repo} ${tag}`);
     }
 
     // Labels are cosmetic: never let them fail a PR that exists.
     try {
-      await ensureLabels(repo, token, LABEL_DEFAULTS, LABEL_BUDGET_MS);
-      const labelled = await gh(`/repos/${repo}/issues/${opened.number}/labels`, token, left, {
+      const labelled = await withLabels(repo, token, LABEL_DEFAULTS, () => gh(`/repos/${repo}/issues/${opened.number}/labels`, token, left, {
         method: 'POST',
         body: { labels: Object.keys(LABEL_DEFAULTS) },
-      });
+      }), LABEL_BUDGET_MS);
       if (!labelled.ok) console.warn(`labels: GitHub returned ${labelled.status} ${tag}`);
     } catch (err) {
       console.warn(`labels: skipped — ${err.message} ${tag}`);
@@ -471,17 +483,16 @@ async function fileFallbackIssue(book, token, left, current, data) {
       ? lineDiff(toLf(data.original), toLf(data.replacement))
       : lineDiff(before ?? current.text ?? '', toLf(data.content));
 
-  await ensureLabels(book.content.repo, token, LABEL_DEFAULTS, LABEL_BUDGET_MS);
-  const res = await gh(`/repos/${book.content.repo}/issues`, token, left, {
+  const res = await withLabels(book.content.repo, token, LABEL_DEFAULTS, () => gh(`/repos/${book.content.repo}/issues`, token, left, {
     method: 'POST',
     body: {
       title: `Proposed edit (needs a hand): ${data.path}`,
       body: issueBody(book, current.branch, data, diff),
       labels: Object.keys(LABEL_DEFAULTS),
     },
-  });
+  }), LABEL_BUDGET_MS);
   if (!res.ok) throw await fail('fallback issue', res);
-  const issue = await res.json();
+  const issue = await fieldsOf(res, ['html_url']);
   if (!issue?.html_url) throw new Error('fallback issue returned no url');
   return issue.html_url;
 }

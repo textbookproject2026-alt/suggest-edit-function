@@ -244,8 +244,8 @@ test('the post-condition logs a routing error when GitHub reports a different re
   globalThis.fetch = async (url, opts) => {
     const res = await realFetch(url, opts);
     if (opts?.method === 'POST' && String(url).endsWith('/issues')) {
-      return { ...res, json: async () => ({ html_url: 'https://example.invalid/issues/9',
-                                             repository_url: 'https://api.github.com/repos/other/repo' }) };
+      const issue = { html_url: 'https://example.invalid/issues/9', repository_url: 'https://api.github.com/repos/other/repo' };
+      return { ...res, json: async () => issue, text: async () => JSON.stringify(issue) };
     }
     return res;
   };

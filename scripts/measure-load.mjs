@@ -3,10 +3,20 @@
  * more times. Run it right after a new version is deployed and each route's first
  * request loads its code (load=1 in the log); the rest are warm. History and revision
  * reads carry a fresh `_m` so no cache answers them: their full cost is measured.
- * Nothing here writes anything: suggestion and request bodies carry the honeypot.
+ * Nothing here writes anything: suggestion and request bodies carry the honeypot. With
+ * NOTES=1, one real note per round goes to the platform test book (an issue, to close
+ * and label platform-test afterwards), so a note's write is measured too.
+ *
+ *
+ * Paced (GAP_MS, default 1 s between requests): sent back to back (~25 a second),
+ * `wrangler tail` samples and kept only about a third of them (11 Oct). The count sent
+ * is added to SENT_FILE, so the summary can tell a complete capture from a sampled one.
+ * At 0.4 s apart it still kept only 63% (12 Oct); at about 0.65 s, 98%.
  *
  *   node scripts/measure-load.mjs <base> [round]
  */
+import { appendFileSync } from 'node:fs';
+import { setTimeout as sleep } from 'node:timers/promises';
 import BUNDLE from '../registry/bundled.mjs';
 
 const [base, round = '0'] = process.argv.slice(2);
@@ -17,6 +27,7 @@ const author = 'https://author.confused4now.org';
 const slug = book.slug;
 const others = BUNDLE.registry.books.filter((b) => b.status !== 'retired' && b.site?.domain && b.slug !== slug);
 const json = { 'Content-Type': 'application/json' };
+const GAP_MS = Number(process.env.GAP_MS ?? 1000);
 
 const gh = async (path) => (await fetch(`https://api.github.com${path}`, {
   headers: { Accept: 'application/vnd.github+json', ...(process.env.GITHUB_TOKEN ? { Authorization: `Bearer ${process.env.GITHUB_TOKEN}` } : {}) },
@@ -48,6 +59,12 @@ const requests = () => [
   ['POST', '/api/author-act', { Origin: author, ...json }, '{}'],
 ];
 
+const test = BUNDLE.registry.books.find((b) => b.slug === 'platform-test-book');
+const note = () => ['POST', '/api/suggest-edit?mode=note', { Origin: `https://${test.site.domain}`, ...json }, JSON.stringify({
+  name: 'CPU measurement', path: 'chapters/chapter-01.md', page: '/chapters/chapter-01', paragraph: 1, quote: 'measurement',
+  suggestion: `A measurement of the API's CPU (round ${round}): please ignore, it is closed and labelled platform-test afterwards.`,
+})];
+
 const statuses = [];
 const versions = new Set();
 for (let pass = 0; pass < 4; pass++) {
@@ -57,13 +74,16 @@ for (let pass = 0; pass < 4; pass++) {
   // A fresh isolate's very first request: a path with no route, so its CPU is the
   // isolate's start alone (logged cold=1); every route after it then loads (load=1).
   const first = pass === 0 ? [['GET', '/api/nope', {}]] : [];
+  if (pass === 1 && process.env.NOTES === '1') list.push(note());
   for (const [method, p, headers, body] of [...first, ...list.slice(shift), ...list.slice(0, shift)]) {
     const res = await fetch(base + p, { method, headers, body, redirect: 'manual' });
     await res.arrayBuffer();
     statuses.push(`${method} ${p.split('?')[0]} ${res.status}`);
     versions.add(res.headers.get('x-worker-version'));
+    await sleep(GAP_MS);
   }
 }
+if (process.env.SENT_FILE) appendFileSync(process.env.SENT_FILE, `${statuses.length}\n`);
 console.log(`round ${round}: ${statuses.length} requests; ${[...new Set(statuses)].join(', ')}`);
 // The deploy may not have reached this data centre yet: then the round measured the old
 // version's warm isolates, which the summary can't tell apart. Say so.

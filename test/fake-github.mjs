@@ -192,11 +192,50 @@ export function createFakeGitHub() {
       return json(200, { data: { repository } });
     }
     if (u.pathname === '/graphql' && method === 'POST' && body.query.includes('byteSize')) {
-      // Blob sizes by oid (lib/common.mjs blobSizes): p0, p1, … in the order asked.
+      // Blob sizes by oid (blobSizes, partsAndMain): p0, p1, … in the order asked; and main.
       const r = repos.get(`${body.variables.owner}/${body.variables.name}`.toLowerCase());
       const oids = [...body.query.matchAll(/(p\d+): object\(oid: "([0-9a-f]{40})"\)/g)];
       const repository = Object.fromEntries(oids.map(([, k, sha]) => [k, r?.blobs.has(sha) ? { byteSize: r.blobs.get(sha).length } : null]));
+      if (body.query.includes('main: ref(')) {
+        const head = r?.refs.get('main');
+        repository.main = head ? { target: { oid: head, tree: { oid: r.commits.get(head).tree } } } : null;
+      }
       return json(200, { data: { repository } });
+    }
+    if (u.pathname === '/graphql' && method === 'POST' && body.query.includes('isBinary isTruncated text')) {
+      // Text blobs by oid (blobTexts).
+      const r = repos.get(`${body.variables.owner}/${body.variables.name}`.toLowerCase());
+      const repository = {};
+      for (const [, k, sha] of body.query.matchAll(/(b\d+): object\(oid: "([0-9a-f]{40})"\)/g)) {
+        const b = r?.blobs.get(sha);
+        const binary = b ? b.includes(0) : false;
+        repository[k] = b ? { isBinary: binary, isTruncated: false, text: binary ? null : b.toString('utf8') } : null;
+      }
+      return json(200, { data: { repository } });
+    }
+    if (u.pathname === '/graphql' && method === 'POST' && body.query.includes('ref(qualifiedName: $ref)')) {
+      // A branch's head, its tree, and files or folders in it (headAndPaths, readImport).
+      const r = repos.get(`${body.variables.owner}/${body.variables.name}`.toLowerCase());
+      const v = body.variables;
+      const head = r?.refs.get(v.ref.replace(/^refs\/heads\//, ''));
+      if (!head) return json(200, { data: { repository: { ref: null } } });
+      const files = filesAt(r, head);
+      const target = { oid: head, tree: { oid: r.commits.get(head).tree } };
+      const errors = [];
+      for (const [, alias, raw] of body.query.matchAll(/(\w+): file\(path: (\$\w+|"[^"]+")\)/g)) {
+        const path = raw.startsWith('$') ? v[raw.slice(1)] : JSON.parse(raw);
+        if (files.has(path)) {
+          const id = files.get(path);
+          target[alias] = { oid: id, object: { oid: id, text: r.blobs.get(id).toString('utf8') } };
+        } else {
+          // A folder: a tree of what's under it, so GET /git/trees/<oid> lists it.
+          const under = [...files].filter(([p]) => p.startsWith(`${path}/`)).map(([p, id]) => [p.slice(path.length + 1), id]);
+          target[alias] = under.length ? { oid: putTree(r, under) } : null;
+          // As GitHub: a path that isn't there is an error beside the null field.
+          if (!under.length) errors.push({ type: 'NOT_FOUND', path: ['repository', 'ref', 'target', alias], message: `Could not resolve file for path '${path}'.` });
+        }
+      }
+      return json(200, { data: { repository: { ref: { target } } }, ...(errors.length ? { errors } : {}) });
     }
     if (u.pathname === '/graphql' && method === 'POST') {
       // Only enablePullRequestAutoMerge: remember which pull request, and how.
@@ -260,6 +299,8 @@ export function createFakeGitHub() {
         if (e.sha === null) {
           if (!files.has(e.path)) return json(422, { message: `path ${e.path} not in tree` });
           files.delete(e.path);
+        } else if (typeof e.content === 'string') {
+          files.set(e.path, putBlob(r, Buffer.from(e.content, 'utf8'))); // inline text, as GitHub
         } else {
           if (!r.blobs.has(e.sha)) return json(422, { message: 'blob not found' });
           files.set(e.path, e.sha);
