@@ -253,3 +253,23 @@ test('declined (batch 2c): with &declined=1, closed-unmerged proposals and not-p
   delete gh.state.hooks['/issues?state=closed'];
   delete gh.state.hooks[`/pulls/${pr}/files`];
 });
+
+test('kept in KV (the Worker): Show changes kept for good, and Compare from each version\'s kept text, without GitHub', async () => {
+  const { platform } = await import('../lib/platform.mjs');
+  const store = new Map();
+  platform.cache = { get: async (k, t) => (store.has(k) ? (t === 'json' ? JSON.parse(store.get(k)) : store.get(k)) : null), put: async (k, v) => { store.set(k, v); }, delete: async (k) => store.delete(k) };
+  try {
+    const shown = await get({ book: BOOK.slug, sha: v3, path: PAGE });
+    assert.equal(shown.statusCode, 200);
+    await get({ book: BOOK.slug, sha: v1, path: PAGE });
+    assert.ok([...store.keys()].some((k) => k.startsWith('rev:')) && [...store.keys()].some((k) => k.startsWith('text:')));
+    const asked = gh.state.calls.length;
+    const again = await get({ book: BOOK.slug, sha: v3, path: PAGE });
+    assert.deepEqual(again.payload, shown.payload, 'the answer as it was sent');
+    const cmp = await get({ book: BOOK.slug, sha: v3, base: v1, path: PAGE });
+    assert.deepEqual([cmp.payload.status, cmp.payload.before, cmp.payload.after], ['compared', '# One\n\nFirst words.\n', '# One\n\nBest words.\n']);
+    assert.equal(gh.state.calls.length, asked, 'no GitHub call for either');
+  } finally {
+    platform.cache = null;
+  }
+});

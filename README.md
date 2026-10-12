@@ -95,7 +95,7 @@ database `c4n-api`, applies `migrations/`, runs `wrangler deploy`, and waits for
   changed, and stamps `refreshed`. While that stamp is under 45 minutes old, what it wrote
   is current; a write through the Worker forgets what it changed (a note, a proposal, an
   author's decision or send). A miss, or no recent stamp, is worked out per request as
-  before. A page revision on the live branch (Show changes, Compare) is kept for good
+  before. A page revision (Show changes, Compare) is kept for good
   once opened (`rev:` keys): a commit never changes. All of this costs the Worker's CPU
   only on a miss; the refresh runs in GitHub Actions.
 

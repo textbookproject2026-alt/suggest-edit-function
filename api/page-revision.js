@@ -70,8 +70,16 @@ const onLive = new Set();
 const OPEN_TTL_MS = 90_000;
 const OPEN_MAX = 100;
 const DECLINED_TTL_MS = 120_000;
-/** A whole answer for revisions on the live branch, which never change: kept in KV for good. */
-const revKey = (repo, sha, path, base) => `rev:${repo}:${sha}:${base ?? ''}:${path}`;
+/**
+ * A whole revision answer, kept in KV for good once sent: what a commit holds never
+ * changes (on drafts as on live: both are public).
+ * Its `branch` may say drafts after it went live; the History panel doesn't use it.
+ */
+export const revKey = (repo, sha, path, base) => `rev:${repo}:${sha}:${base ?? ''}:${path}`;
+/** One page at one public commit, { branch, text }: Compare is two of them (kept like revKey). */
+export const textKey = (repo, sha, path) => `text:${repo}:${sha}:${path}`;
+const keptText = async (repo, sha, path) => (platform.cache ? platform.cache.get(textKey(repo, sha, path), 'json').catch(() => null) : null);
+const keepText = (repo, sha, path, value) => platform.cache?.put(textKey(repo, sha, path), JSON.stringify(value)).catch((err) => console.error(`kv cache: write of text ${sha.slice(0, 7)} failed (${err?.message})`));
 
 /** Obsidian syntax GitHub doesn't know, reduced to what a reader would see (editor.ts forPreview). */
 export const forPreview = (md) =>
@@ -236,10 +244,10 @@ export async function openItems(book, token, left) {
   return items.sort((a, b) => b.date.localeCompare(a.date) || b.number - a.number);
 }
 
-/** A 200, also kept in KV for good when every revision in it is on the live branch. */
-async function sendKept(res, key, forGood, body) {
+/** A 200, also kept in KV for good (revKey). */
+async function sendKept(res, key, body) {
   const text = JSON.stringify(body);
-  if (forGood && platform.cache) await platform.cache.put(key, text).catch((err) => console.error(`kv cache: write of ${key} failed (${err?.message})`));
+  if (platform.cache) await platform.cache.put(key, text).catch((err) => console.error(`kv cache: write of ${key} failed (${err?.message})`));
   send(res, 200, new RawJson(text));
 }
 
@@ -272,6 +280,14 @@ export default wrap(async (req, res) => {
     ? !shas.length || shas.length > MAX_SHAS || !shas.every((s) => SHA_RE.test(s))
     : !SHA_RE.test(sha) || !isSafePath(path) || (base !== null && !SHA_RE.test(base))) return refuse(res, 400, 'bad request', 'That revision link isn’t valid.');
   const repo = book.content.repo;
+  if (shas) {
+    // Kept ahead (refresh.mjs): every "a reader" commit the book's history.json lists.
+    const kept = await ahead(keys.names(slug), 0, null);
+    if (kept && shas.every((s) => s in kept)) {
+      res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=86400');
+      return send(res, 200, { names: Object.fromEntries(shas.map((s) => [s, kept[s]])) });
+    }
+  }
   const rk = shas ? null : revKey(repo, sha, path, base);
   if (rk && platform.cache) {
     // A revision someone opened before: the answer as it was sent, not parsed again.
@@ -279,6 +295,14 @@ export default wrap(async (req, res) => {
     if (hit) {
       res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=31536000, immutable');
       return send(res, 200, new RawJson(hit));
+    }
+    if (base !== null) {
+      // Compare: the two versions' texts, each kept by commit (Show changes and refresh.mjs keep them too).
+      const [b, a] = await Promise.all([keptText(repo, base, path), keptText(repo, sha, path)]);
+      if (a && b) {
+        res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=31536000, immutable');
+        return sendKept(res, rk, { sha, base, path, status: 'compared', branch: a.branch, before: b.text, after: a.text, html: '' });
+      }
     }
   }
   if (await isRateLimited(clientIp(req), Date.now())) {
@@ -294,12 +318,6 @@ export default wrap(async (req, res) => {
     const { token } = credential;
 
     if (shas) {
-      // Kept ahead (refresh.mjs): every "a reader" commit the book's history.json lists.
-      const kept = await ahead(keys.names(slug), 0, null);
-      if (kept && shas.every((s) => s in kept)) {
-        res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=86400');
-        return send(res, 200, { names: Object.fromEntries(shas.map((s) => [s, kept[s]])) });
-      }
       // Where each commit is, and its pull requests' names, in the same two queries.
       const names = new Map();
       const where = await branchesOf(book, shas, token, left, { liveOnly: true, names });
@@ -320,10 +338,11 @@ export default wrap(async (req, res) => {
         return refuse(res, 404, 'not on the live branch', 'That revision isn’t part of the published book.');
       }
       const [before, after] = await Promise.all([text(repo, path, base, token, left), text(repo, path, sha, token, left)]);
+      await Promise.all([keepText(repo, base, path, { branch: where.get(base), text: before }), keepText(repo, sha, path, { branch, text: after })]);
       res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=31536000, immutable');
       // No html: the History panel's Compare shows the two texts' diff only (the
       // browser works it out), and rendering a chapter costs a GitHub call and its size twice over.
-      return sendKept(res, rk, branch === 'live' && where.get(base) === 'live', { sha, base, path, status: 'compared', branch, before, after, html: '' });
+      return sendKept(res, rk, { sha, base, path, status: 'compared', branch, before, after, html: '' });
     }
 
     // ponytail: a commit's first 300 files only (GitHub's page size); a page edit is one.
@@ -342,8 +361,9 @@ export default wrap(async (req, res) => {
       ? await gh('/markdown', token, left, { method: 'POST', body: { text: forPreview(after), mode: 'markdown' } })
       : null;
 
+    await keepText(repo, sha, path, { branch, text: after });
     res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=31536000, immutable');
-    await sendKept(res, rk, branch === 'live', {
+    await sendKept(res, rk, {
       sha,
       parent,
       path,
