@@ -25,7 +25,8 @@
  * GET /api/page-revision?book=<slug>&sha=<commit>&path=<file>&base=<commit> — two
  * versions of one page, for the History panel's Compare (batch 2a): `before` is the
  * file at `base`, `after` at `sha` (either "" where the page didn't exist), status
- * "compared". Either may be any public version.
+ * "compared". Either may be any public version. `html` is "" here (the panel's Compare
+ * uses the texts only).
  *
  * GET /api/history?book=<slug>[&path=<file>] (vercel.json rewrites it here, as
  * mode=open) — what is proposed and not yet decided, for the History panel's and the
@@ -51,9 +52,10 @@
  * changes, so a 200 is cached at the edge for a year; refusals for five minutes.
  * Rate-limited per IP (best effort, as every limiter here: lib/common.mjs).
  */
-import { REGISTRY, SHA_RE, Refusal, appCredentials, budget, encodePath, gh, ghJson, query, wrap } from '../lib/author.mjs';
+import { REGISTRY, SHA_RE, Refusal, appCredentials, budget, encodePath, gh, ghJson, graphqlRepo, query, wrap } from '../lib/author.mjs';
 import { clientIp, createRateLimiter, isSafePath, send } from '../lib/common.mjs';
 import { declinedChange, declinedItems } from '../lib/declined.mjs';
+import { kept } from '../lib/kv-cache.mjs';
 
 // issues: read for /api/history's notes and suggestions: without it GitHub lists none (no error).
 const appToken = appCredentials({ contents: 'read', pull_requests: 'read', issues: 'read' });
@@ -63,12 +65,9 @@ const MAX_SHAS = 30;
 
 /** Commits already shown to be on a live branch: "<repo>@<sha>". Never stops being true. */
 const onLive = new Set();
-/** The open-items answer per book (and page), for OPEN_TTL_MS: { at, items }. */
-const openCache = new Map();
+/** How long a book's open items and declined items are kept (lib/kv-cache.mjs). */
 const OPEN_TTL_MS = 90_000;
 const OPEN_MAX = 100;
-/** The declined answer per book: { at, items }. */
-const declinedCache = new Map();
 const DECLINED_TTL_MS = 120_000;
 
 /** Obsidian syntax GitHub doesn't know, reduced to what a reader would see (editor.ts forPreview). */
@@ -91,12 +90,11 @@ export function proposerName(body) {
 }
 
 async function text(repo, path, ref, token, left) {
-  const res = await gh(`/repos/${repo}/contents/${encodePath(path)}?ref=${ref}`, token, left, { allow: [404] });
-  if (res.status === 404) return '';
-  const file = await res.json();
-  if (file?.type !== 'file' || typeof file.content !== 'string') return '';
-  // ponytail: files over 1 MB come back without content; chapters are far smaller.
-  return Buffer.from(file.content, 'base64').toString('utf8').replace(/\r\n/g, '\n');
+  // The raw file: no JSON or base64 to undo.
+  const res = await gh(`/repos/${repo}/contents/${encodePath(path)}?ref=${ref}`, token, left, { accept: 'application/vnd.github.raw', allow: [404] });
+  // A folder answers with its listing as JSON, raw or not: only a file is raw.
+  if (res.status === 404 || !(res.headers.get('content-type') ?? '').startsWith('application/vnd.github.raw')) return '';
+  return (await res.text()).replace(/\r\n/g, '\n');
 }
 
 /** An App-authored commit with no human co-author: an anonymous proposal's name, from its PR. */
@@ -116,27 +114,65 @@ async function proposalName(repo, sha, token, left) {
   return null;
 }
 
-/** Whether `sha` is on `branch` of the book's repository. */
-async function isOn(repo, branch, sha, token, left) {
-  const cmp = await gh(`/repos/${repo}/compare/${sha}...${encodePath(branch)}?per_page=1`, token, left, { allow: [404] });
-  const status = cmp.status === 404 ? 'missing' : (await cmp.json())?.status;
-  return status === 'ahead' || status === 'identical';
-}
-
-/** Whether `sha` is on the book's live branch (remembered once it is). */
-async function isOnLive(book, sha, token, left) {
+/**
+ * Where each of `shas` is: 'live', 'drafts' (being edited, not yet published) or null
+ * (neither: not public here). By GraphQL, not REST's compare, whose answer carries
+ * every changed file's patch (hundreds of KB to parse for one word). One query does it
+ * when every commit exists; a commit GitHub doesn't have fails that query whole, and
+ * then two do it (which exist, then where those are). With `names` (a Map), each
+ * commit's App-written pull request's name comes in the same query. Live is
+ * remembered once true.
+ */
+async function branchesOf(book, shas, token, left, { liveOnly = false, names = null } = {}) {
   const repo = book.content.repo;
-  if (onLive.has(`${repo}@${sha}`)) return true;
-  if (!(await isOn(repo, book.content.live_branch, sha, token, left))) return false;
-  onLive.add(`${repo}@${sha}`);
-  return true;
-}
+  const out = new Map(shas.map((s) => [s, onLive.has(`${repo}@${s}`) ? 'live' : null]));
+  const ask = names ? shas : shas.filter((s) => !out.get(s));
+  if (!ask.length) return out;
+  const branches = [book.content.live_branch, ...(liveOnly || !book.content.drafts_branch ? [] : [book.content.drafts_branch])];
+  const prs = names ? ' associatedPullRequests(first: 5) { nodes { author { __typename } body } }' : '';
+  const objects = (list) => list.map((_, i) => `c${i}: object(oid: $s${i}) { ... on Commit { oid${prs} } }`).join(' ');
+  const compares = (list) => branches.map((_, i) => `r${i}: ref(qualifiedName: $b${i}) { ${list.map((_, j) => `x${j}: compare(headRef: $h${j}) { status }`).join(' ')} }`).join(' ');
+  const vars = (list, withObjects) => ({
+    ...(withObjects ? Object.fromEntries(list.map((s, i) => [`s${i}`, s])) : {}),
+    ...Object.fromEntries(list.map((s, j) => [`h${j}`, s])),
+    ...Object.fromEntries(branches.map((b, i) => [`b${i}`, `refs/heads/${b}`])),
+  });
+  const decl = (list, withObjects) => [
+    ...(withObjects ? list.map((_, i) => `$s${i}: GitObjectID!`) : []),
+    ...list.map((_, j) => `$h${j}: String!`),
+    ...branches.map((_, i) => `$b${i}: String!`),
+  ].join(', ');
 
-/** "live", "drafts" (being edited, not yet published) or null (neither: not public here). */
-async function branchOf(book, sha, token, left) {
-  if (await isOnLive(book, sha, token, left)) return 'live';
-  const drafts = book.content.drafts_branch;
-  return drafts && (await isOn(book.content.repo, drafts, sha, token, left)) ? 'drafts' : null;
+  let found;
+  let where;
+  let real;
+  try {
+    const both = await graphqlRepo(repo, `query($owner: String!, $name: String!, ${decl(ask, true)}) { repository(owner: $owner, name: $name) { ${objects(ask)} ${compares(ask)} } }`,
+      vars(ask, true), token, left);
+    [found, where, real] = [both, both, ask];
+  } catch {
+    // A commit GitHub doesn't have: which exist first, then where those are.
+    found = await graphqlRepo(repo, `query($owner: String!, $name: String!, ${ask.map((_, i) => `$s${i}: GitObjectID!`).join(', ')}) { repository(owner: $owner, name: $name) { ${objects(ask)} } }`,
+      Object.fromEntries(ask.map((s, i) => [`s${i}`, s])), token, left);
+    real = ask.filter((_, i) => found[`c${i}`]?.oid);
+    where = real.length
+      ? await graphqlRepo(repo, `query($owner: String!, $name: String!, ${decl(real, false)}) { repository(owner: $owner, name: $name) { ${compares(real)} } }`, vars(real, false), token, left)
+      : {};
+  }
+  if (names) {
+    // Only a body the App wrote itself is read as a proposal.
+    ask.forEach((s, i) => names.set(s, proposerName((found[`c${i}`]?.associatedPullRequests?.nodes ?? []).find((pr) => pr?.author?.__typename === 'Bot')?.body)));
+  }
+  // The branch's head compared with the commit: BEHIND or IDENTICAL means the commit
+  // is in the branch's history (REST's compare/<sha>...<branch> said ahead or identical).
+  const on = (i, j) => ['BEHIND', 'IDENTICAL'].includes(where[`r${i}`]?.[`x${j}`]?.status);
+  real.forEach((s, j) => {
+    if (on(0, j)) {
+      out.set(s, 'live');
+      onLive.add(`${repo}@${s}`);
+    } else if (!out.get(s) && branches.length > 1 && on(1, j)) out.set(s, 'drafts');
+  });
+  return out;
 }
 
 /** Who a proposal or note is from, by its attribution line (suggest-edit-function writes it). */
@@ -176,19 +212,21 @@ export function openItem(item, kind) {
   };
 }
 
-/** The book's open proposals and notes (all pages), newest first. */
+const OPEN_FIELDS = 'number url title body createdAt labels(first: 20) { nodes { name } }';
+
+/** The book's open proposals and notes (all pages), newest first: one GraphQL query, only the fields used. */
 async function openItems(book, token, left) {
-  const repo = book.content.repo;
-  const [pulls, notes, suggestions] = await Promise.all([
-    ghJson(`/repos/${repo}/pulls?state=open&per_page=${OPEN_MAX}`, token, left),
-    ghJson(`/repos/${repo}/issues?state=open&labels=section-note&per_page=${OPEN_MAX}`, token, left),
-    ghJson(`/repos/${repo}/issues?state=open&labels=suggested-edit&per_page=${OPEN_MAX}`, token, left),
-  ]);
+  const order = `first: ${OPEN_MAX}, orderBy: { field: CREATED_AT, direction: DESC }`;
+  const open = await graphqlRepo(book.content.repo, `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {
+    pulls: pullRequests(states: OPEN, labels: ["proposed-edit"], ${order}) { nodes { ${OPEN_FIELDS} } }
+    notes: issues(states: OPEN, labels: ["section-note"], ${order}) { nodes { ${OPEN_FIELDS} } }
+    suggestions: issues(states: OPEN, labels: ["suggested-edit"], ${order}) { nodes { ${OPEN_FIELDS} } }
+  } }`, {}, token, left);
+  const rest = (n) => ({ number: n.number, html_url: n.url, title: n.title, body: n.body, created_at: n.createdAt, labels: n.labels?.nodes ?? [] });
   const seen = new Set();
-  const items = [];
-  for (const pr of pulls ?? []) if (labelled(pr, 'proposed-edit')) items.push(openItem(pr, 'edit'));
-  for (const i of [...(notes ?? []), ...(suggestions ?? [])]) {
-    if (i.pull_request || seen.has(i.number)) continue;
+  const items = (open.pulls?.nodes ?? []).map((n) => openItem(rest(n), 'edit'));
+  for (const i of [...(open.notes?.nodes ?? []), ...(open.suggestions?.nodes ?? [])].map(rest)) {
+    if (seen.has(i.number)) continue;
     seen.add(i.number);
     items.push(openItem(i, labelled(i, 'section-note') ? 'note' : labelled(i, 'proposed-edit') ? 'edit' : 'suggestion'));
   }
@@ -237,28 +275,30 @@ export default wrap(async (req, res) => {
     const { token } = credential;
 
     if (shas) {
-      const found = await Promise.all(shas.map(async (s) =>
-        (await isOnLive(book, s, token, left)) ? proposalName(repo, s, token, left) : null));
+      // Where each commit is, and its pull requests' names, in the same two queries.
+      const names = new Map();
+      const where = await branchesOf(book, shas, token, left, { liveOnly: true, names });
+      const found = shas.map((s) => (where.get(s) === 'live' ? names.get(s) ?? null : null));
       res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=86400');
       return send(res, 200, { names: Object.fromEntries(shas.map((s, i) => [s, found[i]])) });
     }
 
-    const branch = await branchOf(book, sha, token, left);
+    const where = await branchesOf(book, base !== null ? [sha, base] : [sha], token, left);
+    const branch = where.get(sha);
     if (!branch) {
       return refuse(res, 404, 'not on the live branch', 'That revision isn’t part of the published book.');
     }
 
     if (base !== null) {
       // Compare: the page at two versions, both public (published or being edited).
-      if (!(await branchOf(book, base, token, left))) {
+      if (!where.get(base)) {
         return refuse(res, 404, 'not on the live branch', 'That revision isn’t part of the published book.');
       }
       const [before, after] = await Promise.all([text(repo, path, base, token, left), text(repo, path, sha, token, left)]);
-      const rendered = after
-        ? await gh('/markdown', token, left, { method: 'POST', body: { text: forPreview(after), mode: 'markdown' } })
-        : null;
       res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=31536000, immutable');
-      return send(res, 200, { sha, base, path, status: 'compared', branch, before, after, html: rendered ? await rendered.text() : '' });
+      // No html: the History panel's Compare shows the two texts' diff only, and
+      // rendering a chapter costs a GitHub call and its size twice over.
+      return send(res, 200, { sha, base, path, status: 'compared', branch, before, after, html: '' });
     }
 
     // ponytail: a commit's first 300 files only (GitHub's page size); a page edit is one.
@@ -354,31 +394,34 @@ async function open(req, res, q) {
   const change = q.has('change') ? Number(q.get('change')) : null;
   if (change !== null) return declinedDiff(req, res, book, change);
   const withDeclined = q.get('declined') === '1';
-  const hit = openCache.get(key);
-  let items = hit && Date.now() - hit.at < OPEN_TTL_MS ? hit.items : null;
-  const dHit = declinedCache.get(key);
-  let declined = withDeclined && dHit && Date.now() - dHit.at < DECLINED_TTL_MS ? dHit.items : null;
-  if (!items || (withDeclined && !declined)) {
+  // The book's lists, shared by every page of it (and on Cloudflare by every data
+  // centre, through KV): only a request that finds them older than their TTL asks GitHub.
+  const tag = `[history ${slug}]`;
+  let credential;
+  let limited = false;
+  const fromGitHub = (list) => async () => {
     if (await isRateLimited(clientIp(req), Date.now())) {
+      limited = true;
+      throw new Refusal(429, 'rate limit exceeded');
+    }
+    credential ??= await appToken(book, tag);
+    return list(book, credential.token, budget(20_000));
+  };
+  let items;
+  let declined;
+  try {
+    [items, declined] = await Promise.all([
+      kept(`history:${key}:open`, OPEN_TTL_MS, fromGitHub(openItems)),
+      withDeclined ? kept(`history:${key}:declined`, DECLINED_TTL_MS, fromGitHub(declinedItems)) : null,
+    ]);
+  } catch (err) {
+    if (limited) {
       res.setHeader('Retry-After', '600');
       return refuse(res, 429, 'rate limit exceeded', 'Too many requests from here in the last hour. Please try again later.');
     }
-    const tag = `[history ${slug}]`;
-    let credential;
-    try {
-      credential = await appToken(book, tag);
-      const left = budget(20_000);
-      [items, declined] = await Promise.all([
-        items ?? openItems(book, credential.token, left),
-        withDeclined ? declined ?? declinedItems(book, credential.token, left) : null,
-      ]);
-      openCache.set(key, { at: Date.now(), items });
-      if (withDeclined) declinedCache.set(key, { at: Date.now(), items: declined });
-    } catch (err) {
-      if (err.status === 401) credential?.refused();
-      console.error(`history: ${err.message} ${tag}`);
-      return refuse(res, err instanceof Refusal ? err.status : 502, `github: ${err.message}`, 'GitHub couldn’t be reached just now. Please try again in a moment.');
-    }
+    if (err.status === 401) credential?.refused();
+    console.error(`history: ${err.message} ${tag}`);
+    return refuse(res, err instanceof Refusal ? err.status : 502, `github: ${err.message}`, 'GitHub couldn’t be reached just now. Please try again in a moment.');
   }
   res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=90');
   const onPage = (list) => (path ? list.filter((i) => i.files.includes(path)) : list);

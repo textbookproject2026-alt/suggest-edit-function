@@ -13,7 +13,7 @@ const json = (status, body) => ({ ok: status < 300, status, json: async () => bo
 
 export function createFakeGitHub() {
   const repos = new Map();
-  const state = { calls: [], tokenRequests: [], nextNumber: 100, clock: Date.parse('2026-09-28T10:00:00Z'), hooks: {}, users: new Map(), autoMerge: [] };
+  const state = { calls: [], tokenRequests: [], nextNumber: 100, clock: Date.parse('2026-09-28T10:00:00Z'), hooks: {}, users: new Map(), autoMerge: [], dispatches: [] };
 
   function repo(full) {
     const key = full.toLowerCase();
@@ -136,6 +136,68 @@ export function createFakeGitHub() {
       const user = state.users.get(decodeURIComponent(m[1]).toLowerCase());
       return user ? json(200, user) : json(404, { message: 'Not Found' });
     }
+    if (u.pathname === '/graphql' && method === 'POST' && /object\(oid: \$s\d+\)|compare\(headRef:/.test(body.query)) {
+      // page-revision's branchesOf: which commits exist, then where they are.
+      const r = repos.get(`${body.variables.owner}/${body.variables.name}`.toLowerCase());
+      const v = body.variables;
+      const repository = {};
+      const prs = body.query.includes('associatedPullRequests');
+      for (const [, alias, key] of body.query.matchAll(/(c\d+): object\(oid: \$(s\d+)\)/g)) {
+        // state.assocPulls(sha): a commit's pull requests, [{ author: { __typename }, body }].
+        repository[alias] = r?.commits.has(v[key])
+          ? { oid: v[key], ...(prs ? { associatedPullRequests: { nodes: state.assocPulls?.(v[key]) ?? [] } } : {}) }
+          : null;
+      }
+      // As GitHub: a compare against a commit it doesn't have fails the whole query.
+      const compared = [...body.query.matchAll(/compare\(headRef: \$(h\d+)\)/g)].map(([, h]) => v[h]);
+      if (compared.some((sha) => !r?.commits.has(sha))) return json(200, { data: null, errors: [{ message: 'Something went wrong while executing your query.' }] });
+      for (const [, ralias, bkey, inner] of body.query.matchAll(/(r\d+): ref\(qualifiedName: \$(b\d+)\) \{((?: x\d+: compare\(headRef: \$h\d+\) \{ status \})+) \}/g)) {
+        const head = r?.refs.get(v[bkey].replace(/^refs\/heads\//, ''));
+        if (!head) { repository[ralias] = null; continue; }
+        const history = new Set(ancestors(r, head));
+        repository[ralias] = Object.fromEntries([...inner.matchAll(/(x\d+): compare\(headRef: \$(h\d+)\)/g)].map(([, c, h]) => {
+          const sha = v[h];
+          const status = sha === head ? 'IDENTICAL' : history.has(sha) ? 'BEHIND' : ancestors(r, sha).includes(head) ? 'AHEAD' : 'DIVERGED';
+          return [c, { status }];
+        }));
+      }
+      return json(200, { data: { repository } });
+    }
+    if (u.pathname === '/graphql' && method === 'POST' && /(?:pullRequests|issues)\(states:|(?:issue|pullRequest)\(number:/.test(body.query)) {
+      // History lists (page-revision openItems, lib/declined.mjs), from the REST data.
+      const r = repos.get(`${body.variables.owner}/${body.variables.name}`.toLowerCase());
+      const gqlUser = (x) => (x ? { __typename: x.type === 'Bot' ? 'Bot' : 'User', login: String(x.login).replace(/\[bot\]$/, '') } : null);
+      const node = (x, pull) => ({
+        number: x.number, url: x.html_url, title: x.title ?? '', body: x.body ?? '',
+        createdAt: x.created_at ?? null, closedAt: x.closed_at ?? null, updatedAt: x.updated_at ?? x.closed_at ?? x.created_at ?? null,
+        labels: { nodes: (x.labels ?? []).map((l) => ({ name: typeof l === 'string' ? l : l.name })) },
+        ...(pull ? {} : { stateReason: x.state_reason ? x.state_reason.toUpperCase() : null }),
+        timelineItems: { nodes: x.closed_by ? [{ actor: gqlUser(x.closed_by) }] : [] },
+        comments: { nodes: (x.comments ?? []).map((text, k) => ({ databaseId: x.commentMeta?.[k]?.id ?? k + 1, author: gqlUser(x.commentMeta?.[k]?.user ?? { login: 'someone', type: 'User' }), body: text, createdAt: x.commentMeta?.[k]?.created_at ?? null })) },
+      });
+      const repository = {};
+      const lists = /(?:(\w+): )?(pullRequests|issues)\(states: (OPEN|CLOSED)(?:, labels: \["([^"]+)"\])?, first: (\d+), orderBy: \{ field: (CREATED_AT|UPDATED_AT), direction: DESC \}\)/g;
+      for (const [, alias, field, st, label, first, by] of body.query.matchAll(lists)) {
+        const pull = field === 'pullRequests';
+        const all = [...(pull ? r.pulls : r.issues).values()]
+          .filter((x) => x.state === st.toLowerCase() && !(pull && x.merged_at) && (!label || (x.labels ?? []).some((l) => (l.name ?? l) === label)))
+          .map((x) => node(x, pull));
+        all.sort((a, b) => (by === 'CREATED_AT' ? b.number - a.number : String(b.updatedAt).localeCompare(String(a.updatedAt))));
+        repository[alias ?? field] = { nodes: all.slice(0, Number(first)) };
+      }
+      for (const [, alias, kind, n] of body.query.matchAll(/(\w\d+): (issue|pullRequest)\(number: (\d+)\)/g)) {
+        const x = (kind === 'pullRequest' ? r.pulls : r.issues).get(Number(n));
+        repository[alias] = x ? node(x, kind === 'pullRequest') : null;
+      }
+      return json(200, { data: { repository } });
+    }
+    if (u.pathname === '/graphql' && method === 'POST' && body.query.includes('byteSize')) {
+      // Blob sizes by oid (lib/common.mjs blobSizes): p0, p1, … in the order asked.
+      const r = repos.get(`${body.variables.owner}/${body.variables.name}`.toLowerCase());
+      const oids = [...body.query.matchAll(/(p\d+): object\(oid: "([0-9a-f]{40})"\)/g)];
+      const repository = Object.fromEntries(oids.map(([, k, sha]) => [k, r?.blobs.has(sha) ? { byteSize: r.blobs.get(sha).length } : null]));
+      return json(200, { data: { repository } });
+    }
     if (u.pathname === '/graphql' && method === 'POST') {
       // Only enablePullRequestAutoMerge: remember which pull request, and how.
       state.autoMerge.push(body.variables);
@@ -147,6 +209,15 @@ export function createFakeGitHub() {
     const q = u.searchParams;
 
     if (rest === '/installation') return json(200, { id: 4242 });
+    if (rest === '/dispatches' && method === 'POST') {
+      state.dispatches.push({ repo: r.full, ...body });
+      return { ok: true, status: 204, json: async () => null, text: async () => '' };
+    }
+    if ((m = /^\/contents\/(.+)$/.exec(rest)) && method === 'GET' && opts.headers?.Accept === 'application/vnd.github.raw') {
+      const head = r.refs.get(q.get('ref') ?? '') ?? q.get('ref');
+      const id = r.commits.has(head) ? filesAt(r, head).get(decodeURIComponent(m[1])) : undefined;
+      return id ? new Response(r.blobs.get(id), { status: 200, headers: { 'content-type': 'application/vnd.github.raw; charset=utf-8' } }) : json(404, { message: 'Not Found' });
+    }
 
     // --- git data
     if ((m = /^\/git\/ref\/heads\/(.+)$/.exec(rest)) && method === 'GET') {
@@ -201,6 +272,7 @@ export function createFakeGitHub() {
     }
     if ((m = /^\/git\/blobs\/([0-9a-f]{40})$/.exec(rest)) && method === 'GET') {
       const b = r.blobs.get(m[1]);
+      if (b && opts.headers?.Accept === 'application/vnd.github.raw') return new Response(b, { status: 200, headers: { 'content-type': 'application/vnd.github.raw; charset=utf-8' } });
       return b ? json(200, { encoding: 'base64', content: b.toString('base64').replace(/.{60}/g, '$&\n') }) : json(404, {});
     }
 

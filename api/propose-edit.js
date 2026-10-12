@@ -47,7 +47,7 @@
  *
  * Needs the App's Contents and Pull requests permissions (README, "The App").
  */
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import BUNDLE from '../registry/bundled.mjs';
 import { validateRegistry, createResolver } from '../lib/registry.mjs';
 import {
@@ -63,6 +63,8 @@ import { PLATFORM_OWNER } from '../lib/author-people.mjs';
 
 const REGISTRY = validateRegistry(BUNDLE.registry);
 const RESOLVER = createResolver(REGISTRY);
+/** Larger than the contents API would return as text (1 MB): the editor refuses it. */
+const MAX_SOURCE_BYTES = 1024 * 1024;
 
 const CREDENTIALS = createCredentials(process.env, {
   contents: 'write',
@@ -150,26 +152,44 @@ async function fail(what, res) {
 }
 
 /** The branch head's commit sha, and the file's text and blob sha at that commit. */
-async function readSource(book, path, token, left) {
+async function readSource(book, path, token, left, { readOnly = false } = {}) {
   const branch = baseBranch(book);
-  const ref = await gh(`/repos/${book.content.repo}/git/ref/heads/${encodePath(branch)}`, token, left);
-  if (!ref.ok) {
-    const err = await fail(`read ${branch} ref`, ref);
-    if (ref.status === 404) err.userMessage = NO_BRANCH;
-    throw err;
+  // Only a write needs the head commit (it branches from it); a read takes the file at
+  // the branch's name, one GitHub call fewer (the editor's own check is the blob sha).
+  let commit = null;
+  if (!readOnly) {
+    const ref = await gh(`/repos/${book.content.repo}/git/ref/heads/${encodePath(branch)}`, token, left);
+    if (!ref.ok) {
+      const err = await fail(`read ${branch} ref`, ref);
+      if (ref.status === 404) err.userMessage = NO_BRANCH;
+      throw err;
+    }
+    commit = (await ref.json())?.object?.sha;
+    if (typeof commit !== 'string') throw new Error('branch ref returned no sha');
   }
-  const commit = (await ref.json())?.object?.sha;
-  if (typeof commit !== 'string') throw new Error('branch ref returned no sha');
 
-  const file = await gh(`/repos/${book.content.repo}/contents/${encodePath(path)}?ref=${commit}`, token, left);
-  if (file.status === 404) return { branch, commit, missing: true };
+  // The raw file (no JSON or base64 to undo); its blob sha is git's, computed here.
+  const file = await gh(`/repos/${book.content.repo}/contents/${encodePath(path)}?ref=${encodeURIComponent(commit ?? branch)}`, token, left, { accept: 'application/vnd.github.raw' });
+  if (file.status === 404) {
+    // Read at the branch's name, a 404 is the file or the branch: only now ask which.
+    if (readOnly) {
+      const ref = await gh(`/repos/${book.content.repo}/git/ref/heads/${encodePath(branch)}`, token, left);
+      if (ref.status === 404) {
+        const err = await fail(`read ${branch} ref`, ref);
+        err.userMessage = NO_BRANCH;
+        throw err;
+      }
+    }
+    return { branch, commit, missing: true };
+  }
   if (!file.ok) throw await fail('read file', file);
-  const data = await file.json();
-  if (data?.type !== 'file' || typeof data.sha !== 'string') return { branch, commit, missing: true };
-  // The contents API leaves `content` empty for files over 1 MB.
-  if (data.encoding !== 'base64' || typeof data.content !== 'string') return { branch, commit, tooLarge: true };
-  const raw = Buffer.from(data.content, 'base64').toString('utf8');
-  return { branch, commit, sha: data.sha, raw, text: toLf(raw), crlf: raw.includes('\r\n') };
+  // A folder answers with its listing as JSON, raw or not: only a file is raw.
+  if (!(file.headers.get('content-type') ?? '').startsWith('application/vnd.github.raw')) return { branch, commit, missing: true };
+  const bytes = Buffer.from(await file.arrayBuffer());
+  if (bytes.length > MAX_SOURCE_BYTES) return { branch, commit, tooLarge: true };
+  const sha = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+  const raw = bytes.toString('utf8');
+  return { branch, commit, sha, raw, text: toLf(raw), crlf: raw.includes('\r\n') };
 }
 
 /**
@@ -489,7 +509,7 @@ async function handleGet(req, res, book, tag) {
     return;
   }
   try {
-    const src = await readSource(book, path, credential.token, budget(12_000));
+    const src = await readSource(book, path, credential.token, budget(12_000), { readOnly: true });
     if (src.missing) {
       send(res, 404, { error: 'source not found', userMessage: "We couldn't find this page's source." });
       return;

@@ -33,7 +33,7 @@
  * Accepting a suggestion *with* the change made goes through api/author-send.js
  * (one send path), which replies and closes after the commit.
  */
-import { lintBook, lintWords } from '../lib/book-lint.mjs';
+import { lintAt, lintWords } from '../lib/lint-job.mjs';
 import {
   SHA_RE, Refusal, appCredentials, authorise, bookFor, budget, byline, fail, ghJson, limits, wrap,
 } from '../lib/author.mjs';
@@ -342,8 +342,9 @@ async function publish(book, body, ctx) {
     throw new Refusal(409, `not mergeable: ${state}`, PUBLISH_STATE_WORDS[state] ?? PUBLISH_STATE_WORDS.unknown, { state });
   }
   // The book's lint on exactly what goes live: a problem, or no answer, stops it.
-  const lint = await lintBook(book, existing.head?.sha, token, left).catch(() => null);
-  if (!lint) throw new Refusal(409, 'not mergeable: unchecked', PUBLISH_STATE_WORDS.unchecked, { state: 'unchecked' });
+  const lint = await lintAt(book, existing.head?.sha, left, { queue: true, tag }).catch(() => ({ state: 'failed' }));
+  if (lint.state === 'checking') throw new Refusal(409, 'not mergeable: checking', PUBLISH_STATE_WORDS.checking, { state: 'checking', lint_job: { sha: existing.head?.sha } });
+  if (lint.state !== 'done') throw new Refusal(409, 'not mergeable: unchecked', PUBLISH_STATE_WORDS.unchecked, { state: 'unchecked' });
   if (lint.problems.length) {
     throw new Refusal(409, 'not mergeable: lint', lintWords(lint.problems), { state: 'lint', lint: lint.problems.slice(0, 100), lint_count: lint.problems.length });
   }

@@ -26,7 +26,7 @@ const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
 
 /** The author site's public list for a book, checked hard: ids, names, logins only. */
 export async function membersOf(slug, fetchImpl = fetch) {
-  const res = await fetchImpl(`${AUTHOR_SITE_ORIGIN}/api/internal/members?book=${encodeURIComponent(slug)}`, { redirect: 'error', signal: AbortSignal.timeout(8000) });
+  const res = await fetchImpl(`${AUTHOR_SITE_ORIGIN}/api/internal/members?book=${encodeURIComponent(slug)}`, { redirect: 'manual', signal: AbortSignal.timeout(8000) });
   if (!res.ok) throw new Error(`members: HTTP ${res.status}`);
   const d = await res.json();
   // Names go into the public registry: cleaned again here (control, bidi and

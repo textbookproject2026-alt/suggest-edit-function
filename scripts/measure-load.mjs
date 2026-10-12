@@ -15,6 +15,7 @@ const origin = `https://${book.site.domain}`;
 const portal = `https://${BUNDLE.registry.platform.portal.domain}`;
 const author = 'https://author.confused4now.org';
 const slug = book.slug;
+const others = BUNDLE.registry.books.filter((b) => b.status !== 'retired' && b.site?.domain && b.slug !== slug);
 const json = { 'Content-Type': 'application/json' };
 
 const gh = async (path) => (await fetch(`https://api.github.com${path}`, {
@@ -36,6 +37,12 @@ const requests = () => [
   ['GET', '/api/propose-edit?path=index.md', { Origin: origin }],
   ['GET', `/api/github-auth?origin=${encodeURIComponent(origin)}`, {}],
   ['POST', '/api/request-book', { Origin: portal, ...json }, JSON.stringify({ title: 'A measurement', authors: 'Nobody', email: 'delivered@resend.dev', summary: 'A measurement of the API, discarded by the honeypot.', agreeLicence: true, website: 'x' })],
+  // Every live book's history: a book's lists are kept 90 s (120 with declined), so
+  // the rounds also measure working them out again (logged with subrequests > 0).
+  ...others.flatMap((b) => [
+    ['GET', `/api/history?book=${b.slug}&${fresh()}`, { Origin: `https://${b.site.domain}` }],
+    ['GET', `/api/history?book=${b.slug}&declined=1&${fresh()}`, { Origin: `https://${b.site.domain}` }],
+  ]),
   ['OPTIONS', '/api/author-read', { Origin: author, 'Access-Control-Request-Method': 'GET' }],
   ['GET', '/api/author-read?what=books', { Origin: author }],
   ['POST', '/api/author-act', { Origin: author, ...json }, '{}'],
@@ -47,7 +54,10 @@ for (let pass = 0; pass < 4; pass++) {
   const list = requests();
   // A different route first each round, so each gets to be an isolate's very first.
   const shift = Number(round) % list.length;
-  for (const [method, p, headers, body] of [...list.slice(shift), ...list.slice(0, shift)]) {
+  // A fresh isolate's very first request: a path with no route, so its CPU is the
+  // isolate's start alone (logged cold=1); every route after it then loads (load=1).
+  const first = pass === 0 ? [['GET', '/api/nope', {}]] : [];
+  for (const [method, p, headers, body] of [...first, ...list.slice(shift), ...list.slice(0, shift)]) {
     const res = await fetch(base + p, { method, headers, body, redirect: 'manual' });
     await res.arrayBuffer();
     statuses.push(`${method} ${p.split('?')[0]} ${res.status}`);

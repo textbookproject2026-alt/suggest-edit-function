@@ -36,15 +36,10 @@ const draftsOnly = gh.commitFiles(REPO, 'drafts-only', { [PAGE]: 'secret draft\n
 
 const r = gh.repo(REPO);
 const json = (status, body) => ({ ok: status < 300, status, json: async () => body, text: async () => (typeof body === 'string' ? body : JSON.stringify(body)) });
+gh.state.assocPulls = (sha) => (sha === v2 ? [{ author: { __typename: 'Bot' }, body: '**Proposed by:** `Jo Reader` (`j***@example.com`)' }] : []);
 gh.state.hooks = {
   '/markdown': ({ body }) => ({ ok: true, status: 200, text: async () => `<p>${body.text.length}</p>`, json: async () => ({}) }),
   '/pulls?per_page': ({ url }) => json(200, url.includes(v2) ? [{ user: { type: 'Bot' }, body: '**Proposed by:** `Jo Reader` (`j***@example.com`)' }] : []),
-  '/contents/': ({ url }) => {
-    const u = new URL(url);
-    const path = decodeURIComponent(u.pathname.split('/contents/')[1]);
-    const t = gh.textAt(REPO, u.searchParams.get('ref'), path);
-    return t === undefined ? json(404, {}) : json(200, { type: 'file', content: Buffer.from(t).toString('base64') });
-  },
   [`/repos/${REPO}/commits/`]: ({ url }) => {
     const sha = /\/commits\/([0-9a-f]{40})$/.exec(new URL(url).pathname)?.[1];
     if (!sha) return null;
@@ -121,6 +116,12 @@ test('names in one call: live-branch proposals only, cached a day, bounded', asy
   assert.deepEqual(res.payload.names, { [v2]: 'Jo Reader', [v3]: null, [draftsOnly]: null });
   assert.match(res.headers['cache-control'], /s-maxage=86400/);
   assert.equal(res.headers['access-control-allow-origin'], '*');
+  // A commit GitHub doesn't have fails GraphQL's one query whole: the two-query way
+  // still names the others.
+  const unknown = 'f'.repeat(40);
+  const mixed = await get({ book: BOOK.slug, shas: [v2, unknown].join(',') });
+  assert.deepEqual(mixed.payload.names, { [v2]: 'Jo Reader', [unknown]: null });
+  assert.equal((await get({ book: BOOK.slug, sha: unknown, path: PAGE })).statusCode, 404);
   assert.equal((await get({ book: BOOK.slug, shas: '' })).statusCode, 400);
   assert.equal((await get({ book: BOOK.slug, shas: `${v2},nope` })).statusCode, 400);
   assert.equal((await get({ book: BOOK.slug, shas: Array.from({ length: 31 }, (_, i) => i.toString(16).padStart(40, 'a')).join(',') })).statusCode, 400);

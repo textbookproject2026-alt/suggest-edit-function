@@ -5,29 +5,31 @@
  * whole test suite through it.
  */
 async function bodyOf(request) {
-  if (request.method === 'GET' || request.method === 'HEAD') return undefined;
+  if (request.method === 'GET' || request.method === 'HEAD') return {};
   const text = await request.text();
   const type = (request.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
   // Vercel hands a handler parsed JSON; unparseable JSON stays a string, which
   // parseBody turns into the handler's own 400.
   if (type === 'application/json' && text.trim()) {
     try {
-      return JSON.parse(text);
+      return { body: JSON.parse(text), rawBody: text };
     } catch {
-      return text;
+      return { body: text };
     }
   }
-  return text;
+  return { body: text };
 }
 
-function toNode(request, url, body) {
+function toNode(request, url, { body, rawBody }) {
   const headers = {};
   for (const [k, v] of request.headers) headers[k] = v;
   // Cloudflare's own view of the caller; a client-sent X-Forwarded-For is never trusted.
   const ip = request.headers.get('cf-connecting-ip') ?? '';
   if (ip) headers['x-forwarded-for'] = ip;
   else delete headers['x-forwarded-for'];
-  const req = { method: request.method, url: url.pathname + url.search, headers, body, socket: { remoteAddress: ip } };
+  // rawBody: the JSON as it came, so a member's binding (lib/author.mjs) hashes it
+  // without serialising the parsed body again. Vercel has no such field.
+  const req = { method: request.method, url: url.pathname + url.search, headers, body, rawBody, socket: { remoteAddress: ip } };
 
   const out = new Headers();
   const res = {
