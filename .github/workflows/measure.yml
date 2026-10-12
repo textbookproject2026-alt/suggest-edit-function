@@ -64,7 +64,14 @@ jobs:
           set -euo pipefail
           rounds=$(( ROUNDS > 20 ? 20 : ROUNDS ))
           for round in $(seq "$rounds"); do
-            version="$(npx -y "$WRANGLER" versions upload --message "measure ${round}/${rounds}" 2>&1 | tee /dev/stderr | grep -oE 'Version ID: [0-9a-f-]{36}' | head -1 | cut -d' ' -f3)"
+            # Up to three tries: Cloudflare's API sometimes answers an upload with a
+            # malformed response (12 Oct), which shouldn't end the whole measurement.
+            version=""
+            for try in 1 2 3; do
+              version="$(npx -y "$WRANGLER" versions upload --message "measure ${round}/${rounds}" 2>&1 | tee /dev/stderr | grep -oE 'Version ID: [0-9a-f-]{36}' | head -1 | cut -d' ' -f3 || true)"
+              [ -n "$version" ] && break
+              sleep 10
+            done
             [ -n "$version" ] || { echo "::error::No version id from the upload."; exit 1; }
             npx -y "$WRANGLER" versions deploy "${version}@100%" --yes --message "measure ${round}/${rounds}" > /dev/null
             # A fixed wait, not a poll: a poll would be each fresh isolate's first request,
