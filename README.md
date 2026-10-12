@@ -229,7 +229,11 @@ GitHub-style editor on the book's own page. This is its back end.
   immediately**, and posts a signed identity token (8 hours, bound to the book's origin)
   to the opener at the registry origin only. A nonce cookie ties the callback to the
   browser that started it.
-- Limits: 5 proposals and 60 source reads per hour per IP (per instance, as suggest-edit);
+- Limits: 100 proposals per hour per **signed-in GitHub login** (from the verified
+  identity token, never the IP, so a class on one network never shares a budget),
+  counted only once a proposal validates and checked before any GitHub call. The book's
+  authors (registry `authors`) and the platform maintainer are exempt. The anonymous
+  path (off) is keyed by IP at the same 100. 300 source reads per hour per IP.
   400,000 characters per page, 20,000 per paragraph; one shared 20s GitHub budget per
   request (`maxDuration` 25s).
 
@@ -445,13 +449,17 @@ advisory only: anyone can POST here directly. `path` must match
 is still `201`, with `issueUrl` pointing at the repo's issues index. A bot is never
 told it was caught — otherwise it learns to fix its input. The hit is logged.
 
-**Rate limit — best-effort only.** 5 submissions per hour per IP (first hop of
-`x-forwarded-for`), held in an in-memory `Map` with a periodic sweep. Be honest about
-what this is: the Map lives in **one serverless instance**. Vercel runs many instances
-and recycles them freely, so the counter is per-instance and **resets on every cold
-start**. Someone hitting different instances gets more than 5/hour. It is a speed bump
-against casual form-mashing, not a control. Real hardening (shared KV/Redis counter
-plus edge-level limits) is **Day 28**.
+**Rate limit — best-effort only.** 100 submissions (suggestions and notes to the
+authors) per hour per IP (first hop of `x-forwarded-for`), counted only once a
+submission validates: the content-type, JSON and honeypot checks come first, and a
+rejected payload never uses up budget. On Cloudflare the count is in D1 (one fixed
+window per IP, shared by every isolate); under Node and on Vercel it is an in-memory
+`Map` per instance, which resets on every cold start. It is a speed bump against
+form-mashing, not a control.
+
+**These 429s** (and propose-edit's) carry `Retry-After` and a `userMessage` that says roughly
+when to try again, from the end of the window. The book sites' forms and the editor
+show it and keep the reader's text ("Back to my edit").
 
 **Labels.** `suggested-edit` and `needs-triage` are checked with a `GET` and created
 via the API if missing (Issues: write covers labels). A label failure is non-fatal — a missing

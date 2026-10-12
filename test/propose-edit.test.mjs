@@ -347,16 +347,41 @@ test('text/plain is refused before anything else (forces a CORS preflight)', asy
   assert.equal(res.statusCode, 415);
 });
 
-test('five proposals an hour per IP', async () => {
+test('invalid posts from one IP never consume the write budget', async () => {
   resetGitHub();
   const headers = { origin: ORIGIN, 'content-type': 'application/json', 'x-forwarded-for': '10.99.0.1' };
-  const statuses = [];
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 150; i++) {
     const res = mockRes();
     await handler({ method: 'POST', headers, body: para({ mode: 'bad' }), socket: {} }, res);
-    statuses.push(res.statusCode);
+    assert.equal(res.statusCode, 400);
   }
-  assert.deepEqual(statuses, [400, 400, 400, 400, 400, 429]);
+});
+
+test('100 proposals an hour per signed-in login, from any IP; then a 429 that says when', async () => {
+  const identity = issueIdentity(process.env.IDENTITY_SECRET, { login: 'Busy-Reader', id: 77, name: 'B' }, ORIGIN);
+  for (let i = 0; i < 100; i++) {
+    resetGitHub();
+    assert.equal((await call({ body: para({ name: '', email: '', identity }) })).statusCode, 201, `proposal ${i + 1}`);
+  }
+  resetGitHub();
+  const r = await call({ body: para({ name: '', email: '', identity }) });
+  assert.equal(r.statusCode, 429);
+  assert.match(r.payload.userMessage, /Your text is still in the editor\. Please try again in about (a minute|\d+ minutes)\./);
+  assert.ok(Number(r.headers['retry-after']) > 0);
+  assert.equal(gh.calls.length, 0, 'refused before any GitHub call');
+  // Another signed-in reader on the same network has their own budget.
+  const other = issueIdentity(process.env.IDENTITY_SECRET, { login: 'classmate', id: 78 }, ORIGIN);
+  assert.equal((await call({ body: para({ name: '', email: '', identity: other }) })).statusCode, 201);
+});
+
+test("the book's authors and the maintainer are never limited", async () => {
+  for (const login of [BOOK.authors[0].toUpperCase(), 'textbookproject2026-alt']) {
+    const identity = issueIdentity(process.env.IDENTITY_SECRET, { login, id: 7 }, ORIGIN);
+    for (let i = 0; i < 105; i++) {
+      resetGitHub();
+      assert.equal((await call({ body: para({ name: '', email: '', identity }) })).statusCode, 201, `${login} ${i + 1}`);
+    }
+  }
 });
 
 // --- pure helpers --------------------------------------------------------------------------

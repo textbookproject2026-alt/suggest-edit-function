@@ -53,12 +53,13 @@ import { validateRegistry, createResolver } from '../lib/registry.mjs';
 import {
   EMAIL_RE, asString, clientIp, corsHeaders, createCredentials, createRateLimiter, detailOf,
   ensureLabels, fence, fileUrl, githubFetch, inlineCode, isJsonContentType, isSafePath, maskEmail,
-  parseBody, resolveBook, send,
+  parseBody, resolveBook, send, sendLimited,
   AUTHOR_SITE,
   mentionLines,
 } from '../lib/common.mjs';
 import { noreplyEmail, readIdentity, readIdentitySecret } from '../lib/identity.mjs';
 import { notifyAuthors } from '../lib/member.mjs';
+import { PLATFORM_OWNER } from '../lib/author-people.mjs';
 
 const REGISTRY = validateRegistry(BUNDLE.registry);
 const RESOLVER = createResolver(REGISTRY);
@@ -93,8 +94,15 @@ const SHA_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const BUDGET_MS = 20_000;
 const LABEL_BUDGET_MS = 2500;
 
-const writeLimited = createRateLimiter(5, 60 * 60 * 1000, 'propose-write');
-const readLimited = createRateLimiter(60, 60 * 60 * 1000, 'propose-read');
+// Writes: per signed-in login (a class on one network never shares a budget), counted
+// only once a proposal validates; the book's authors and the maintainer are exempt.
+// The anonymous path (off) falls back to the IP.
+const writeLimited = createRateLimiter(100, 60 * 60 * 1000, 'propose-write');
+const readLimited = createRateLimiter(300, 60 * 60 * 1000, 'propose-read');
+
+/** The book's authors (registry) and the platform maintainer: never limited. */
+const isExempt = (book, login) =>
+  [...(book.authors ?? []), PLATFORM_OWNER].some((a) => String(a).toLowerCase() === login.toLowerCase());
 
 const GENERIC = 'Something went wrong sending your edit. Please try again.';
 // Setup problems a book owner has to fix (the App not installed, or its permissions
@@ -464,8 +472,9 @@ async function fileFallbackIssue(book, token, left, current, data) {
 
 async function handleGet(req, res, book, tag) {
   const ip = clientIp(req);
-  if (await readLimited(ip, Date.now())) {
-    send(res, 429, { error: 'rate limit exceeded', userMessage: 'Too many requests — try again in a little while.' });
+  const until = await readLimited(ip, Date.now());
+  if (until) {
+    sendLimited(res, until, 'Too many pages opened for editing from here in the last hour.');
     return;
   }
   const params = new URL(req.url ?? '/', 'https://local.invalid').searchParams;
@@ -522,12 +531,6 @@ async function handlePost(req, res, book, origin, tag) {
     send(res, 201, { prUrl: `https://github.com/${book.content.repo}/pulls` });
     return;
   }
-  if (await writeLimited(ip, Date.now())) {
-    console.warn(`rate limit: ip=${ip} ${tag}`);
-    send(res, 429, { error: 'rate limit exceeded', userMessage: "You're sending edits too quickly — try again in a little while." });
-    return;
-  }
-
   const result = validate(body, origin);
   if (!result.ok) {
     console.warn(`${result.error} (ip=${ip}) ${tag}`);
@@ -535,6 +538,16 @@ async function handlePost(req, res, book, origin, tag) {
     return;
   }
   const { data } = result;
+
+  if (!(data.identity && isExempt(book, data.identity.login))) {
+    const who = data.identity ? `gh:${data.identity.login.toLowerCase()}` : `ip:${ip}`;
+    const until = await writeLimited(who, Date.now());
+    if (until) {
+      console.warn(`rate limit: ${who} ${tag}`);
+      sendLimited(res, until, "You've proposed a lot of edits in the last hour. Your text is still in the editor.");
+      return;
+    }
+  }
 
   const credential = await CREDENTIALS.acquire(book, tag);
   if (!credential.ok) {
