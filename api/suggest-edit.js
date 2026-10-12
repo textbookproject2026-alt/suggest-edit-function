@@ -37,7 +37,7 @@
 import BUNDLE from '../registry/bundled.mjs';
 import { validateRegistry, createResolver } from '../lib/registry.mjs';
 import {
-  GITHUB_API, asString, clientIp, corsHeaders, createCredentials, createRateLimiter, ensureLabels,
+  GITHUB_API, asString, clientIp, corsHeaders, createCredentials, createRateLimiter, ensureLabels, sendLimited,
   fence, fileUrl, githubFetch, inlineCode, isJsonContentType, isSafePath, parseBody,
   resolveBook as resolveBookWith, send,
   AUTHOR_SITE,
@@ -70,8 +70,8 @@ const MAX_QUOTE = 300;
 // A page's path on the book's site: Quartz's slugs, so no spaces, quotes or "..".
 const PAGE_RE = /^\/(?:[A-Za-z0-9._~%-]+\/)*[A-Za-z0-9._~%-]*$/;
 
-// Rate limit: 5 submissions per hour per IP.
-const RATE_LIMIT_MAX = 5;
+// Rate limit: 100 submissions per hour per IP, counted only once a submission validates.
+const RATE_LIMIT_MAX = 100;
 const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
@@ -330,21 +330,19 @@ async function handle(req, res) {
     return;
   }
 
-  // --- Rate limit ---------------------------------------------------------
-  if (await isRateLimited(ip, Date.now())) {
-    console.warn(`rate limit: ip=${ip} exceeded ${RATE_LIMIT_MAX}/hour ${tag}`);
-    send(res, 429, {
-      error: 'rate limit exceeded',
-      userMessage: "You're sending suggestions too quickly — try again in a little while.",
-    });
-    return;
-  }
-
   // --- Validation ---------------------------------------------------------
   const result = validate(body);
   if (!result.ok) {
     console.warn(`${result.error} (ip=${ip}) ${tag}`);
     send(res, 400, { error: result.error, userMessage: result.userMessage });
+    return;
+  }
+
+  // --- Rate limit (valid submissions only) --------------------------------
+  const until = await isRateLimited(ip, Date.now());
+  if (until) {
+    console.warn(`rate limit: ip=${ip} exceeded ${RATE_LIMIT_MAX}/hour ${tag}`);
+    sendLimited(res, until, "You've sent a lot from here in the last hour. Your text is still in the form.");
     return;
   }
 

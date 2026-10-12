@@ -57,34 +57,23 @@ test('honeypot returns a 201-shaped success but files nothing', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Rate limiting — must run BEFORE validation
+// Rate limiting — counts only submissions that validate
 // ---------------------------------------------------------------------------
 
-test('limiter runs before validation: invalid payloads still consume budget', async () => {
+test('invalid payloads never consume the budget', async () => {
   const ip = freshIp();
-  const statuses = [];
-  for (let i = 0; i < 6; i++) {
-    const r = await call({ ip, body: { bogus: 1 } }); // never valid
-    statuses.push(r.status);
-  }
-  assert.deepEqual(statuses, [400, 400, 400, 400, 400, 429],
-    'five rejections then a 429 — proves the limiter precedes validation');
+  for (let i = 0; i < 150; i++) assert.equal((await call({ ip, body: { bogus: 1 } })).status, 400);
+  assert.equal((await call({ ip, body: { ...VALID } })).status, 201);
 });
 
-test('a limited caller is refused before any issue can be filed', async () => {
+test('100 valid submissions an hour per IP; the 101st is refused before any issue, and says when', async () => {
   const ip = freshIp();
-  for (let i = 0; i < 5; i++) await call({ ip, body: { ...VALID } });
+  for (let i = 0; i < 100; i++) assert.equal((await call({ ip, body: { ...VALID } })).status, 201, `submission ${i + 1}`);
   const r = await call({ ip, body: { ...VALID } });
   assert.equal(r.status, 429);
   assert.equal(r.issue, null);
-});
-
-test('the 429 does not echo the caller IP back', async () => {
-  const ip = freshIp();
-  for (let i = 0; i < 5; i++) await call({ ip, body: { bogus: 1 } });
-  const r = await call({ ip, body: { bogus: 1 } });
-  assert.equal(r.status, 429);
   assert.equal(r.payload.error, 'rate limit exceeded');
+  assert.match(r.payload.userMessage, /Your text is still in the form\. Please try again in about (a minute|\d+ minutes)\./);
   assert.ok(!JSON.stringify(r.payload).includes(ip), 'response must not replay the IP');
 });
 
