@@ -244,7 +244,7 @@ GitHub-style editor on the book's own page. This is its back end.
   identity token, never the IP, so a class on one network never shares a budget),
   counted only once a proposal validates and checked before any GitHub call. The book's
   authors (registry `authors`) and the platform maintainer are exempt. The anonymous
-  path (off) is keyed by IP at the same 100. 300 source reads per hour per IP.
+  path (off) is keyed by IP at the same 100. 300 source reads per hour per IP (a page kept ahead in KV doesn't count: it asks GitHub nothing).
   400,000 characters per page, 20,000 per paragraph; one shared 20s GitHub budget per
   request (`maxDuration` 25s).
 

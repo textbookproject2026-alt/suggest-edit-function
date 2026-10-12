@@ -503,12 +503,6 @@ async function fileFallbackIssue(book, token, left, current, data) {
 // ---------------------------------------------------------------------------
 
 async function handleGet(req, res, book, tag) {
-  const ip = clientIp(req);
-  const until = await readLimited(ip, Date.now());
-  if (until) {
-    sendLimited(res, until, 'Too many pages opened for editing from here in the last hour.');
-    return;
-  }
   const params = new URL(req.url ?? '/', 'https://local.invalid').searchParams;
   const path = asString(params.get('path'));
   if (!path || !isSafePath(path)) {
@@ -520,6 +514,13 @@ async function handleGet(req, res, book, tag) {
   if (kept) {
     res.setHeader('Cache-Control', 'no-store');
     send(res, 200, { path, branch: kept.branch, sha: kept.sha, content: kept.text, signIn: SIGN_IN });
+    return;
+  }
+  // Only what asks GitHub counts against the limit.
+  const ip = clientIp(req);
+  const until = await readLimited(ip, Date.now());
+  if (until) {
+    sendLimited(res, until, 'Too many pages opened for editing from here in the last hour.');
     return;
   }
   const credential = await CREDENTIALS.acquire(book, tag);

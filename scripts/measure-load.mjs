@@ -75,11 +75,14 @@ const statuses = [];
 const versions = new Set();
 for (let pass = 0; pass < 4; pass++) {
   const list = requests();
-  // A different route first each round, so each gets to be an isolate's very first.
-  const shift = Number(round) % list.length;
-  // A fresh isolate's very first request: a path with no route, so its CPU is the
-  // isolate's start alone (logged cold=1); every route after it then loads (load=1).
-  const first = pass === 0 ? [['GET', '/api/nope', {}]] : [];
+  // Odd rounds: a fresh isolate's very first request is a path with no route, so its
+  // CPU is the isolate's start alone (logged cold=1); every route after it then loads
+  // (load=1). Even rounds: a read route is that very first request instead, each in
+  // turn, so the reads are measured cold too.
+  const reads = list.map((r, i) => (r[0] === 'GET' && /\/api\/(history|page-revision|propose-edit)/.test(r[1]) && i < 9 ? i : -1)).filter((i) => i >= 0);
+  const even = Number(round) % 2 === 0;
+  const shift = even ? reads[(Number(round) / 2) % reads.length] : Number(round) % list.length;
+  const first = pass === 0 && !even ? [['GET', '/api/nope', {}]] : [];
   if (pass === 1 && process.env.NOTES === '1') list.push(note());
   for (const [method, p, headers, body] of [...first, ...list.slice(shift), ...list.slice(0, shift)]) {
     const res = await fetch(base + p, { method, headers, body, redirect: 'manual' });
