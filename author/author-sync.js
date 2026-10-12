@@ -22,6 +22,10 @@ const appToken = appCredentials({ contents: 'write', pull_requests: 'write' });
 const perBook = createRateLimiter(20, 60 * 60 * 1000, 'sync-book');
 const overall = createRateLimiter(100, 60 * 60 * 1000, 'sync-all');
 const ID_RE = /^m-[0-9a-f]{10}$/;
+// Control and format characters (Unicode Cc and Cf) and the line/paragraph separators,
+// spelled out: the same set as /[\p{Cc}\p{Cf}\u2028\u2029]/u (checked over every code
+// point), without loading Unicode property tables on a fresh isolate's first sync.
+const CONTROL = /[\u0000-\u001f\u007f-\u009f\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\u{110bd}\u{110cd}\u{13430}-\u{1343f}\u{1bca0}-\u{1bca3}\u{1d173}-\u{1d17a}\u{e0001}\u{e0020}-\u{e007f}]/gu;
 const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
 
 /** The author site's public list for a book, checked hard: ids, names, logins only. */
@@ -31,7 +35,7 @@ export async function membersOf(slug, fetchImpl = fetch) {
   const d = await res.json();
   // Names go into the public registry: cleaned again here (control, bidi and
   // zero-width characters out), whatever the author site already did.
-  const clean = (n) => (typeof n === 'string' ? n.replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 80) : '');
+  const clean = (n) => (typeof n === 'string' ? n.replace(CONTROL, '').replace(/\s+/g, ' ').trim().slice(0, 80) : '');
   const members = (d.members ?? []).map((m) => ({ id: m?.id ?? '', name: clean(m?.name) }))
     .filter((m) => ID_RE.test(m.id) && m.name && !m.name.includes('@'));
   const logins = (list) => [...new Set((list ?? []).filter((l) => typeof l === 'string' && LOGIN_RE.test(l)))];
@@ -131,9 +135,11 @@ export default async function handler(req, res) {
     const left = budget(25_000);
     const people = await membersOf(slug);
     if (!people.members.length) return send(res, 409, { error: 'no members', userMessage: 'The author site lists nobody on this book; nothing synced.' });
-    const matches = (entry) => isDeepStrictEqual(entry.members ?? null, people.members)
-      && isDeepStrictEqual(entry.authors ?? [], people.authors)
-      && isDeepStrictEqual(entry.mentions_off ?? [], people.mentionsOff);
+    // Plain JSON on both sides (ids, names, logins), so their text is a fair comparison.
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const matches = (entry) => same((entry.members ?? null)?.map((m) => ({ id: m.id, name: m.name })) ?? null, people.members)
+      && same(entry.authors ?? [], people.authors)
+      && same(entry.mentions_off ?? [], people.mentionsOff);
     credential = await registryCredential(appToken, tag);
     const token = credential.token;
     const branch = `people/${slug}/sync`;
