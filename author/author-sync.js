@@ -13,8 +13,8 @@
  *   -> 200 { inSync: true } | { number, url, updated: boolean }
  */
 import { isDeepStrictEqual } from 'node:util';
-import { REGISTRY, Refusal, appCredentials, budget, encodePath, fail, gh, ghJson } from '../lib/author.mjs';
-import { createRateLimiter, parseBody, send } from '../lib/common.mjs';
+import { REGISTRY, Refusal, appCredentials, budget, encodePath, fail, gh, graphqlRepo } from '../lib/author.mjs';
+import { createRateLimiter, fieldsOf, parseBody, send } from '../lib/common.mjs';
 import { REGISTRY_REPO, registryCredential } from '../lib/author-people.mjs';
 import { AUTHOR_SITE_ORIGIN } from '../lib/member.mjs';
 
@@ -22,6 +22,10 @@ const appToken = appCredentials({ contents: 'write', pull_requests: 'write' });
 const perBook = createRateLimiter(20, 60 * 60 * 1000, 'sync-book');
 const overall = createRateLimiter(100, 60 * 60 * 1000, 'sync-all');
 const ID_RE = /^m-[0-9a-f]{10}$/;
+// Control and format characters (Unicode Cc and Cf) and the line/paragraph separators,
+// spelled out: the same set as /[\p{Cc}\p{Cf}\u2028\u2029]/u (checked over every code
+// point), without loading Unicode property tables on a fresh isolate's first sync.
+const CONTROL = /[\u0000-\u001f\u007f-\u009f\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\u{110bd}\u{110cd}\u{13430}-\u{1343f}\u{1bca0}-\u{1bca3}\u{1d173}-\u{1d17a}\u{e0001}\u{e0020}-\u{e007f}]/gu;
 const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
 
 /** The author site's public list for a book, checked hard: ids, names, logins only. */
@@ -31,7 +35,7 @@ export async function membersOf(slug, fetchImpl = fetch) {
   const d = await res.json();
   // Names go into the public registry: cleaned again here (control, bidi and
   // zero-width characters out), whatever the author site already did.
-  const clean = (n) => (typeof n === 'string' ? n.replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 80) : '');
+  const clean = (n) => (typeof n === 'string' ? n.replace(CONTROL, '').replace(/\s+/g, ' ').trim().slice(0, 80) : '');
   const members = (d.members ?? []).map((m) => ({ id: m?.id ?? '', name: clean(m?.name) }))
     .filter((m) => ID_RE.test(m.id) && m.name && !m.name.includes('@'));
   const logins = (list) => [...new Set((list ?? []).filter((l) => typeof l === 'string' && LOGIN_RE.test(l)))];
@@ -95,14 +99,21 @@ export function withBookPeople(text, registry, slug, { authors, members, mention
   return out;
 }
 
+/** The sync pull request still open for `branch`, if any: number and URL only (one small query). */
+async function openSync(branch, token, left) {
+  const r = await graphqlRepo(REGISTRY_REPO, `query($owner: String!, $name: String!, $branch: String!) { repository(owner: $owner, name: $name) {
+    pullRequests(headRefName: $branch, states: OPEN, first: 5) { nodes { number url } } } }`, { branch }, token, left);
+  return (r.pullRequests?.nodes ?? []).map((n) => ({ number: n.number, html_url: n.url }));
+}
+
+/** main's head, its tree and registry.json's text, in one query (was four REST calls). */
 async function registryAtMain(token, left) {
-  const ref = await ghJson(`/repos/${REGISTRY_REPO}/git/ref/heads/main`, token, left);
-  const commit = await ghJson(`/repos/${REGISTRY_REPO}/git/commits/${ref.object.sha}`, token, left);
-  const tree = await ghJson(`/repos/${REGISTRY_REPO}/git/trees/${commit.tree.sha}`, token, left);
-  const entry = (tree?.tree ?? []).find((e) => e.path === 'registry.json');
-  const blob = await ghJson(`/repos/${REGISTRY_REPO}/git/blobs/${entry.sha}`, token, left);
-  const text = Buffer.from(blob.content.replace(/\s+/g, ''), 'base64').toString('utf8');
-  return { head: ref.object.sha, tree: commit.tree.sha, text, registry: JSON.parse(text) };
+  const r = await graphqlRepo(REGISTRY_REPO, `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {
+    ref(qualifiedName: "refs/heads/main") { target { oid ... on Commit { tree { oid } file(path: "registry.json") { object { ... on Blob { text } } } } } } } }`, {}, token, left);
+  const t = r.ref?.target;
+  const text = t?.file?.object?.text;
+  if (typeof text !== 'string') throw new Error('registry.json not readable on main');
+  return { head: t.oid, tree: t.tree.oid, text, registry: JSON.parse(text) };
 }
 
 export default async function handler(req, res) {
@@ -124,40 +135,42 @@ export default async function handler(req, res) {
     const left = budget(25_000);
     const people = await membersOf(slug);
     if (!people.members.length) return send(res, 409, { error: 'no members', userMessage: 'The author site lists nobody on this book; nothing synced.' });
-    const matches = (entry) => isDeepStrictEqual(entry.members ?? null, people.members)
-      && isDeepStrictEqual(entry.authors ?? [], people.authors)
-      && isDeepStrictEqual(entry.mentions_off ?? [], people.mentionsOff);
+    // Plain JSON on both sides (ids, names, logins), so their text is a fair comparison.
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const matches = (entry) => same((entry.members ?? null)?.map((m) => ({ id: m.id, name: m.name })) ?? null, people.members)
+      && same(entry.authors ?? [], people.authors)
+      && same(entry.mentions_off ?? [], people.mentionsOff);
     credential = await registryCredential(appToken, tag);
     const token = credential.token;
     const branch = `people/${slug}/sync`;
-    const open = await ghJson(`/repos/${REGISTRY_REPO}/pulls?state=open&head=${encodeURIComponent(`${REGISTRY_REPO.split('/')[0]}:${branch}`)}`, token, left);
+    const open = await openSync(branch, token, left);
     // Anyone can ask for a sync, so the common case costs one GitHub call: the
     // registry this deployment was built with already says this, and no sync pull
     // request is open (one open could carry an older list, so it is always checked).
-    if (!open?.length && matches(book)) return send(res, 200, { inSync: true });
+    if (!open.length && matches(book)) return send(res, 200, { inSync: true });
     const main = await registryAtMain(token, left);
     const entry = main.registry.books.find((b) => b.slug === slug);
     if (matches(entry)) {
       // Main already says this: a sync pull request still open is out of date.
-      for (const pr of open ?? []) await ghJson(`/repos/${REGISTRY_REPO}/pulls/${pr.number}`, token, left, { method: 'PATCH', body: { state: 'closed' } });
+      for (const pr of open) await gh(`/repos/${REGISTRY_REPO}/pulls/${pr.number}`, token, left, { method: 'PATCH', body: { state: 'closed' } });
       return send(res, 200, { inSync: true });
     }
     const text = withBookPeople(main.text, main.registry, slug, people);
-    const blob = await ghJson(`/repos/${REGISTRY_REPO}/git/blobs`, token, left, { method: 'POST', body: { content: text, encoding: 'utf-8' } });
-    const tree = await ghJson(`/repos/${REGISTRY_REPO}/git/trees`, token, left, { method: 'POST', body: { base_tree: main.tree, tree: [{ path: 'registry.json', mode: '100644', type: 'blob', sha: blob.sha }] } });
+    // The text inline in the tree: no blob call.
+    const tree = await fieldsOf(await gh(`/repos/${REGISTRY_REPO}/git/trees`, token, left, { method: 'POST', body: { base_tree: main.tree, tree: [{ path: 'registry.json', mode: '100644', type: 'blob', content: text }] } }), ['sha']);
     const subject = `${slug}: people from the author site`;
-    const commit = await ghJson(`/repos/${REGISTRY_REPO}/git/commits`, token, left, { method: 'POST', body: { message: subject, tree: tree.sha, parents: [main.head] } });
+    const commit = await fieldsOf(await gh(`/repos/${REGISTRY_REPO}/git/commits`, token, left, { method: 'POST', body: { message: subject, tree: tree.sha, parents: [main.head] } }), ['sha']);
     const moved = await gh(`/repos/${REGISTRY_REPO}/git/refs/heads/${encodePath(branch)}`, token, left, { method: 'PATCH', body: { sha: commit.sha, force: true }, allow: [404, 422] });
-    if (!moved.ok) await ghJson(`/repos/${REGISTRY_REPO}/git/refs`, token, left, { method: 'POST', body: { ref: `refs/heads/${branch}`, sha: commit.sha } });
-    if (open?.length) {
+    if (!moved.ok) await gh(`/repos/${REGISTRY_REPO}/git/refs`, token, left, { method: 'POST', body: { ref: `refs/heads/${branch}`, sha: commit.sha } });
+    if (open.length) {
       console.log(`sync: updated #${open[0].number} ${tag}`);
       return send(res, 200, { number: open[0].number, url: open[0].html_url, updated: true });
     }
-    const pr = await ghJson(`/repos/${REGISTRY_REPO}/pulls`, token, left, { method: 'POST', body: {
+    const pr = await fieldsOf(await gh(`/repos/${REGISTRY_REPO}/pulls`, token, left, { method: 'POST', body: {
       title: subject, head: branch, base: 'main',
       body: [`The people on **${entry.title}**, as the author site has them: ${people.members.length} member${people.members.length === 1 ? '' : 's'} (ids and display names; emails are never in the registry), the GitHub logins still linked (\`authors\`) and who has reader-suggestion emails off (\`mentions_off\`).`, '',
         'Access already follows the author site; this is the public record. It merges by itself once the registry\'s checks are green, and later changes update this pull request.'].join('\n'),
-    } });
+    } }), ['number', 'html_url', 'node_id']);
     await gh('/graphql', token, left, { method: 'POST', body: {
       query: 'mutation($id: ID!) { enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: SQUASH }) { pullRequest { number } } }',
       variables: { id: pr.node_id },

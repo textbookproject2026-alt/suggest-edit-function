@@ -71,9 +71,28 @@ const note = () => ['POST', '/api/suggest-edit?mode=note', { Origin: `https://${
   suggestion: `A measurement of the API's CPU (round ${round}): please ignore, it is closed and labelled platform-test afterwards.`,
 })];
 
+// FOCUS=1: only reader names (first, so it is this isolate's first load) and the people
+// sync, which answers "in sync" without writing unless the author site's list changed.
+// Rotates books: author-sync allows 20 an hour per book.
+const live = BUNDLE.registry.books.filter((b) => b.status !== 'retired');
+const focus = () => [
+  ['GET', `/api/page-revision?book=${slug}&shas=${shas}&${fresh()}`, { Origin: origin }],
+  ['POST', '/api/author-sync', { ...json }, JSON.stringify({ book: live[Number(round) % live.length].slug })],
+];
+
 const statuses = [];
 const versions = new Set();
-for (let pass = 0; pass < 4; pass++) {
+for (let pass = 0; pass < (process.env.FOCUS === '1' ? 1 : 4); pass++) {
+  if (process.env.FOCUS === '1') {
+    for (const [method, p, headers, body] of focus()) {
+      const res = await fetch(base + p, { method, headers, body, redirect: 'manual' });
+      await res.arrayBuffer();
+      statuses.push(`${method} ${p.split('?')[0]} ${res.status}`);
+      versions.add(res.headers.get('x-worker-version'));
+      await sleep(GAP_MS);
+    }
+    continue;
+  }
   const list = requests();
   // Odd rounds: a fresh isolate's very first request is a path with no route, so its
   // CPU is the isolate's start alone (logged cold=1); every route after it then loads

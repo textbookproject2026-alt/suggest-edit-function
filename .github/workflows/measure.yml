@@ -19,6 +19,10 @@ on:
         description: One real note per round on the platform test book (close and label them platform-test afterwards)
         type: boolean
         default: false
+      focus:
+        description: Only reader names (first load) and author-sync, one each per fresh version; up to 45 rounds
+        type: boolean
+        default: false
       record_minutes:
         description: Only record (no deploys, no traffic) for this many minutes, up to 35, while someone uses the Worker by hand
         default: '0'
@@ -81,9 +85,11 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           ROUNDS: ${{ inputs.rounds }}
           NOTES: ${{ inputs.notes && '1' || '0' }}
+          FOCUS: ${{ inputs.focus && '1' || '0' }}
         run: |
           set -euo pipefail
-          rounds=$(( ROUNDS > 20 ? 20 : ROUNDS ))
+          max=$([ "$FOCUS" = 1 ] && echo 45 || echo 20)
+          rounds=$(( ROUNDS > max ? max : ROUNDS ))
           for round in $(seq "$rounds"); do
             # Up to three tries: Cloudflare's API sometimes answers an upload with a
             # malformed response (12 Oct), which shouldn't end the whole measurement.
@@ -97,8 +103,8 @@ jobs:
             npx -y "$WRANGLER" versions deploy "${version}@100%" --yes --message "measure ${round}/${rounds}" > /dev/null
             # A fixed wait, not a poll: a poll would be each fresh isolate's first request,
             # and that request's cost (cold=1) is what the round's first route measures.
-            sleep 20
-            EXPECT="$version" SENT_FILE="$RUNNER_TEMP/sent" node scripts/measure-load.mjs "$BASE" "$round"
+            sleep $([ "$FOCUS" = 1 ] && echo 10 || echo 20)
+            FOCUS="$FOCUS" EXPECT="$version" SENT_FILE="$RUNNER_TEMP/sent" node scripts/measure-load.mjs "$BASE" "$round"
           done
       - name: Summary
         if: always()
