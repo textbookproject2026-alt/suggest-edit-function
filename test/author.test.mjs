@@ -247,6 +247,18 @@ test('send: one commit on drafts, parent = base, the author as author, the App a
   assert.equal(gh.repo(REPO).refs.get(LIVE), BASE, 'the live branch is never touched');
 });
 
+test('send: text goes inline in the tree; a one-file send is four GitHub calls', async () => {
+  resetBook();
+  const before = gh.state.calls.length;
+  const r = await call(sendEp, { body: { book: BOOK.slug, base: BASE, files: [{ path: 'chapters/chapter-03.md', text: NEW3 }] } });
+  assert.equal(r.statusCode, 201, JSON.stringify(r.payload));
+  const calls = gh.state.calls.slice(before).filter((c) => c.url.startsWith('https://api.github.com/') && !c.url.includes('/access_tokens') && !c.url.endsWith('/installation'))
+    .map((c) => `${c.method} ${new URL(c.url).pathname.replace(/^\/repos\/[^/]+\/[^/]+/, '')}`);
+  assert.deepEqual(calls, ['POST /graphql', 'POST /git/trees', 'POST /git/commits', `PATCH /git/refs/heads/${DRAFTS}`]);
+  const tree = gh.state.calls.find((c, i) => i >= before && c.url.endsWith('/git/trees'));
+  assert.equal(tree.body.tree[0].content, NEW3);
+});
+
 test('send: a delete, and nothing-to-send when drafts already has exactly this', async () => {
   resetBook();
   const same = await call(sendEp, { body: { book: BOOK.slug, base: BASE, files: [{ path: 'chapters/chapter-03.md', text: CH3 }] } });

@@ -5,13 +5,15 @@
  * (the route's first in the isolate, which loads its code), cache=hit and the
  * subrequest count.
  *
- *   node scripts/cpu-summary.mjs tail.jsonl [limitMs]
+ *   node scripts/cpu-summary.mjs tail.jsonl [limitMs] [sent]
  *
- * Exits 1 when any route's p95 is at or over limitMs (default 8).
+ * Exits 1 when any route's p95 is at or over limitMs (default 8), and 2 when the tail
+ * kept under 95% of `sent` (it samples when requests come too fast).
  */
 import { readFileSync } from 'node:fs';
 
-const [file, limitArg] = process.argv.slice(2);
+const [file, limitArg, sentArg] = process.argv.slice(2);
+const sent = Number(sentArg ?? 0); // requests the load sent (measure-load's SENT_FILE), 0: unknown
 const LIMIT = Number(limitArg ?? 8);
 
 // Split the stream into top-level objects (tail pretty-prints each event).
@@ -57,4 +59,9 @@ for (const key of [...new Set(rows.map((r) => r.key))].sort()) {
 const widths = out[0].map((_, i) => Math.max(...out.map((r) => String(r[i]).length)));
 for (const r of out) console.log(r.map((v, i) => String(v).padEnd(widths[i])).join('  '));
 console.log(`${rows.length} requests; p95 limit ${LIMIT} ms: ${over ? `${over} route(s) at or over` : 'all under'}.`);
+// A tail that sampled: the numbers describe whatever it kept, so the run is not usable.
+if (sent && rows.length < sent * 0.95) {
+  console.log(`::error::The tail captured ${rows.length} of the ${sent} requests sent (sampling): these numbers are not reliable.`);
+  process.exit(2);
+}
 process.exit(over ? 1 : 0);

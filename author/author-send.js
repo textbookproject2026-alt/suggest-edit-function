@@ -28,7 +28,7 @@
  * chapter-sources.json. Anything else, or any traversal, refuses the whole send.
  */
 import {
-  REQUESTS_BOOK, SHA_RE, Refusal, appCredentials, authorise, blobBytes, bookFor, budget, byline, commitToDrafts, fail,
+  REQUESTS_BOOK, SHA_RE, Refusal, appCredentials, authorise, blobBytes, blobTexts, bookFor, isTextPath, budget, byline, commitToDrafts, fail,
   ghJson, isAuthorPath, limits, wrap,
 } from '../lib/author.mjs';
 import { asString, isJsonContentType, parseBody, send } from '../lib/common.mjs';
@@ -85,9 +85,13 @@ async function importWrites(book, identity, id, left, tag, used) {
   const result = checkedResult(imp);
   if (!result) throw new Refusal(409, 'import not ready', 'That import is still being converted.');
   if (!result.ok) throw new Refusal(409, 'import failed', result.error || 'That import could not be converted.');
+  // Text in one query; anything else (pictures) byte for byte.
+  const shaOf = (w) => imp.files.get(stagedAt(w.staged)).sha;
+  const texts = await blobTexts(REQUESTS_BOOK.content.repo, result.writes.filter((w) => isTextPath(w.path)).map(shaOf), req.token, left);
   const writes = [];
   for (const w of result.writes) {
-    const bytes = await blobBytes(REQUESTS_BOOK.content.repo, imp.files.get(stagedAt(w.staged)).sha, req.token, left);
+    const text = texts.get(shaOf(w));
+    const bytes = text !== undefined ? Buffer.from(text, 'utf8') : await blobBytes(REQUESTS_BOOK.content.repo, shaOf(w), req.token, left);
     writes.push({ path: w.path, bytes });
   }
   return { result, writes, deletes: result.deletes ?? [] };

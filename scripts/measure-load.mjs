@@ -5,8 +5,15 @@
  * reads carry a fresh `_m` so no cache answers them: their full cost is measured.
  * Nothing here writes anything: suggestion and request bodies carry the honeypot.
  *
+ *
+ * Paced (GAP_MS, default 400 ms between requests): sent back to back (~25 a second),
+ * `wrangler tail` samples and kept only about a third of them (11 Oct). The count sent
+ * is added to SENT_FILE, so the summary can tell a complete capture from a sampled one.
+ *
  *   node scripts/measure-load.mjs <base> [round]
  */
+import { appendFileSync } from 'node:fs';
+import { setTimeout as sleep } from 'node:timers/promises';
 import BUNDLE from '../registry/bundled.mjs';
 
 const [base, round = '0'] = process.argv.slice(2);
@@ -17,6 +24,7 @@ const author = 'https://author.confused4now.org';
 const slug = book.slug;
 const others = BUNDLE.registry.books.filter((b) => b.status !== 'retired' && b.site?.domain && b.slug !== slug);
 const json = { 'Content-Type': 'application/json' };
+const GAP_MS = Number(process.env.GAP_MS ?? 400);
 
 const gh = async (path) => (await fetch(`https://api.github.com${path}`, {
   headers: { Accept: 'application/vnd.github+json', ...(process.env.GITHUB_TOKEN ? { Authorization: `Bearer ${process.env.GITHUB_TOKEN}` } : {}) },
@@ -62,8 +70,10 @@ for (let pass = 0; pass < 4; pass++) {
     await res.arrayBuffer();
     statuses.push(`${method} ${p.split('?')[0]} ${res.status}`);
     versions.add(res.headers.get('x-worker-version'));
+    await sleep(GAP_MS);
   }
 }
+if (process.env.SENT_FILE) appendFileSync(process.env.SENT_FILE, `${statuses.length}\n`);
 console.log(`round ${round}: ${statuses.length} requests; ${[...new Set(statuses)].join(', ')}`);
 // The deploy may not have reached this data centre yet: then the round measured the old
 // version's warm isolates, which the summary can't tell apart. Say so.

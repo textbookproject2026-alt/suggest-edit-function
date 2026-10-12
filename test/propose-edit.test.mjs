@@ -33,7 +33,7 @@ function resetGitHub({ text = TEXT0, crlf = false } = {}) {
   const served = crlf ? text.replace(/\n/g, '\r\n') : text;
   Object.assign(gh, {
     text: served, sha: blobId(served), commit: COMMIT, refs: [], puts: [], pulls: [], issues: [],
-    deleted: [], labelled: [], putStatus: 200, prStatus: 201, calls: [],
+    deleted: [], labelled: [], putStatus: 200, prStatus: 201, calls: [], noBranch: false,
   });
 }
 resetGitHub();
@@ -48,6 +48,15 @@ globalThis.fetch = async (url, opts = {}) => {
   if (url === 'https://github.com/login/oauth/access_token') return json(200, { access_token: 'gho_secret' });
   if (url === 'https://api.github.com/user') return json(200, { login: 'ada-l', id: 42, name: 'Ada' });
   if (url.startsWith('https://api.github.com/applications/')) return { ok: true, status: 204 };
+  if (url === 'https://api.github.com/graphql') {
+    // The write's one read: drafts' head and the file in it.
+    const v = body.variables;
+    if (v.ref !== `refs/heads/${BASE}` || gh.noBranch) return json(200, { data: { repository: { ref: null } } });
+    const file = v.path === PATH ? { object: { oid: gh.sha, byteSize: gh.text.length, isBinary: false, isTruncated: false, text: gh.text } } : null;
+    // As GitHub: a path that isn't there is a NOT_FOUND error beside the null field.
+    const errors = file ? [] : [{ type: 'NOT_FOUND', path: ['repository', 'ref', 'target', 'file'], message: 'Could not resolve file' }];
+    return json(200, { data: { repository: { ref: { target: { oid: gh.commit, file } } } }, ...(errors.length ? { errors } : {}) });
+  }
   if (!url.startsWith(api)) throw new Error(`unexpected ${method} ${url}`);
   const rest = url.slice(api.length);
   if (method === 'GET' && rest === `/git/ref/heads/${BASE}`) return json(200, { object: { sha: gh.commit } });
@@ -446,6 +455,45 @@ test('setup problems tell the reader plainly: no drafts branch, and no usable cr
     const r = await call({ method: 'GET', url: `/api/propose-edit?path=${PATH}` });
     assert.equal(r.statusCode, 502);
     assert.match(r.payload.userMessage, /no drafts branch/);
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
+test('a proposal without a drafts branch: the same plain message, nothing written', async () => {
+  resetGitHub();
+  gh.noBranch = true;
+  const r = await call({ body: para() });
+  assert.equal(r.statusCode, 502);
+  assert.match(r.payload.userMessage, /no drafts branch/);
+  assert.equal(gh.refs.length, 0);
+});
+
+test('a signed-in proposal is five GitHub calls: read, branch, commit, pull request, labels', async () => {
+  resetGitHub();
+  const identity = issueIdentity(process.env.IDENTITY_SECRET, { login: 'ada-l', id: 42, name: 'Ada' }, ORIGIN);
+  const r = await call({ body: para({ name: '', email: '', identity }) });
+  assert.equal(r.statusCode, 201);
+  const calls = gh.calls.filter((c) => c.url.startsWith('https://api.github.com/')).map((c) => `${c.method} ${c.url.replace(/^https:\/\/api\.github\.com(\/repos\/[^/]+\/[^/]+)?/, '')}`);
+  assert.deepEqual(calls, ['POST /graphql', 'POST /git/refs', `PUT /contents/${PATH}`, 'POST /pulls', 'POST /issues/7/labels']);
+  assert.equal(gh.puts[0].author.email, '42+ada-l@users.noreply.github.com', 'credit unchanged');
+});
+
+test('labels: added directly; a 422 for a missing label makes them once and tries again', async () => {
+  resetGitHub();
+  const saved = globalThis.fetch;
+  const made = [];
+  let first = true;
+  globalThis.fetch = async (url, opts = {}) => {
+    if (String(url).endsWith('/issues/7/labels') && first) { first = false; return json(422, { message: 'Validation Failed' }); }
+    if (String(url).endsWith(`/repos/${REPO}/labels`)) { made.push(JSON.parse(opts.body).name); return json(201, {}); }
+    return saved(url, opts);
+  };
+  try {
+    const r = await call({ body: para() });
+    assert.equal(r.statusCode, 201);
+    assert.deepEqual(made, ['proposed-edit', 'needs-triage']);
+    assert.equal(gh.labelled.length, 1, 'the retry labelled the PR');
   } finally {
     globalThis.fetch = saved;
   }

@@ -53,8 +53,8 @@ globalThis.fetch = async (url, opts = {}) => {
   if (opts.method === 'POST' && url.endsWith('/issues')) {
     lastIssue = JSON.parse(opts.body);
     const repositoryUrl = url.slice(0, -'/issues'.length);
-    return { ok: true, status: 201,
-             json: async () => ({ html_url: 'https://example.invalid/issues/1', repository_url: repositoryUrl }) };
+    const issue = { html_url: 'https://example.invalid/issues/1', repository_url: repositoryUrl };
+    return { ok: true, status: 201, json: async () => issue, text: async () => JSON.stringify(issue) };
   }
   // Label lookups: pretend both labels already exist.
   return { ok: true, status: 200, json: async () => ({}), text: async () => '' };

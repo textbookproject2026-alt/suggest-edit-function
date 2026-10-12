@@ -37,7 +37,7 @@
 import BUNDLE from '../registry/bundled.mjs';
 import { validateRegistry, createResolver } from '../lib/registry.mjs';
 import {
-  GITHUB_API, asString, clientIp, corsHeaders, createCredentials, createRateLimiter, ensureLabels, sendLimited,
+  GITHUB_API, asString, clientIp, corsHeaders, createCredentials, createRateLimiter, fieldsOf, sendLimited, withLabels,
   fence, fileUrl, githubFetch, inlineCode, isJsonContentType, isSafePath, parseBody,
   resolveBook as resolveBookWith, send,
   AUTHOR_SITE,
@@ -203,15 +203,16 @@ function buildIssueBody(book, { name, suggestion, reasoning, path, paragraph, pa
 
 /** @returns {Promise<string>} the html_url of the new issue. */
 async function createIssue(book, token, data) {
-  const res = await githubFetch(`/repos/${book.content.repo}/issues`, {
+  const labels = data.paragraph ? [...LABELS, 'section-note'] : LABELS;
+  const res = await withLabels(book.content.repo, token, LABEL_DEFAULTS, () => githubFetch(`/repos/${book.content.repo}/issues`, {
     token,
     method: 'POST',
     body: {
       title: data.paragraph ? `Note on ¶${data.paragraph}: ${data.path}` : `Suggested edit: ${data.path}`,
       body: buildIssueBody(book, data),
-      labels: data.paragraph ? [...LABELS, 'section-note'] : LABELS,
+      labels,
     },
-  });
+  }), LABEL_BUDGET_MS);
 
   if (!res.ok) {
     // Read the body for the server log only — it never reaches the response.
@@ -227,7 +228,7 @@ async function createIssue(book, token, data) {
     throw err;
   }
 
-  const issue = await res.json();
+  const issue = await fieldsOf(res, ['html_url', 'repository_url']);
   if (!issue?.html_url) throw new Error('github issue creation returned no url');
 
   // Post-condition (DESIGN §3a.8): the issue must have landed on the resolved book's
@@ -365,7 +366,6 @@ async function handle(req, res) {
 
   // --- File the issue -----------------------------------------------------
   try {
-    await ensureLabels(book.content.repo, credential.token, LABEL_DEFAULTS, LABEL_BUDGET_MS);
     const issueUrl = await createIssue(book, credential.token, result.data);
     console.log(`created issue for "${result.data.path}" — ${issueUrl} (credential=${credential.kind}) ${tag}`);
     await notifyAuthors(book.slug, issueUrl);

@@ -35,9 +35,9 @@
  */
 import { lintAt, lintWords } from '../lib/lint-job.mjs';
 import {
-  SHA_RE, Refusal, appCredentials, authorise, bookFor, budget, byline, fail, ghJson, limits, wrap,
+  SHA_RE, Refusal, appCredentials, authorise, bookFor, budget, byline, fail, gh, ghJson, limits, wrap,
 } from '../lib/author.mjs';
-import { ensureLabels, isJsonContentType, parseBody, send } from '../lib/common.mjs';
+import { isJsonContentType, parseBody, send, withLabels } from '../lib/common.mjs';
 import { COMMENT_MIN, cleanText, commentOf, declineComment, isDeclined, kindOf, memberComment } from '../lib/declined.mjs';
 import {
   ACCEPTED, ACCEPTED_LABEL, NEEDS_TRIAGE, PUBLISH_STATE_WORDS, PUBLISH_TITLE, PUBLISHED_STEPS, checkReply, declined,
@@ -146,9 +146,9 @@ async function suggestionAccept(book, body, ctx) {
   checkReply(reply);
   await comment(book, token, left, s.number, reply);
   await dropLabel(book, token, left, s.number, NEEDS_TRIAGE, tag);
-  await ensureLabels(book.content.repo, token, ACCEPTED_LABEL, 2500);
   try {
-    await ghJson(`/repos/${book.content.repo}/issues/${s.number}/labels`, token, left, { method: 'POST', body: { labels: [ACCEPTED] } });
+    await withLabels(book.content.repo, token, ACCEPTED_LABEL, () => gh(`/repos/${book.content.repo}/issues/${s.number}/labels`, token, left, { method: 'POST', body: { labels: [ACCEPTED] }, allow: [404, 422] }), 2500)
+      .then((r) => { if (!r.ok) throw new Error(`status ${r.status}`); });
   } catch (err) {
     console.error(`suggestion #${s.number}: accepted label failed — ${err.message} ${tag}`);
     return { done: true, steps: ['A thank-you was sent, saying you will make the change by hand.'],

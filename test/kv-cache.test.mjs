@@ -40,25 +40,35 @@ test('kv cache: KV failing (the daily write limit included) is never fatal', asy
   assert.deepEqual(await kept('d', 90_000, async () => ['no KV at all']), ['no KV at all']);
 });
 
-test('labels: checked once a day per repository, and not remembered when a check fell short', async () => {
-  const { ensureLabels } = await import('../lib/common.mjs');
+test('labels: no check first; a 404/422 makes them once and the write is tried again', async () => {
+  const { withLabels } = await import('../lib/common.mjs');
   const saved = globalThis.fetch;
   const calls = [];
-  let fail = true;
-  globalThis.fetch = async (url) => { calls.push(String(url)); return new Response('{}', { status: fail ? 500 : 200 }); };
+  globalThis.fetch = async (url) => { calls.push(String(url)); return new Response('{}', { status: 422 }); };
   const warn = console.warn;
   console.warn = () => {};
   try {
     const defaults = { 'suggested-edit': {}, 'needs-triage': {} };
-    await ensureLabels('o/labels-test', 't', defaults, 5000);
-    assert.equal(calls.length, 2);
-    fail = false;
-    await ensureLabels('o/labels-test', 't', defaults, 5000);
-    assert.equal(calls.length, 4, 'a failed check is not remembered');
-    await ensureLabels('o/labels-test', 't', defaults, 5000);
-    assert.equal(calls.length, 4, 'a good one is');
+    let writes = 0;
+    const ok = await withLabels('o/labels-test', 't', defaults, async () => new Response('{}', { status: ++writes === 1 ? 201 : 500 }));
+    assert.equal(ok.status, 201);
+    assert.equal(calls.length, 0, 'a write that worked costs nothing more');
+    writes = 0;
+    const again = await withLabels('o/labels-test', 't', defaults, async () => new Response('{}', { status: ++writes === 1 ? 422 : 201 }));
+    assert.equal(again.status, 201);
+    assert.equal(writes, 2);
+    assert.equal(calls.length, 2, 'each label made once (422 = it was there already)');
   } finally {
     globalThis.fetch = saved;
     console.warn = warn;
   }
+});
+
+test('fieldsOf: top-level fields from GitHub-shaped answers, without a full parse', async () => {
+  const { fieldsOf } = await import('../lib/common.mjs');
+  const pr = '{"url":"https://api.github.com/repos/o/r/pulls/7","id":1,"node_id":"x","html_url":"https://github.com/o/r/pull/7","number":7,"title":"say \\"hi\\"","user":{"login":"a","html_url":"https://github.com/a"}}';
+  assert.deepEqual(await fieldsOf(new Response(pr), ['html_url', 'number']), { html_url: 'https://github.com/o/r/pull/7', number: 7 });
+  const tree = '{"sha":"aaa","url":"u","tree":[{"path":"p","sha":"bbb"}]}';
+  assert.deepEqual(await fieldsOf(new Response(tree), ['sha']), { sha: 'aaa' });
+  assert.deepEqual(await fieldsOf(new Response('{"other":1}'), ['sha']), { sha: undefined }, 'missing: the full parse says so');
 });
