@@ -6,7 +6,7 @@ export default {
   "registry": {
     "schema_version": 1,
     "platform": {
-      "suggest_edit_endpoint": "https://suggest-edit-function.vercel.app/api/suggest-edit",
+      "suggest_edit_endpoint": "https://api.confused4now.org/api/suggest-edit",
       "cms_auth_relay": "https://sveltia-cms-auth.brandonproject2026.workers.dev",
       "cms_auth_relay_scope": "repo,user",
       "edition_extras_repo": "textbookproject2026-alt/quartz-edition-extras",
