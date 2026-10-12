@@ -1,0 +1,60 @@
+# Works out ahead what the Worker's reads would otherwise work out per request (batch
+# 2d): each book's History lists, its "a reader" names and its editor pages, into the
+# c4n-api-cache KV namespace (scripts/refresh.mjs, lib/kv-cache.mjs). Writes only what
+# changed, then stamps the heartbeat that keeps it current for 45 minutes.
+#
+# Every 15 minutes (the backstop), after a book's build (quartz-book's reconcile-book
+# sends repository_dispatch book-built with the slug), and by hand. If it stops, the
+# Worker works each value out per request again, as before.
+name: refresh
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  repository_dispatch:
+    types: [book-built]
+  workflow_dispatch:
+    inputs:
+      slug:
+        description: One book only (empty = every book, and the heartbeat)
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: c4n-api-refresh
+  cancel-in-progress: false
+
+env:
+  WRANGLER: wrangler@4.142.0
+  WRANGLER_SEND_METRICS: 'false'
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Refresh
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_TOKEN }}
+          APP_KEY: ${{ secrets.SUGGEST_EDIT_APP_PRIVATE_KEY }}
+          SLUG: ${{ github.event.client_payload.slug || inputs.slug || '' }}
+        run: |
+          set -euo pipefail
+          [[ "$SLUG" =~ ^[a-z0-9-]{0,80}$ ]] || { echo "::error::Not a slug."; exit 1; }
+          npm ci
+          FUNCTION_SHA="$(git rev-parse HEAD)" npm run registry:bundle
+          scripts/cloudflare-bindings.sh
+          export CLOUDFLARE_ACCOUNT_ID CACHE_ID
+          CLOUDFLARE_ACCOUNT_ID="$(sed -n 's/^CLOUDFLARE_ACCOUNT_ID=//p' "$GITHUB_ENV" | tail -1)"
+          CACHE_ID="$(sed -n 's/^CACHE_ID=//p' "$GITHUB_ENV" | tail -1)"
+          GITHUB_APP_ID="$(sed -n 's/^GITHUB_APP_ID = "\([0-9]*\)"/\1/p' wrangler.toml)" \
+          GITHUB_APP_PRIVATE_KEY="$(printf '%s\n' "$APP_KEY" | base64 -w0)" \
+            node scripts/refresh.mjs $SLUG

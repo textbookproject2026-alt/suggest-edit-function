@@ -20,4 +20,5 @@ db_id="$(d1)"
 if [ -z "$db_id" ]; then npx -y "$WRANGLER" d1 create c4n-api > /dev/null; db_id="$(d1)"; fi
 [ -n "$kv_id" ] && [ -n "$cache_id" ] && [ -n "$db_id" ] || { echo "::error::Could not find or create the KV namespaces or the D1 database."; exit 1; }
 sed -i "s/\"TOKENS_ID\"/\"$kv_id\"/; s/\"CACHE_ID\"/\"$cache_id\"/; s/\"DB_ID\"/\"$db_id\"/" wrangler.toml
+echo "CACHE_ID=$cache_id" >> "$GITHUB_ENV"
 echo "KV c4n-api-tokens $kv_id, KV c4n-api-cache $cache_id, D1 c4n-api $db_id"

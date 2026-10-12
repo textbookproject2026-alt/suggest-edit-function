@@ -38,6 +38,7 @@ import {
   SHA_RE, Refusal, appCredentials, authorise, bookFor, budget, byline, fail, gh, ghJson, limits, wrap,
 } from '../lib/author.mjs';
 import { isJsonContentType, parseBody, send, withLabels } from '../lib/common.mjs';
+import { cacheKeys, forget } from '../lib/kv-cache.mjs';
 import { COMMENT_MIN, cleanText, commentOf, declineComment, isDeclined, kindOf, memberComment } from '../lib/declined.mjs';
 import {
   ACCEPTED, ACCEPTED_LABEL, NEEDS_TRIAGE, PUBLISH_STATE_WORDS, PUBLISH_TITLE, PUBLISHED_STEPS, checkReply, declined,
@@ -413,7 +414,10 @@ export default wrap(async (req, res) => {
   let credential;
   try {
     credential = await appToken(book, tag);
-    send(res, 200, await act(book, body, { token: credential.token, left: budget(22_000), identity: auth.identity, tag }));
+    const out = await act(book, body, { token: credential.token, left: budget(22_000), identity: auth.identity, tag });
+    // Declined, answered, commented: the History lists change.
+    await forget(...cacheKeys.lists(book.slug));
+    send(res, 200, out);
   } catch (err) {
     fail(res, err, tag, credential?.refused);
   }

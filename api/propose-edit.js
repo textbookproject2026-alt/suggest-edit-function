@@ -60,6 +60,7 @@ import {
 import { noreplyEmail, readIdentity, readIdentitySecret } from '../lib/identity.mjs';
 import { notifyAuthors } from '../lib/member.mjs';
 import { PLATFORM_OWNER } from '../lib/author-people.mjs';
+import { ahead, cacheKeys, forget } from '../lib/kv-cache.mjs';
 
 const REGISTRY = validateRegistry(BUNDLE.registry);
 const RESOLVER = createResolver(REGISTRY);
@@ -502,16 +503,24 @@ async function fileFallbackIssue(book, token, left, current, data) {
 // ---------------------------------------------------------------------------
 
 async function handleGet(req, res, book, tag) {
-  const ip = clientIp(req);
-  const until = await readLimited(ip, Date.now());
-  if (until) {
-    sendLimited(res, until, 'Too many pages opened for editing from here in the last hour.');
-    return;
-  }
   const params = new URL(req.url ?? '/', 'https://local.invalid').searchParams;
   const path = asString(params.get('path'));
   if (!path || !isSafePath(path)) {
     send(res, 400, { error: 'validation: path rejected', userMessage: 'We could not tell which page this is.' });
+    return;
+  }
+  // Kept ahead (scripts/refresh.mjs; a send to drafts forgets the pages it changed).
+  const kept = await ahead(cacheKeys.source(book.content.repo, baseBranch(book), path), 0, null);
+  if (kept) {
+    res.setHeader('Cache-Control', 'no-store');
+    send(res, 200, { path, branch: kept.branch, sha: kept.sha, content: kept.text, signIn: SIGN_IN });
+    return;
+  }
+  // Only what asks GitHub counts against the limit.
+  const ip = clientIp(req);
+  const until = await readLimited(ip, Date.now());
+  if (until) {
+    sendLimited(res, until, 'Too many pages opened for editing from here in the last hour.');
     return;
   }
   const credential = await CREDENTIALS.acquire(book, tag);
@@ -602,6 +611,7 @@ async function handlePost(req, res, book, origin, tag) {
       console.warn(`conflict: ${err.message}; filing an issue ${tag}`);
       const issueUrl = await fileFallbackIssue(book, credential.token, left, current, data);
       console.log(`fallback issue for "${data.path}" — ${issueUrl} ${tag}`);
+      await forget(...cacheKeys.lists(book.slug));
       await notifyAuthors(book.slug, issueUrl);
       send(res, 201, { issueUrl, fallback: true });
       return;
@@ -613,12 +623,14 @@ async function handlePost(req, res, book, origin, tag) {
     try {
       const prUrl = await openPullRequest(book, credential.token, left, current, newText, data, tag);
       console.log(`opened ${prUrl} for "${data.path}" (${data.mode}, ${data.identity ? `@${data.identity.login}` : 'anonymous'}, credential=${credential.kind}) ${tag}`);
+      await forget(...cacheKeys.lists(book.slug));
       await notifyAuthors(book.slug, prUrl);
       send(res, 201, { prUrl });
     } catch (err) {
       if (!(err instanceof Conflict)) throw err;
       console.warn(`conflict: ${err.message}; filing an issue ${tag}`);
       const issueUrl = await fileFallbackIssue(book, credential.token, left, current, data);
+      await forget(...cacheKeys.lists(book.slug));
       await notifyAuthors(book.slug, issueUrl);
       send(res, 201, { issueUrl, fallback: true });
     }
