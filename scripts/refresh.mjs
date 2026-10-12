@@ -24,9 +24,11 @@ const auth = { Authorization: `Bearer ${CLOUDFLARE_API_TOKEN}` };
 const appToken = appCredentials({ contents: 'read', pull_requests: 'read', issues: 'read' });
 const MAX_SOURCE_BYTES = 1024 * 1024; // propose-edit's: a larger page isn't kept, the GET says so itself
 const MAX_NAMES = 30; // page-revision's MAX_SHAS
-// New versions kept per run: ~1,000 KV writes a day in all, two per version, the
-// heartbeat 96. A book's whole history (hundreds of versions) fills over a few hours, once.
-const WARM_PER_RUN = 25;
+// New versions kept per run, across all books: free-plan KV allows 1,000 writes a day;
+// each version is two, plus the run's index write, and the heartbeat takes 96. Two a
+// run is ~580 writes a day while the platform's history fills (a few days, once; newest
+// first, live books first), then only new versions.
+const WARM_PER_RUN = 2;
 let writes = 0;
 let warmed = 0;
 
@@ -57,19 +59,6 @@ async function keep(key, value) {
   return true;
 }
 
-async function kvKeys(prefix) {
-  const out = new Set();
-  let cursor = '';
-  do {
-    const res = await fetch(`${KV}/keys?prefix=${encodeURIComponent(prefix)}&limit=1000${cursor ? `&cursor=${cursor}` : ''}`, { headers: auth });
-    if (!res.ok) throw new Error(`KV list: ${res.status}`);
-    const body = await res.json();
-    for (const k of body.result ?? []) out.add(k.name);
-    cursor = body.result_info?.cursor ?? '';
-  } while (cursor);
-  return out;
-}
-
 const historyOf = async (book) => {
   const res = await fetch(`https://${book.site.domain}/.well-known/history.json`);
   return res.ok ? res.json().catch(() => null) : null;
@@ -78,9 +67,12 @@ const historyOf = async (book) => {
 /** Show changes for each listed version not kept yet, worked out by page-revision itself, here. */
 async function versions(book, h) {
   const repo = book.content.repo;
-  const have = await kvKeys(`rev:${repo}:`);
-  const todo = (h?.pages ?? []).flatMap((p) => [...(p.published ?? []), ...(p.drafts ?? [])].map((e) => ({ sha: e.sha, path: e.path ?? p.source })))
-    .filter((v) => /^[0-9a-f]{40}$/.test(v.sha ?? '') && v.path && !have.has(revKey(repo, v.sha, v.path)));
+  // Which versions are kept: one small key, not a KV listing (1,000 a day on the free plan).
+  const indexKey = `rev-index:${repo}`;
+  const have = new Set((await kvGet(indexKey))?.value ?? []);
+  const todo = (h?.pages ?? []).flatMap((p) => [...(p.published ?? []), ...(p.drafts ?? [])].map((e) => ({ sha: e.sha, path: e.path ?? p.source, date: String(e.date ?? '') })))
+    .filter((v) => /^[0-9a-f]{40}$/.test(v.sha ?? '') && v.path && !have.has(`${v.sha}:${v.path}`))
+    .sort((a, b) => b.date.localeCompare(a.date));
   let done = 0;
   for (const v of todo) {
     if (warmed >= WARM_PER_RUN) break;
@@ -88,15 +80,17 @@ async function versions(book, h) {
     const url = `/api/page-revision?book=${encodeURIComponent(book.slug)}&sha=${v.sha}&path=${encodeURIComponent(v.path)}`;
     await pageRevision({ method: 'GET', url, query: Object.fromEntries(new URL(url, 'https://x.invalid').searchParams), headers: { 'x-forwarded-for': `10.0.${warmed >> 8}.${warmed & 255}` } }, res);
     warmed += 1;
-    if (res.statusCode !== 200) continue; // a version that isn't (or no longer) public: asked again next run
+    if (res.statusCode !== 200) continue; // a version that isn't public (yet): asked again next run
     const answer = JSON.parse(res.body);
     await kvPut([
       { key: revKey(repo, v.sha, v.path), value: res.body },
       { key: textKey(repo, v.sha, v.path), value: JSON.stringify({ branch: answer.branch, text: answer.after }) },
     ]);
+    have.add(`${v.sha}:${v.path}`);
     done += 1;
   }
-  return `${done} of ${todo.length} versions kept`;
+  if (done) await kvPut([{ ...entry([...have]), key: indexKey }]);
+  return `${done} kept, ${todo.length - done} to go`;
 }
 
 /** The names the book's History panels ask for: every "a reader" commit in its history.json. */
@@ -139,7 +133,9 @@ async function sources(book, token) {
   return `${pages.size} pages, ${written} written, ${gone.length} gone`;
 }
 
-const books = REGISTRY.books.filter((b) => b.status !== 'retired' && b.content?.repo && (!only || b.slug === only));
+// Live books first: their versions are the ones readers open.
+const books = REGISTRY.books.filter((b) => b.status !== 'retired' && b.content?.repo && (!only || b.slug === only))
+  .sort((a, b) => (b.status === 'live') - (a.status === 'live'));
 let failed = 0;
 for (const book of books) {
   const tag = `[refresh ${book.slug}]`;
