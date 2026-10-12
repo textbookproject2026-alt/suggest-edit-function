@@ -34,6 +34,10 @@ const gh = async (path) => (await fetch(`https://api.github.com${path}`, {
 })).json();
 const [c0, c1] = (await gh(`/repos/${book.content.repo}/commits?per_page=2&path=chapters`)).map((c) => c.sha);
 const path = (await gh(`/repos/${book.content.repo}/commits/${c0}`)).files.map((f) => f.filename).find((f) => /^chapters\/.*\.md$/.test(f));
+// The names a History panel asks for: its "a reader" commits (none: the two above).
+const built = await (await fetch(`${origin}/.well-known/history.json`)).json().catch(() => null);
+const readers = [...new Set((built?.pages ?? []).flatMap((p) => [...(p.published ?? []), ...(p.drafts ?? [])]).filter((e) => e.who === 'a reader').map((e) => e.sha))];
+const shas = (readers.length ? readers.slice(0, 30) : [c0, c1]).join(',');
 
 let n = 0;
 const fresh = () => `_m=${round}-${++n}`;
@@ -43,8 +47,10 @@ const requests = () => [
   ['POST', '/api/suggest-edit', { Origin: origin, ...json }, JSON.stringify({ name: 'measure', path: 'index.md', suggestion: 'A measurement, discarded.', website: 'x' })],
   ['GET', `/api/history?book=${slug}&${fresh()}`, { Origin: origin }],
   ['GET', `/api/history?book=${slug}&declined=1&${fresh()}`, { Origin: origin }],
-  ['GET', `/api/page-revision?book=${slug}&shas=${c0},${c1}&${fresh()}`, { Origin: origin }],
+  ['GET', `/api/page-revision?book=${slug}&shas=${shas}&${fresh()}`, { Origin: origin }],
   ['GET', `/api/page-revision?book=${slug}&sha=${c0}&path=${encodeURIComponent(path)}&base=${c1}&${fresh()}`, { Origin: origin }],
+  // Show changes: one version against the one before it.
+  ['GET', `/api/page-revision?book=${slug}&sha=${c0}&path=${encodeURIComponent(path)}&${fresh()}`, { Origin: origin }],
   ['GET', '/api/propose-edit?path=index.md', { Origin: origin }],
   ['GET', `/api/github-auth?origin=${encodeURIComponent(origin)}`, {}],
   ['POST', '/api/request-book', { Origin: portal, ...json }, JSON.stringify({ title: 'A measurement', authors: 'Nobody', email: 'delivered@resend.dev', summary: 'A measurement of the API, discarded by the honeypot.', agreeLicence: true, website: 'x' })],

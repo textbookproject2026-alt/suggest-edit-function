@@ -45,6 +45,7 @@ import {
 } from '../lib/common.mjs';
 import { readIdentity, readIdentitySecret } from '../lib/identity.mjs';
 import { notifyAuthors } from '../lib/member.mjs';
+import { cacheKeys, forget } from '../lib/kv-cache.mjs';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -368,6 +369,7 @@ async function handle(req, res) {
   try {
     const issueUrl = await createIssue(book, credential.token, result.data);
     console.log(`created issue for "${result.data.path}" — ${issueUrl} (credential=${credential.kind}) ${tag}`);
+    await forget(...cacheKeys.lists(book.slug));
     await notifyAuthors(book.slug, issueUrl);
     send(res, 201, { issueUrl });
   } catch (err) {

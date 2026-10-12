@@ -59,7 +59,7 @@ function mockRes() {
     setHeader(k, v) { this.headers[k.toLowerCase()] = v; return this; },
     status(c) { this.statusCode = c; return this; },
     json(p) { this.payload = p; this.ended = true; return this; },
-    end() { this.ended = true; return this; },
+    end(b) { if (typeof b === "string") this.payload = JSON.parse(b); this.ended = true; return this; },
     get headersSent() { return !!this.ended; },
   };
 }

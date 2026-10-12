@@ -72,3 +72,27 @@ test('fieldsOf: top-level fields from GitHub-shaped answers, without a full pars
   assert.deepEqual(await fieldsOf(new Response(tree), ['sha']), { sha: 'aaa' });
   assert.deepEqual(await fieldsOf(new Response('{"other":1}'), ['sha']), { sha: undefined }, 'missing: the full parse says so');
 });
+
+test('kept ahead: current while the refresh stamp is recent, however old; forgotten by a write; worked out when stale', async () => {
+  const { ahead, forget, HEARTBEAT } = await import('../lib/kv-cache.mjs');
+  const t = 50_000_000;
+  const kv = fakeKv({ [HEARTBEAT]: { at: t - 10 * 60_000 }, 'ahead:a': { at: t - 2 * 60 * 60_000, value: ['refreshed'] } });
+  kv.delete = async (k) => kv.store.delete(k);
+  platform.cache = kv;
+  try {
+    let runs = 0;
+    const compute = async () => { runs++; return ['worked out']; };
+    assert.deepEqual(await ahead('ahead:a', 90_000, compute, () => t), ['refreshed'], 'two hours old, but the stamp is recent');
+    assert.equal(await ahead('ahead:none', 0, null, () => t), undefined, 'nothing kept and nothing to work out');
+    await forget('ahead:a');
+    assert.equal(kv.store.has('ahead:a'), false);
+    assert.deepEqual(await ahead('ahead:a', 90_000, compute, () => t), ['worked out']);
+    assert.equal(runs, 1);
+    // No stamp for an hour: an old entry counts only for the short time.
+    kv.store.set('ahead:b', { value: JSON.stringify({ at: t, value: ['old'] }) });
+    const later = t + 60 * 60_000;
+    assert.deepEqual(await ahead('ahead:b', 90_000, compute, () => later), ['worked out']);
+  } finally {
+    platform.cache = null;
+  }
+});

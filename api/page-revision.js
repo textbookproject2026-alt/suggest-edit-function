@@ -53,9 +53,10 @@
  * Rate-limited per IP (best effort, as every limiter here: lib/common.mjs).
  */
 import { REGISTRY, SHA_RE, Refusal, appCredentials, budget, encodePath, gh, ghJson, graphqlRepo, query, wrap } from '../lib/author.mjs';
-import { clientIp, createRateLimiter, isSafePath, send } from '../lib/common.mjs';
+import { RawJson, clientIp, createRateLimiter, isSafePath, send } from '../lib/common.mjs';
 import { declinedChange, declinedItems } from '../lib/declined.mjs';
-import { kept } from '../lib/kv-cache.mjs';
+import { ahead, cacheKeys as keys } from '../lib/kv-cache.mjs';
+import { platform } from '../lib/platform.mjs';
 
 // issues: read for /api/history's notes and suggestions: without it GitHub lists none (no error).
 const appToken = appCredentials({ contents: 'read', pull_requests: 'read', issues: 'read' });
@@ -65,10 +66,12 @@ const MAX_SHAS = 30;
 
 /** Commits already shown to be on a live branch: "<repo>@<sha>". Never stops being true. */
 const onLive = new Set();
-/** How long a book's open items and declined items are kept (lib/kv-cache.mjs). */
+/** A book's open and declined items: kept ahead by scripts/refresh.mjs, or without a recent refresh this long (lib/kv-cache.mjs). */
 const OPEN_TTL_MS = 90_000;
 const OPEN_MAX = 100;
 const DECLINED_TTL_MS = 120_000;
+/** A whole answer for revisions on the live branch, which never change: kept in KV for good. */
+const revKey = (repo, sha, path, base) => `rev:${repo}:${sha}:${base ?? ''}:${path}`;
 
 /** Obsidian syntax GitHub doesn't know, reduced to what a reader would see (editor.ts forPreview). */
 export const forPreview = (md) =>
@@ -123,7 +126,7 @@ async function proposalName(repo, sha, token, left) {
  * commit's App-written pull request's name comes in the same query. Live is
  * remembered once true.
  */
-async function branchesOf(book, shas, token, left, { liveOnly = false, names = null } = {}) {
+export async function branchesOf(book, shas, token, left, { liveOnly = false, names = null } = {}) {
   const repo = book.content.repo;
   const out = new Map(shas.map((s) => [s, onLive.has(`${repo}@${s}`) ? 'live' : null]));
   const ask = names ? shas : shas.filter((s) => !out.get(s));
@@ -215,7 +218,7 @@ export function openItem(item, kind) {
 const OPEN_FIELDS = 'number url title body createdAt labels(first: 20) { nodes { name } }';
 
 /** The book's open proposals and notes (all pages), newest first: one GraphQL query, only the fields used. */
-async function openItems(book, token, left) {
+export async function openItems(book, token, left) {
   const order = `first: ${OPEN_MAX}, orderBy: { field: CREATED_AT, direction: DESC }`;
   const open = await graphqlRepo(book.content.repo, `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {
     pulls: pullRequests(states: OPEN, labels: ["proposed-edit"], ${order}) { nodes { ${OPEN_FIELDS} } }
@@ -231,6 +234,13 @@ async function openItems(book, token, left) {
     items.push(openItem(i, labelled(i, 'section-note') ? 'note' : labelled(i, 'proposed-edit') ? 'edit' : 'suggestion'));
   }
   return items.sort((a, b) => b.date.localeCompare(a.date) || b.number - a.number);
+}
+
+/** A 200, also kept in KV for good when every revision in it is on the live branch. */
+async function sendKept(res, key, forGood, body) {
+  const text = JSON.stringify(body);
+  if (forGood && platform.cache) await platform.cache.put(key, text).catch((err) => console.error(`kv cache: write of ${key} failed (${err?.message})`));
+  send(res, 200, new RawJson(text));
 }
 
 function refuse(res, status, error, userMessage) {
@@ -261,12 +271,21 @@ export default wrap(async (req, res) => {
   if (shas
     ? !shas.length || shas.length > MAX_SHAS || !shas.every((s) => SHA_RE.test(s))
     : !SHA_RE.test(sha) || !isSafePath(path) || (base !== null && !SHA_RE.test(base))) return refuse(res, 400, 'bad request', 'That revision link isn’t valid.');
+  const repo = book.content.repo;
+  const rk = shas ? null : revKey(repo, sha, path, base);
+  if (rk && platform.cache) {
+    // A revision someone opened before: the answer as it was sent, not parsed again.
+    const hit = await platform.cache.get(rk).catch(() => null);
+    if (hit) {
+      res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=31536000, immutable');
+      return send(res, 200, new RawJson(hit));
+    }
+  }
   if (await isRateLimited(clientIp(req), Date.now())) {
     res.setHeader('Retry-After', '600');
     return refuse(res, 429, 'rate limit exceeded', 'Too many revisions opened from here in the last hour. Please try again later.');
   }
 
-  const repo = book.content.repo;
   const tag = shas ? `[page-revision ${slug} names ×${shas.length}]` : `[page-revision ${slug} ${sha.slice(0, 7)} ${path}]`;
   const left = budget(20_000);
   let credential;
@@ -275,6 +294,12 @@ export default wrap(async (req, res) => {
     const { token } = credential;
 
     if (shas) {
+      // Kept ahead (refresh.mjs): every "a reader" commit the book's history.json lists.
+      const kept = await ahead(keys.names(slug), 0, null);
+      if (kept && shas.every((s) => s in kept)) {
+        res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=86400');
+        return send(res, 200, { names: Object.fromEntries(shas.map((s) => [s, kept[s]])) });
+      }
       // Where each commit is, and its pull requests' names, in the same two queries.
       const names = new Map();
       const where = await branchesOf(book, shas, token, left, { liveOnly: true, names });
@@ -296,9 +321,9 @@ export default wrap(async (req, res) => {
       }
       const [before, after] = await Promise.all([text(repo, path, base, token, left), text(repo, path, sha, token, left)]);
       res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=31536000, immutable');
-      // No html: the History panel's Compare shows the two texts' diff only, and
-      // rendering a chapter costs a GitHub call and its size twice over.
-      return send(res, 200, { sha, base, path, status: 'compared', branch, before, after, html: '' });
+      // No html: the History panel's Compare shows the two texts' diff only (the
+      // browser works it out), and rendering a chapter costs a GitHub call and its size twice over.
+      return sendKept(res, rk, branch === 'live' && where.get(base) === 'live', { sha, base, path, status: 'compared', branch, before, after, html: '' });
     }
 
     // ponytail: a commit's first 300 files only (GitHub's page size); a page edit is one.
@@ -318,7 +343,7 @@ export default wrap(async (req, res) => {
       : null;
 
     res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=31536000, immutable');
-    send(res, 200, {
+    await sendKept(res, rk, branch === 'live', {
       sha,
       parent,
       path,
@@ -411,8 +436,8 @@ async function open(req, res, q) {
   let declined;
   try {
     [items, declined] = await Promise.all([
-      kept(`history:${key}:open`, OPEN_TTL_MS, fromGitHub(openItems)),
-      withDeclined ? kept(`history:${key}:declined`, DECLINED_TTL_MS, fromGitHub(declinedItems)) : null,
+      ahead(keys.open(key), OPEN_TTL_MS, fromGitHub(openItems)),
+      withDeclined ? ahead(keys.declined(key), DECLINED_TTL_MS, fromGitHub(declinedItems)) : null,
     ]);
   } catch (err) {
     if (limited) {

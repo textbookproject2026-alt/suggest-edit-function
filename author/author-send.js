@@ -32,6 +32,7 @@ import {
   ghJson, isAuthorPath, limits, wrap,
 } from '../lib/author.mjs';
 import { asString, isJsonContentType, parseBody, send } from '../lib/common.mjs';
+import { cacheKeys, forget } from '../lib/kv-cache.mjs';
 import { checkOwner, checkedResult, readImport, stagedAt } from '../lib/author-import.mjs';
 import { ACCEPTED, NEEDS_TRIAGE, checkReply, thanksWithChange } from '../lib/author-console.mjs';
 import { suggestion as readSuggestion } from '../lib/author-console-reads.mjs';
@@ -196,6 +197,7 @@ export default wrap(async (req, res) => {
       const answered = await answerSuggestion(book, credential.token, left, s, sent, identity, btag);
       out.steps.push(...answered.steps);
       if (answered.warning) out.warning = answered.warning;
+      await forget(...cacheKeys.lists(book.slug));
     }
     send(res, 201, out);
   } catch (err) {

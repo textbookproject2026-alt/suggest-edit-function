@@ -87,6 +87,17 @@ database `c4n-api`, applies `migrations/`, runs `wrangler deploy`, and waits for
   limiter and key (an IP or a login), shared by every isolate. A daily cron deletes
   closed windows. A D1 failure lets the request through (logged). Under Node the
   limiters stay in memory, per instance.
+- KV `c4n-api-cache` (binding `CACHE`), kept ahead (batch 2d, `lib/kv-cache.mjs`):
+  `refresh.yml` runs `scripts/refresh.mjs` every 15 minutes, after a book's build
+  (`repository_dispatch` `book-built` from quartz-book's reconcile-book) and by hand. It
+  works out each book's History lists, the "a reader" names its `history.json` asks for
+  and every Markdown page of its drafts branch as the editor loads it, writes only what
+  changed, and stamps `refreshed`. While that stamp is under 45 minutes old, what it wrote
+  is current; a write through the Worker forgets what it changed (a note, a proposal, an
+  author's decision or send). A miss, or no recent stamp, is worked out per request as
+  before. A page revision on the live branch (Show changes, Compare) is kept for good
+  once opened (`rev:` keys): a commit never changes. All of this costs the Worker's CPU
+  only on a miss; the refresh runs in GitHub Actions.
 
 **Edge cache, as on Vercel.** A GET answered 200 with `s-maxage=N` (history 90 s,
 revisions up to a year) is kept N seconds in Cloudflare's cache per data centre, keyed by
