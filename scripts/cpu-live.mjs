@@ -4,7 +4,8 @@
  * as worker/index.mjs labels its log line (`/api/history[declined]`…), then P50/P95/P99/max
  * per label. Also the whole Worker's daily quantiles from the analytics API.
  * Needs CLOUDFLARE_API_TOKEN. DAYS (default 7) is how far back; Observability keeps what
- * the plan keeps, and the first event found is printed.
+ * the plan keeps, and the first event found is printed. SPLIT (an ISO time, e.g. a
+ * deploy's) prints the table again for what came after it.
  *   node scripts/cpu-live.mjs [flagMs]
  */
 const TOKEN = process.env.CLOUDFLARE_API_TOKEN;
@@ -32,6 +33,8 @@ export function label(url) {
   return kind ? `${u.pathname}[${/^[a-z-]{1,24}$/.test(value) ? value : 'other'}]` : u.pathname;
 }
 
+// The Worker's routes (worker/index.mjs); anything else is a scanner or a measurement.
+const ROUTE = /^\/api\/(author-[a-z-]+|history|page-revision|propose-edit|suggest-edit|request-book|github-auth|health|write-status)(\[|$)/;
 const pct = (xs, p) => xs[Math.min(xs.length - 1, Math.ceil((p / 100) * xs.length) - 1)];
 
 async function main() {
@@ -78,23 +81,28 @@ async function main() {
       if (typeof w.cpuTimeMs !== 'number' || !url) continue; // a log line, not the invocation
       const l = label(url);
       if (!byLabel.has(l)) byLabel.set(l, []);
-      byLabel.get(l).push(w.cpuTimeMs);
+      byLabel.get(l).push([e.timestamp, w.cpuTimeMs]);
       first = Math.min(first, e.timestamp);
       n++;
     }
   }
   for (let a = from; a < to; a += 3_600_000) await window(a, Math.min(a + 3_600_000, to));
 
-  console.log(`\n== per endpoint (Observability), ${n} invocations from ${Number.isFinite(first) ? new Date(first).toISOString() : '-'} to ${new Date(to).toISOString()}, cpu ms`);
-  console.log(`${'endpoint'.padEnd(40)}${'n'.padStart(7)}${'p50'.padStart(6)}${'p95'.padStart(6)}${'p99'.padStart(6)}${'max'.padStart(6)}`);
-  const rows = [...byLabel].map(([l, xs]) => [l, xs.sort((x, y) => x - y)]).sort((x, y) => pct(y[1], 99) - pct(x[1], 99));
-  for (const [l, xs] of rows) {
-    if (!l.startsWith('/api/')) continue; // scanners' 404s
-    const over = pct(xs, 99) > FLAG ? `  P99 OVER ${FLAG}` : '';
-    console.log(`${l.padEnd(40)}${String(xs.length).padStart(7)}${String(pct(xs, 50)).padStart(6)}${String(pct(xs, 95)).padStart(6)}${String(pct(xs, 99)).padStart(6)}${String(xs.at(-1)).padStart(6)}${over}`);
-  }
-  const other = rows.filter(([l]) => !l.startsWith('/api/')).reduce((s, [, xs]) => s + xs.length, 0);
-  console.log(`(${other} invocations outside /api/, scanners' 404s, not listed)`);
+  const table = (since, title) => {
+    console.log(`\n== per endpoint (Observability), ${title}, cpu ms`);
+    console.log(`${'endpoint'.padEnd(34)}${'n'.padStart(7)}${'p50'.padStart(6)}${'p95'.padStart(6)}${'p99'.padStart(6)}${'max'.padStart(6)}`);
+    const rows = [...byLabel]
+      .filter(([l]) => ROUTE.test(l))
+      .map(([l, xs]) => [l, xs.filter(([t]) => t >= since).map(([, ms]) => ms).sort((x, y) => x - y)])
+      .filter(([, xs]) => xs.length)
+      .sort((x, y) => pct(y[1], 99) - pct(x[1], 99));
+    for (const [l, xs] of rows) {
+      const over = pct(xs, 99) > FLAG ? `  P99 over ${FLAG}` : '';
+      console.log(`${l.padEnd(34)}${String(xs.length).padStart(7)}${String(pct(xs, 50)).padStart(6)}${String(pct(xs, 95)).padStart(6)}${String(pct(xs, 99)).padStart(6)}${String(xs.at(-1)).padStart(6)}${over}`);
+    }
+  };
+  table(0, `${n} invocations from ${Number.isFinite(first) ? new Date(first).toISOString() : '-'} to ${new Date(to).toISOString()}`);
+  if (process.env.SPLIT) table(Date.parse(process.env.SPLIT), `since ${process.env.SPLIT}`);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) await main();

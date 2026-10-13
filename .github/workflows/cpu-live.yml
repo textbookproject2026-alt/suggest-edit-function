@@ -8,6 +8,9 @@ on:
       days:
         description: How many days back
         default: '7'
+      split:
+        description: Also report what came after this time (ISO), e.g. a deploy
+        default: ''
   pull_request:
     paths: [scripts/cpu-live.mjs, .github/workflows/cpu-live.yml]
 
@@ -29,3 +32,5 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_TOKEN }}
           DAYS: ${{ inputs.days || '7' }}
+          # On a pull request: since fn #50's deploy (13 Oct), the CPU work.
+          SPLIT: ${{ inputs.split || '2026-10-13T17:13:30Z' }}
