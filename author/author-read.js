@@ -92,8 +92,10 @@ async function file(book, token, left, params) {
 }
 
 async function suggestions(book, token, left) {
+  // GitHub's most per page, in one call (the Worker's CPU limit). ponytail: a book with
+  // over 100 open written suggestions shows its newest 100; page with Link if one ever does.
   const items = await ghJson(
-    `/repos/${book.content.repo}/issues?labels=${SUGGESTED}&state=open&sort=created&direction=desc&per_page=50`, token, left);
+    `/repos/${book.content.repo}/issues?labels=${SUGGESTED}&state=open&sort=created&direction=desc&per_page=100`, token, left);
   return { suggestions: (items ?? []).map(parseSuggestion).filter(Boolean) };
 }
 
