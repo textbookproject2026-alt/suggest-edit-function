@@ -233,10 +233,11 @@ export async function writeStatus(url, db) {
  */
 export async function health(db) {
   const now = Date.now();
-  const [counts, waiting, recent] = await Promise.all([
+  const [counts, waiting, recent, crons] = await Promise.all([
     db.prepare('SELECT kind, COUNT(*) AS n FROM write_events WHERE at > ?1 GROUP BY kind').bind(now - 86_400_000).all(),
     db.prepare(`SELECT COUNT(*) AS n, MIN(at) AS oldest FROM writes WHERE state IN ('queued', 'fallback')`).first(),
     db.prepare('SELECT at, kind, route, detail FROM write_events ORDER BY at DESC LIMIT 50').all(),
+    db.prepare('SELECT cron, started, finished, detail FROM cron_runs').all(),
   ]);
   const day = Object.fromEntries((counts.results ?? []).map((r) => [r.kind, r.n]));
   const stuck = waiting?.n > 0 && now - waiting.oldest > 10 * 60_000;
@@ -246,6 +247,7 @@ export async function health(db) {
     ok,
     lastDay: day,
     waiting: { writes: waiting?.n ?? 0, oldest: waiting?.oldest ? new Date(waiting.oldest).toISOString() : null },
+    cron: Object.fromEntries((crons.results ?? []).map((c) => [c.cron, { last: new Date(c.started).toISOString(), ms: c.finished - c.started, detail: c.detail }])),
     events: (recent.results ?? []).map((e) => ({ at: new Date(e.at).toISOString(), kind: e.kind, route: e.route, detail: e.detail })),
   }, { 'Access-Control-Allow-Origin': '*' });
 }
