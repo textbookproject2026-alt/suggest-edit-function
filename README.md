@@ -187,14 +187,15 @@ what has to fit.
 `node scripts/cpu-bench.mjs [budgetMs]` sends every endpoint through the Worker's own
 `fetch()` (worker/index.mjs). GitHub's answers come from `fixtures/cpu/` (two books,
 recorded), and so does the author site's assertion read-back. KV, D1 and the Cache API
-are in memory. Each endpoint runs in its own fresh process (the median of 3) for its
+are in memory. Each endpoint runs in its own fresh process (the median of 5) for its
 first request, then warm; the time spent in the stand-in `fetch` is taken off, because
 on Cloudflare a subrequest is I/O, not the Worker's CPU. `BENCH_KV=1` starts each
 process with KV as the refresh and earlier requests leave it.
 
 The numbers are in Cloudflare milliseconds. They are this machine's milliseconds,
 scaled by a reference workload (compiling and running generated code once, then parsing
-JSON, in a fresh process; 11.7 ms on the machine the fit was made on) and by 1.5,
+JSON, in a fresh process before each endpoint run, the median taken; 11.7 ms on the
+machine the fit was made on) and by 1.5,
 Cloudflare's CPU per reference-machine millisecond. The 1.5 was fitted from live tails
 (`measure.yml`, `scripts/cpu-summary.mjs`) of the same routes on 13 Oct 2026: about 1×
 at the median and 2× at p95. Override with `BENCH_REF_MS` and `BENCH_CF_PER_REF`.
