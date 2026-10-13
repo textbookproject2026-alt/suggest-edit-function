@@ -30,6 +30,9 @@ export const WRITES = new Set([
 ]);
 export const isWrite = (method, path) => method === 'POST' && WRITES.has(path);
 export const KEY_RE = /^[A-Za-z0-9_-]{16,64}$/;
+/** The Worker's five-minute schedule, exactly as in wrangler.toml (test/writes.test.mjs checks). */
+export const EVERY_FIVE = '1-59/5 * * * *';
+
 /** Where the write-fallback workflow lives; the App starts it with a repository_dispatch. */
 export const FALLBACK_REPO = process.env.FALLBACK_REPO || 'textbookproject2026-alt/suggest-edit-function';
 const WAIT_MESSAGE = 'Saving… this can take up to a minute.';

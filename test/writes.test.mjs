@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fakeD1 } from './fake-d1.mjs';
 
-const { write, writeStatus, health, isWrite, testing } = await import('../worker/writes.mjs');
+const { write, writeStatus, health, isWrite, testing, EVERY_FIVE } = await import('../worker/writes.mjs');
 const { runOne } = await import('../scripts/fallback.mjs');
 const { serve } = await import('../worker/adapter.mjs');
 const { platform } = await import('../lib/platform.mjs');
@@ -249,24 +249,30 @@ test('the five-minute cron starts the refresh only when its heartbeat is over 15
   assert.deepEqual(asked, [['book-built', {}], ['book-built', {}]], 'every book: no slug');
 });
 
+test('the handler matches the schedules in wrangler.toml exactly', async () => {
+  const { readFileSync } = await import('node:fs');
+  const crons = JSON.parse(readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8').match(/^crons = (\[.*\])/m)[1]);
+  assert.deepEqual(crons, ['17 3 * * *', EVERY_FIVE]);
+});
+
 test('every cron run logs its start and end and is recorded for /api/health', async () => {
   const db = fakeD1();
   const logs = [];
   const log = console.log;
   console.log = (...a) => logs.push(a.join(' '));
   try {
-    await worker.scheduled({ cron: '*/5 * * * *' }, { DB: db });
+    await worker.scheduled({ cron: EVERY_FIVE }, { DB: db });
     await worker.scheduled({ cron: '17 3 * * *' }, { DB: db });
   } finally {
     console.log = log;
   }
-  assert.equal(logs[0], 'cron */5 * * * * start');
-  assert.match(logs[1], /^cron \*\/5 \* \* \* \* end \d+ms waiting=0 refresh=no$/);
+  assert.equal(logs[0], 'cron 1-59/5 * * * * start');
+  assert.match(logs[1], /^cron 1-59\/5 \* \* \* \* end \d+ms waiting=0 refresh=no$/);
   assert.equal(logs[2], 'cron 17 3 * * * start');
   assert.match(logs[3], /^cron 17 3 \* \* \* end \d+ms swept$/);
   const { cron } = await (await health(db)).json();
-  assert.deepEqual(Object.keys(cron).sort(), ['*/5 * * * *', '17 3 * * *']);
-  assert.equal(cron['*/5 * * * *'].detail, 'waiting=0 refresh=no');
+  assert.deepEqual(Object.keys(cron).sort(), ['1-59/5 * * * *', '17 3 * * *']);
+  assert.equal(cron[EVERY_FIVE].detail, 'waiting=0 refresh=no');
   // A run that fails still logs its end and throws (Cloudflare marks it failed); a D1 that's down can't record it.
   const errors = [];
   const error = console.error;

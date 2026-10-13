@@ -13,7 +13,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { platform } from '../lib/platform.mjs';
 import { serve } from './adapter.mjs';
-import { backstop, health, isWrite, refreshIfStale, sweep, write, writeStatus } from './writes.mjs';
+import { EVERY_FIVE, backstop, health, isWrite, refreshIfStale, sweep, write, writeStatus } from './writes.mjs';
 
 // Every route is imported here, up front. Cloudflare evaluates this before the first
 // request and doesn't count it in any request's CPU time (measured 11 Oct: a fresh
@@ -150,7 +150,7 @@ export default {
     console.log(`cron ${event.cron} start`);
     let detail = '';
     try {
-      if (event.cron === '*/5 * * * *') {
+      if (event.cron === EVERY_FIVE) {
         const n = await backstop(env.DB);
         if (n) console.log(`backstop: ${n} write(s) waiting, write-fallback started`);
         const refresh = await refreshIfStale(env.CACHE).catch((err) => console.error(`refresh: not started (${err?.message})`));
