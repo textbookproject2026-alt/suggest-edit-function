@@ -236,24 +236,39 @@ async function one(slug, n) {
 // from live tails of the same code (scripts/cpu-summary.mjs; docs: CPU-BUDGET).
 const REF_MS = Number(process.env.BENCH_REF_MS ?? 0) || REF_DEFAULT_MS();
 const CF_PER_REF = Number(process.env.BENCH_CF_PER_REF ?? 1.5);
-function REF_DEFAULT_MS() { return 10.7; }
+function REF_DEFAULT_MS() { return 11.7; }
 
-/** How much slower this machine is than the reference one: the median of 7 timings of
- *  a fixed CPU-only workload (parse the ontology book's recorded answers, scan bodies). */
+/** How much slower this machine is than the reference one, at what a cold request
+ *  pays for: compiling and running code for the first time, and parsing JSON. The median
+ *  of 5 fresh processes (`--ref`), each timing a fixed, generated workload once. */
 function machineSpeed() {
-  const text = readFileSync(new URL('ontology-for-social-research-a-criti.json', DIR), 'utf8');
   const times = [];
-  for (let i = 0; i < 9; i++) {
-    const t0 = performance.now();
-    for (let k = 0; k < 4; k++) {
-      const tape = JSON.parse(text);
-      for (const v of Object.values(tape)) [...v.body.matchAll(/"(?:number|sha|path)":\s*("?)[^",}]+\1/g)].length;
-      JSON.stringify(tape).length;
-    }
-    times.push(performance.now() - t0);
+  for (let i = 0; i < 5; i++) {
+    const out = execFileSync(process.execPath, [new URL(import.meta.url).pathname, '--ref'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    times.push(Number(out.split('\n').find((l) => l.startsWith('REF ')).slice(4)));
   }
   times.sort((a, b) => a - b);
-  return times[4] / REF_MS;
+  return times[2] / REF_MS;
+}
+
+/** The reference workload: 400 generated functions compiled and run once each (as a
+ *  cold request runs the route's code once), then the ontology book's recorded answers
+ *  parsed. Deterministic: the same source and data every time. */
+function referenceWorkload() {
+  const fns = [];
+  for (let i = 0; i < 400; i++) {
+    fns.push(`function f${i}(o) { const a = [o.n + ${i}, String(o.s).slice(${i % 7}), /x${i}(\\d+)/.exec(o.s)?.[1] ?? null]; ` +
+      `const m = new Map([[a[0], a[1]]]); for (const [k, v] of m) o.t += k + v.length; ` +
+      `return { ...o, k${i}: a, j: JSON.stringify(a).length + (o.t % ${i + 3}) }; }`);
+  }
+  const src = `${fns.join('\n')}\nreturn [${fns.map((_, i) => `f${i}`).join(',')}];`;
+  const text = readFileSync(new URL('ontology-for-social-research-a-criti.json', DIR), 'utf8');
+  const t0 = performance.now();
+  let o = { n: 1, s: 'x12 y', t: 0 };
+  for (const f of new Function(src)()) o = f(o);
+  const tape = JSON.parse(text);
+  for (const v of Object.values(tape)) JSON.parse(v.body.startsWith('{') || v.body.startsWith('[') ? v.body : '0');
+  return performance.now() - t0;
 }
 
 /** Node's own lazily loaded built-ins (undici's Request/Response, WebCrypto, streams),
@@ -277,7 +292,9 @@ async function warmPlatform() {
   btoa('x'); atob('eA==');
 }
 
-if (mode === '--prime') {
+if (mode === '--ref') {
+  console.log(`REF ${referenceWorkload()}`);
+} else if (mode === '--prime') {
   for (const slug of SLUGS) {
     tape = JSON.parse(readFileSync(new URL(`${slug}.json`, DIR), 'utf8'));
     for (const c of await cases(slug)) await send(c);
