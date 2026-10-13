@@ -5,14 +5,15 @@
  * res.json, a parsed JSON body) and does vercel.json's two rewrites. Everything else,
  * paths, shapes, headers, CORS, limits, errors, is the handlers' own.
  *
- * Bindings: TOKENS (KV, installation tokens) and DB (D1, rate limits), handed to the
- * handlers through lib/platform.mjs. Secrets and vars arrive as process.env
+ * Bindings: TOKENS (KV, installation tokens) and DB (D1: rate limits, and each write's
+ * key, answer and fallback, worker/writes.mjs), handed to the handlers through
+ * lib/platform.mjs. Secrets and vars arrive as process.env
  * (nodejs_compat), which the handlers read at import, as on Vercel.
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { forwardIpHeaders } from '../lib/common.mjs';
 import { platform } from '../lib/platform.mjs';
 import { serve } from './adapter.mjs';
+import { health, isWrite, sweep, write, writeStatus } from './writes.mjs';
 
 // Every route is imported here, up front. Cloudflare evaluates this before the first
 // request and doesn't count it in any request's CPU time (measured 11 Oct: a fresh
@@ -33,30 +34,6 @@ const ROUTES = {
   '/api/request-book': requestBook,
   '/api/author': author,
 };
-
-/**
- * The split (batch 2d): every route that commits to GitHub stays on Vercel, because a
- * commit's work doesn't fit the free plan's 10 ms CPU (measured 12 Oct: an author's
- * save 12-35 ms). The Worker forwards these unchanged, with the reader's own address
- * signed (lib/common.mjs forwardIpHeaders), and serves everything else itself.
- * Moving them here too needs Workers Paid.
- */
-export const WRITE_BACKEND = 'https://suggest-edit-function.vercel.app';
-const WRITES = new Set(['/api/propose-edit', '/api/author-send', '/api/author-import', '/api/author-act', '/api/author-people-change']);
-/** Forwarded to Vercel: a POST to a route that commits (OPTIONS and GETs are served here). */
-export const isForwarded = (method, pathname) => method === 'POST' && WRITES.has(pathname);
-// Not passed on: the hop's own, Cloudflare's, and any forwarding header a client made up.
-const NOT_FORWARDED = /^(?:host|connection|content-length|accept-encoding|x-forwarded-.*|x-real-ip|true-client-ip|cf-.*|x-c4n-.*)$/i;
-
-async function forward(request, url) {
-  const headers = new Headers();
-  for (const [k, v] of request.headers) if (!NOT_FORWARDED.test(k)) headers.set(k, v);
-  for (const [k, v] of Object.entries(forwardIpHeaders(request.headers.get('cf-connecting-ip') ?? ''))) headers.set(k, v);
-  const res = await fetch(`${WRITE_BACKEND}${url.pathname}${url.search}`, {
-    method: request.method, headers, body: await request.arrayBuffer(), redirect: 'manual',
-  });
-  return new Response(res.body, res);
-}
 
 // Subrequests per request (the free plan allows 50), logged with each request so
 // worker.yml's measurement and Workers Logs can see them beside CPU time.
@@ -107,7 +84,7 @@ function forClient(response, version) {
 }
 
 /** vercel.json's rewrites: the handler sees the rewritten URL, as on Vercel. */
-function route(url) {
+export function route(url) {
   if (url.pathname === '/api/history') {
     url.pathname = '/api/page-revision';
     url.searchParams.set('mode', 'open');
@@ -129,12 +106,10 @@ export default {
     platform.db = env.DB ?? null;
 
     const url = new URL(request.url);
-    if (isForwarded(request.method, url.pathname)) {
-      const out = await forward(request, url);
-      console.log(`c4n-api ${request.method} ${url.pathname} ${out.status} forwarded=vercel cold=${wasCold ? 1 : 0}`);
-      out.headers.set('X-Served-By', 'vercel');
-      return forClient(out, env.VERSION?.id);
-    }
+    // Writes (worker/writes.mjs): their fallback's answers, and the health check.
+    if (url.pathname === '/api/write-status' && env.DB) return forClient(await writeStatus(url, env.DB), env.VERSION?.id);
+    if (url.pathname === '/api/health' && env.DB) return forClient(await health(env.DB), env.VERSION?.id);
+    const asSent = new URL(request.url);
     const handler = route(url);
     if (!handler) {
       // As Vercel's own 404 for a path with no function. Logged too: as an isolate's
@@ -158,14 +133,16 @@ export default {
     const store = { n: 0 };
     const load = !loaded.has(path);
     loaded.add(path);
-    const response = await counter.run(store, () => serve(handler, request, url));
+    const run = () => counter.run(store, () => serve(handler, request, url));
+    const response = isWrite(request.method, path) ? await write(request, path, asSent, env.DB, run) : await run();
     console.log(`c4n-api ${request.method} ${label} ${response.status} subrequests=${store.n} cold=${wasCold ? 1 : 0} load=${load ? 1 : 0}`);
     if (key) ctx.waitUntil(keep(key, response.clone()));
     return forClient(response, env.VERSION?.id);
   },
 
-  /** Daily: drop rate-limit windows that have closed. */
+  /** Daily: drop rate-limit windows that have closed, and old write answers and events. */
   async scheduled(_event, env) {
     await env.DB.prepare('DELETE FROM hits WHERE until < ?1').bind(Date.now()).run();
+    await sweep(env.DB);
   },
 };

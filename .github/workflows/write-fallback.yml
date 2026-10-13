@@ -1,0 +1,50 @@
+# The write fallback (worker/writes.mjs): a write that failed on the Worker (the free
+# plan's CPU limit, error 1102, or any 5xx) and that the page queued again is run here
+# by scripts/fallback.mjs, through the same handler, with no CPU limit. The page shows
+# "Saving… this can take up to a minute" and reads the answer from /api/write-status.
+#
+# Started by the Worker (repository_dispatch c4n-write, through the GitHub App) the
+# moment a write is queued; every five minutes as a backstop, for one that wasn't
+# started or a run that died. A red run = a write that failed here too: its answer is
+# recorded for the page, and /api/health reports it.
+name: write-fallback
+
+on:
+  repository_dispatch:
+    types: [c4n-write]
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Run the queued writes
+        env:
+          KEY: ${{ github.event.client_payload.key }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_TOKEN }}
+          APP_KEY: ${{ secrets.SUGGEST_EDIT_APP_PRIVATE_KEY }}
+          IDENTITY_SECRET: ${{ secrets.IDENTITY_SECRET }}
+          GITHUB_OAUTH_CLIENT_SECRET: ${{ secrets.SIGNIN_OAUTH_CLIENT_SECRET }}
+          # As in wrangler.toml [vars].
+          GITHUB_APP_ID: '4951384'
+          GITHUB_OAUTH_CLIENT_ID: Ov23li2HSqm1hbY1ui7r
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund
+          FUNCTION_SHA="$(git rev-parse HEAD)" npm run -s registry:bundle
+          GITHUB_APP_PRIVATE_KEY="$(printf '%s\n' "$APP_KEY" | base64 -w0)" node scripts/fallback.mjs "${KEY:-}"
