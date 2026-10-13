@@ -44,7 +44,8 @@ test/propose-edit.test.mjs     propose-edit and github-auth against an in-memory
 test/request-book.test.mjs     request-book against an in-memory GitHub
 test/author.test.mjs           the author endpoints against test/fake-github.mjs
 test/fake-github.mjs           an in-memory GitHub with real git object ids
-worker/index.mjs               the Cloudflare Worker: routes (vercel.json's rewrites) and the daily D1 cleanup
+worker/main.mjs                the Worker's main module: index.mjs, and the Jobs entrypoint build-nudge's cron calls
+worker/index.mjs               the Cloudflare Worker: routes (vercel.json's rewrites), the five-minute jobs, the daily D1 cleanup
 worker/adapter.mjs             a Fetch Request to the handlers' Node-style req/res, and back
 worker/writes.mjs              writes: a key per write in D1, the fallback queue, /api/write-status, /api/health
 scripts/fallback.mjs           the write fallback (write-fallback.yml): queued writes, same handlers, in Node

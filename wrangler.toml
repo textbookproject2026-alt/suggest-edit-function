@@ -1,8 +1,8 @@
-# c4n-api: the suggest-edit function as a Cloudflare Worker (worker/index.mjs).
+# c4n-api: the suggest-edit function as a Cloudflare Worker (worker/index.mjs, through worker/main.mjs).
 # Deployed only by .github/workflows/worker.yml (CI), never from a laptop.
 # The KV and D1 ids are filled in by that workflow, which finds or creates them by name.
 name = "c4n-api"
-main = "worker/index.mjs"
+main = "worker/main.mjs" # the Worker (worker/index.mjs) and the Jobs entrypoint
 compatibility_date = "2025-09-01"
 # global_fetch_strictly_public: the Worker reads assertions back from the author site
 # (a Pages project on the same zone); without it a same-zone fetch can fail (error 1042).

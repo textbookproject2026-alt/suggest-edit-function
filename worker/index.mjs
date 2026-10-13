@@ -141,38 +141,68 @@ export default {
   },
 
   /**
-   * Every five minutes: the write fallback's backstop, and refresh.yml when its heartbeat is stale. Daily: drop rate-limit windows
-   * that have closed, and old write answers and events. Each run logs its start and end and is recorded in D1 (cron_runs,
-   * shown on /api/health), so a schedule that stops firing shows.
+   * Cloudflare's own cron: the five-minute jobs (periodic) and, daily, dropping rate-limit windows that have closed and old
+   * write answers and events. On 13 Oct Cloudflare never ran either five-minute schedule (*\/5, 1-59/5), so build-nudge's
+   * 15-minute cron runs periodic() too, through the Jobs entrypoint (worker/main.mjs).
    */
   async scheduled(event, env) {
-    const started = Date.now();
-    console.log(`cron ${event.cron} start`);
-    let detail = '';
-    try {
-      if (event.cron === EVERY_FIVE) {
-        const n = await backstop(env.DB);
-        if (n) console.log(`backstop: ${n} write(s) waiting, write-fallback started`);
-        const refresh = await refreshIfStale(env.CACHE).catch((err) => console.error(`refresh: not started (${err?.message})`));
-        if (refresh) console.log('refresh: heartbeat stale, refresh started');
-        detail = `waiting=${n} refresh=${refresh ? 'started' : 'no'}`;
-      } else {
-        await env.DB.prepare('DELETE FROM hits WHERE until < ?1').bind(Date.now()).run();
-        await sweep(env.DB);
-        detail = 'swept';
-      }
-    } catch (err) {
-      detail = `error: ${err?.message}`;
-      throw err;
-    } finally {
-      try {
-        await env.DB.prepare(`INSERT INTO cron_runs (cron, started, finished, detail) VALUES (?1, ?2, ?3, ?4)
-          ON CONFLICT (cron) DO UPDATE SET started = ?2, finished = ?3, detail = ?4`)
-          .bind(event.cron, started, Date.now(), detail.slice(0, 300)).run();
-      } catch (err) {
-        console.error(`cron run not recorded: ${err?.message}`);
-      }
-      console.log(`cron ${event.cron} end ${Date.now() - started}ms ${detail}`);
-    }
+    if (event.cron === EVERY_FIVE) return periodic(env, event.cron);
+    await recorded(env, event.cron, async () => {
+      await env.DB.prepare('DELETE FROM hits WHERE until < ?1').bind(Date.now()).run();
+      await sweep(env.DB);
+      return 'swept';
+    });
   },
 };
+
+// Two callers at most a few minutes apart (Cloudflare's cron, build-nudge's) run the jobs once.
+const JOBS_GAP_MS = 4 * 60_000;
+
+/**
+ * The five-minute jobs: the write fallback's backstop, and refresh.yml when its heartbeat
+ * is stale. Idempotent: a call within JOBS_GAP_MS of the last run is skipped, claimed in
+ * D1 (cron_runs row "jobs"), so a double run is harmless. Each call is recorded under its
+ * caller (`source`), each run under "jobs", both shown on /api/health.
+ */
+export async function periodic(env, source) {
+  return recorded(env, source, async () => {
+    const now = Date.now();
+    const claimed = await env.DB.prepare(`INSERT INTO cron_runs (cron, started, finished, detail) VALUES ('jobs', ?1, ?1, ?3)
+      ON CONFLICT (cron) DO UPDATE SET started = ?1, finished = ?1, detail = ?3 WHERE cron_runs.started <= ?2 RETURNING cron`)
+      .bind(now, now - JOBS_GAP_MS, `running, for ${source}`).first();
+    if (!claimed) return 'skipped: the jobs ran under 4 minutes ago';
+    const detail = await recorded(env, 'jobs', async () => {
+      const n = await backstop(env.DB);
+      if (n) console.log(`backstop: ${n} write(s) waiting, write-fallback started`);
+      const refresh = await refreshIfStale(env.CACHE).catch((err) => console.error(`refresh: not started (${err?.message})`));
+      if (refresh) console.log('refresh: heartbeat stale, refresh started');
+      return `waiting=${n} refresh=${refresh ? 'started' : 'no'} (${source})`;
+    }, now);
+    return detail;
+  });
+}
+
+/** Runs `job` (it returns a one-line detail), logging its start and end and recording it in D1 under `name`. */
+async function recorded(env, name, job, started = Date.now()) {
+  platform.kv = env.TOKENS ?? null;
+  platform.cache = env.CACHE ?? null;
+  platform.db = env.DB ?? null;
+  console.log(`cron ${name} start`);
+  let detail = '';
+  try {
+    detail = await job();
+    return detail;
+  } catch (err) {
+    detail = `error: ${err?.message}`;
+    throw err;
+  } finally {
+    try {
+      await env.DB.prepare(`INSERT INTO cron_runs (cron, started, finished, detail) VALUES (?1, ?2, ?3, ?4)
+        ON CONFLICT (cron) DO UPDATE SET started = ?2, finished = ?3, detail = ?4`)
+        .bind(name, started, Date.now(), String(detail).slice(0, 300)).run();
+    } catch (err) {
+      console.error(`cron run not recorded: ${err?.message}`);
+    }
+    console.log(`cron ${name} end ${Date.now() - started}ms ${detail}`);
+  }
+}
