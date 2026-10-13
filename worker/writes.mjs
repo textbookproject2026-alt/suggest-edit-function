@@ -39,8 +39,10 @@ const RESOLVER = createResolver(validateRegistry(BUNDLE.registry));
 const queueLimit = createRateLimiter(30, 60 * 60 * 1000, 'fallback');
 const fallbackToken = appCredentials({ contents: 'write' });
 
-/** Test books only: `&fail=cpu` spends CPU until Cloudflare stops the request (1102). */
+/** Test books only: `&fail=cpu` spends CPU until Cloudflare stops the request (1102).
+ *  `dispatch` is replaced in the tests: they must never start a real fallback run. */
 export const testing = {
+  dispatch: (key) => dispatch(key),
   burn() {
     let x = 0;
     for (let i = 0; i < 4e9; i++) x = (x * 31 + i) % 1000003;
@@ -157,7 +159,7 @@ async function queue(request, path, url, db, key, seen, cors) {
   if (!queued) return pending(key, cors, 'queued'); // another try got there first
   await event(db, 'inline-failed', path, `the page saw ${seen}`);
   await event(db, 'queued', path);
-  await dispatch(key).catch((err) => event(db, 'dispatch-failed', path, err.message));
+  await testing.dispatch(key).catch((err) => event(db, 'dispatch-failed', path, err.message));
   return pending(key, cors, 'queued');
 }
 
@@ -180,7 +182,7 @@ const FRESH_MS = 60_000;
  * can't be the backstop: on 13 Oct a five-minute schedule ran not once in 3½ hours,
  * and a fifteen-minute one three times in a day. Returns how many were waiting.
  */
-export async function backstop(db, start = dispatch) {
+export async function backstop(db, start = testing.dispatch) {
   const now = Date.now();
   const w = await db.prepare(`SELECT COUNT(*) AS n FROM writes WHERE (state = 'queued' AND at < ?1) OR (state = 'fallback' AND at < ?2)`)
     .bind(now - FRESH_MS, now - STALE_MS).first();
