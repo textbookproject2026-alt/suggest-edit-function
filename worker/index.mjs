@@ -142,16 +142,37 @@ export default {
 
   /**
    * Every five minutes: the write fallback's backstop, and refresh.yml when its heartbeat is stale. Daily: drop rate-limit windows
-   * that have closed, and old write answers and events.
+   * that have closed, and old write answers and events. Each run logs its start and end and is recorded in D1 (cron_runs,
+   * shown on /api/health), so a schedule that stops firing shows.
    */
   async scheduled(event, env) {
-    if (event.cron === '*/5 * * * *') {
-      const n = await backstop(env.DB);
-      if (n) console.log(`backstop: ${n} write(s) waiting, write-fallback started`);
-      if (await refreshIfStale(env.CACHE).catch((err) => console.error(`refresh: not started (${err?.message})`))) console.log('refresh: heartbeat stale, refresh started');
-      return;
+    const started = Date.now();
+    console.log(`cron ${event.cron} start`);
+    let detail = '';
+    try {
+      if (event.cron === '*/5 * * * *') {
+        const n = await backstop(env.DB);
+        if (n) console.log(`backstop: ${n} write(s) waiting, write-fallback started`);
+        const refresh = await refreshIfStale(env.CACHE).catch((err) => console.error(`refresh: not started (${err?.message})`));
+        if (refresh) console.log('refresh: heartbeat stale, refresh started');
+        detail = `waiting=${n} refresh=${refresh ? 'started' : 'no'}`;
+      } else {
+        await env.DB.prepare('DELETE FROM hits WHERE until < ?1').bind(Date.now()).run();
+        await sweep(env.DB);
+        detail = 'swept';
+      }
+    } catch (err) {
+      detail = `error: ${err?.message}`;
+      throw err;
+    } finally {
+      try {
+        await env.DB.prepare(`INSERT INTO cron_runs (cron, started, finished, detail) VALUES (?1, ?2, ?3, ?4)
+          ON CONFLICT (cron) DO UPDATE SET started = ?2, finished = ?3, detail = ?4`)
+          .bind(event.cron, started, Date.now(), detail.slice(0, 300)).run();
+      } catch (err) {
+        console.error(`cron run not recorded: ${err?.message}`);
+      }
+      console.log(`cron ${event.cron} end ${Date.now() - started}ms ${detail}`);
     }
-    await env.DB.prepare('DELETE FROM hits WHERE until < ?1').bind(Date.now()).run();
-    await sweep(env.DB);
   },
 };

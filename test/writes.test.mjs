@@ -248,3 +248,33 @@ test('the five-minute cron starts the refresh only when its heartbeat is over 15
   assert.equal(await refreshIfStale(null, start, now), false, 'no KV (Node): nothing');
   assert.deepEqual(asked, [['book-built', {}], ['book-built', {}]], 'every book: no slug');
 });
+
+test('every cron run logs its start and end and is recorded for /api/health', async () => {
+  const db = fakeD1();
+  const logs = [];
+  const log = console.log;
+  console.log = (...a) => logs.push(a.join(' '));
+  try {
+    await worker.scheduled({ cron: '*/5 * * * *' }, { DB: db });
+    await worker.scheduled({ cron: '17 3 * * *' }, { DB: db });
+  } finally {
+    console.log = log;
+  }
+  assert.equal(logs[0], 'cron */5 * * * * start');
+  assert.match(logs[1], /^cron \*\/5 \* \* \* \* end \d+ms waiting=0 refresh=no$/);
+  assert.equal(logs[2], 'cron 17 3 * * * start');
+  assert.match(logs[3], /^cron 17 3 \* \* \* end \d+ms swept$/);
+  const { cron } = await (await health(db)).json();
+  assert.deepEqual(Object.keys(cron).sort(), ['*/5 * * * *', '17 3 * * *']);
+  assert.equal(cron['*/5 * * * *'].detail, 'waiting=0 refresh=no');
+  // A run that fails still logs its end and throws (Cloudflare marks it failed); a D1 that's down can't record it.
+  const errors = [];
+  const error = console.error;
+  console.error = (...a) => errors.push(a.join(' '));
+  try {
+    await assert.rejects(worker.scheduled({ cron: '17 3 * * *' }, { DB: { prepare: () => { throw new Error('D1 down'); } } }), /D1 down/);
+  } finally {
+    console.error = error;
+  }
+  assert.deepEqual(errors, ['cron run not recorded: D1 down']);
+});
