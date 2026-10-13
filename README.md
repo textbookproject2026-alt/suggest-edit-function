@@ -196,13 +196,17 @@ process with KV as the refresh and earlier requests leave it.
 The numbers are in Cloudflare milliseconds. They are this machine's milliseconds,
 scaled by a reference workload (compiling and running generated code once, then parsing
 JSON, in a fresh process before each endpoint run, the median taken; 11.7 ms on the
-machine the fit was made on) and by 1.5,
-Cloudflare's CPU per reference-machine millisecond. The 1.5 was fitted from live tails
-(`measure.yml`, `scripts/cpu-summary.mjs`) of the same routes on 13 Oct 2026: about 1×
-at the median and 2× at p95. Override with `BENCH_REF_MS` and `BENCH_CF_PER_REF`.
+Mac the first fit was made on) and by Cloudflare's CPU per reference-machine
+millisecond. That factor is fitted per CPU model, because the reference workload doesn't
+speed up alike on every CPU: GitHub's runners are EPYC 7763 (1.74), 9V74 (1.42) and 9V45
+(0.98); the Mac is 1.5, and any other CPU gets the 9V74's. Each was fitted on 14 Oct
+2026 from live first loads after the CPU work (`measure.yml`) against this bench on
+that CPU. Override with `BENCH_REF_MS` and `BENCH_CF_PER_REF`.
 
-`worker.yml` runs it on every pull request and fails at 7 ms (the 10 ms limit less
-headroom). After a change to which GitHub calls a route makes, re-record:
+`worker.yml` runs it on every pull request. Over 7 ms it warns and lists the endpoints;
+over 8.5 ms (`BENCH_FAIL_MS`) it fails (the 10 ms limit less headroom). `cpu-live.yml`
+reports Cloudflare's own P50/P95/P99 per endpoint. After a change to which GitHub calls
+a route makes, re-record:
 `node scripts/cpu-bench.mjs record` (gh's token, GETs and read-only GraphQL only;
 writes are answered with canned replies, never sent; email addresses are scrubbed).
 

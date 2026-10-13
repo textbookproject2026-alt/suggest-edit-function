@@ -63,7 +63,8 @@ jobs:
 
       # Every endpoint's CPU on the Worker's code path, replayed from recorded GitHub
       # answers (fixtures/cpu/, scripts/cpu-bench.mjs): a fresh isolate's first request
-      # and warm ones, each under the budget, the free plan's 10 ms less headroom.
+      # and warm ones. Over 7 ms (est. Cloudflare) warns, listing them; over 8.5 fails
+      # (the free plan's 10 ms less headroom).
       - name: CPU budget per endpoint (recorded fixtures)
         run: |
           set -euo pipefail
