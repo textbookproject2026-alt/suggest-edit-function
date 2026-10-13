@@ -48,3 +48,8 @@ api -X POST "$A/workers/observability/telemetry/query" --data "$(jq -nc --argjso
   queryId: "cron-check-1828", view: "events", limit: 50, timeframe: {from: $from, to: $to},
   parameters: {datasets: ["cloudflare-workers"], filters: [{key: "$metadata.service", type: "string", operation: "eq", value: "c4n-api"}]}}')" |
   jq -r '(.errors // [] | .[] | tostring), (.result.events.events // [] | .[] | select(.["$metadata"].message) | [(.timestamp/1000|todate), .["$workers"].eventType, .["$metadata"].message] | @tsv)' | sort | uniq -c | sort -rn | head -60
+echo "== Past cron events (GraphQL workersInvocationsScheduled, last ${HOURS:-3} h)"
+gq="$(jq -nc --arg a "$account" --arg since "$(date -ud "@$(( since / 1000 ))" +%FT%TZ)" '{query: "query($a: String!, $since: Time!) { viewer { accounts(filter: {accountTag: $a}) { workersInvocationsScheduled(limit: 1000, filter: {datetime_geq: $since}, orderBy: [datetime_DESC]) { scriptName cron status datetime cpuTimeUs } } } }", variables: {a: $a, since: $since}}')"
+api -X POST "$CF/graphql" --data "$gq" | jq -r '(.errors // [] | .[] | "error: \(.message)"), (.data.viewer.accounts[0].workersInvocationsScheduled // [] | group_by(.scriptName + " " + .cron + " " + .status)[] | "\(length)x \(.[0].scriptName) \(.[0].cron) \(.[0].status) newest=\(.[0].datetime) oldest=\(.[-1].datetime)")'
+echo "== c4n-api: all deployments"
+api "$A/workers/scripts/c4n-api/deployments" | jq -r '.result.deployments[] | "\(.created_on[:19]) \(.annotations["workers/triggered_by"]) \(.annotations["workers/message"] // "-") \(.versions | map("\(.version_id[:8])@\(.percentage)") | join(","))"' | sort | tail -60
