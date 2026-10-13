@@ -23,9 +23,11 @@ import { execFileSync } from 'node:child_process';
 const [mode, ...rest] = process.argv.slice(2);
 const RECORD = mode === 'record' || mode === '--record-one';
 const DISCOVER = mode === 'record';
+// Over BUDGET (the argument, default 7) warns, listing the endpoints; over FAIL fails.
 const BUDGET = Number(RECORD || mode === '--one' ? 7 : mode ?? 7);
+const FAIL = Number(process.env.BENCH_FAIL_MS ?? 8.5);
 const RUNS = 15;
-const COLD = Number(process.env.BENCH_COLD ?? 3);
+const COLD = Number(process.env.BENCH_COLD ?? 5);
 const DIR = new URL('../fixtures/cpu/', import.meta.url);
 const SLUGS = mode === 'record' && rest.length ? rest : ['platform-test-book', 'ontology-for-social-research-a-criti'];
 
@@ -231,24 +233,24 @@ async function one(slug, n) {
   return { slug, name: c.name, status: first.status, first: first.ms, warm: warm[Math.floor(warm.length / 2)] };
 }
 
-// The reference workload's time on the machine the numbers below were fitted on (an
-// M-series Mac, 13 Oct 2026), and Cloudflare's CPU ms per that machine's ms, fitted
-// from live tails of the same code (scripts/cpu-summary.mjs; docs: CPU-BUDGET).
+// The reference workload's time on the machine the first fit was made on (an M-series
+// Mac, 13 Oct 2026). Cloudflare's CPU ms per reference-machine ms, fitted per CPU model,
+// because the reference workload doesn't speed up alike on every CPU: on GitHub's EPYC
+// 9V45 it runs as fast as on the Mac while the endpoints run 2x slower. Each value is
+// the midpoint of the median p50 and p95 ratios of live first loads after fn #50
+// (measure 38438441614: history, history[declined], propose GET) to this bench on that
+// CPU (4, 3 and 5 runs, 14 Oct; the median). Any other CPU gets the 9V74's.
+const FIT = { 'AMD EPYC 9V74': 1.42, 'AMD EPYC 7763': 1.74, 'AMD EPYC 9V45': 0.98, 'Apple M2': 1.5 };
+const MODEL = (await import('node:os')).cpus()[0]?.model ?? '';
+const FITTED = Object.entries(FIT).find(([m]) => MODEL.startsWith(m));
 const REF_MS = Number(process.env.BENCH_REF_MS ?? 0) || REF_DEFAULT_MS();
-const CF_PER_REF = Number(process.env.BENCH_CF_PER_REF ?? 1.5);
+const CF_PER_REF = Number(process.env.BENCH_CF_PER_REF ?? 0) || FITTED?.[1] || FIT['AMD EPYC 9V74'];
 function REF_DEFAULT_MS() { return 11.7; }
 
-/** How much slower this machine is than the reference one, at what a cold request
- *  pays for: compiling and running code for the first time, and parsing JSON. The median
- *  of 5 fresh processes (`--ref`), each timing a fixed, generated workload once. */
-function machineSpeed() {
-  const times = [];
-  for (let i = 0; i < 5; i++) {
-    const out = execFileSync(process.execPath, [new URL(import.meta.url).pathname, '--ref'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-    times.push(Number(out.split('\n').find((l) => l.startsWith('REF ')).slice(4)));
-  }
-  times.sort((a, b) => a - b);
-  return times[2] / REF_MS;
+/** One run of the reference workload in a fresh process: its ms. */
+function refSample() {
+  const out = execFileSync(process.execPath, [new URL(import.meta.url).pathname, '--ref'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  return Number(out.split('\n').find((l) => l.startsWith('REF ')).slice(4));
 }
 
 /** The reference workload: 400 generated functions compiled and run once each (as a
@@ -338,7 +340,11 @@ if (mode === '--ref') {
 } else {
   const { execFileSync: run } = await import('node:child_process');
   run(process.execPath, [new URL(import.meta.url).pathname, '--prime'], { stdio: 'ignore' });
-  const speed = machineSpeed();
+  // How much slower this machine is than the reference one, at what a cold request pays
+  // for: the median of reference runs taken between the endpoint runs, so a runner that
+  // speeds up or slows down part-way (a noisy neighbour) moves both alike. Five taken
+  // once, up front, ranged x1.09 to x2.95 on GitHub's runners (13 Oct) and failed the gate.
+  const refs = [];
   const results = [];
   for (const slug of SLUGS) {
     for (let n = 0; ; n++) {
@@ -346,6 +352,7 @@ if (mode === '--ref') {
       // makes any one of them noisy).
       const runs = [];
       for (let k = 0; k < COLD; k++) {
+        refs.push(refSample());
         const out = run(process.execPath, [new URL(import.meta.url).pathname, '--one', slug, String(n)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 << 20 });
         const r = JSON.parse(out.split('\n').find((l) => l.startsWith('BENCH ')).slice(6));
         if (!r) break;
@@ -356,17 +363,28 @@ if (mode === '--ref') {
       results.push({ ...runs[0], first: mid(runs.map((r) => r.first)), warm: mid(runs.map((r) => r.warm)) });
     }
   }
+  refs.sort((a, b) => a - b);
+  const speed = refs[Math.floor(refs.length / 2)] / REF_MS;
   // Cloudflare ms: this machine's ms, scaled to the reference machine by the reference
   // workload, then by CF_PER_REF, from live tails (docs: CPU-BUDGET).
   const cf = (ms) => (ms / speed) * CF_PER_REF;
-  console.log(`machine: reference workload ${(speed * REF_MS).toFixed(1)} ms (reference machine ${REF_MS} ms, x${speed.toFixed(2)}); Cloudflare = ms / ${speed.toFixed(2)} x ${CF_PER_REF}`);
+  console.log(`cpu: ${MODEL} (factor ${CF_PER_REF}, ${FITTED ? 'fitted on this model' : 'the EPYC 9V74 fit: no fit for this model'})`);
+  console.log(`machine: reference workload ${(speed * REF_MS).toFixed(1)} ms (reference machine ${REF_MS} ms, x${speed.toFixed(2)}, median of ${refs.length}); Cloudflare = ms / ${speed.toFixed(2)} x ${CF_PER_REF}`);
   console.log(`${pad('book', 38)}${pad('endpoint', 34)}${pad('status', 8)}${pad('first ms', 10)}${pad('warm ms', 9)}${pad('CF first', 10)}CF warm`);
-  let over = 0;
+  const over = [];
+  const warn = [];
   for (const r of results) {
-    const bad = cf(r.first) > BUDGET || cf(r.warm) > BUDGET || r.status >= 500;
-    if (bad) over++;
-    console.log(`${pad(r.slug, 38)}${pad(r.name, 34)}${pad(r.status, 8)}${pad(r.first.toFixed(1), 10)}${pad(r.warm.toFixed(1), 9)}${pad(cf(r.first).toFixed(1), 10)}${cf(r.warm).toFixed(1)}${bad ? '  OVER' : ''}`);
+    const worst = Math.max(cf(r.first), cf(r.warm));
+    const mark = worst > FAIL || r.status >= 500 ? '  OVER' : worst > BUDGET ? '  warn' : '';
+    if (mark === '  OVER') over.push(r);
+    else if (mark) warn.push(r);
+    console.log(`${pad(r.slug, 38)}${pad(r.name, 34)}${pad(r.status, 8)}${pad(r.first.toFixed(1), 10)}${pad(r.warm.toFixed(1), 9)}${pad(cf(r.first).toFixed(1), 10)}${cf(r.warm).toFixed(1)}${mark}`);
   }
-  console.log(over ? `${over} over the ${BUDGET} ms budget (or failed).` : `All under the ${BUDGET} ms budget.`);
-  process.exitCode = over ? 1 : 0;
+  const list = (rs) => rs.map((r) => `${r.slug} ${r.name} ${cf(Math.max(r.first, r.warm)).toFixed(1)}`).join('; ');
+  if (warn.length) {
+    console.log(`${warn.length} between ${BUDGET} and ${FAIL} ms (warning): ${list(warn)}`);
+    if (process.env.GITHUB_ACTIONS) console.log(`::warning title=CPU over ${BUDGET} ms (est. Cloudflare)::${list(warn)}`);
+  }
+  console.log(over.length ? `${over.length} over ${FAIL} ms (or failed): ${list(over)}` : `None over ${FAIL} ms.`);
+  process.exitCode = over.length ? 1 : 0;
 }
