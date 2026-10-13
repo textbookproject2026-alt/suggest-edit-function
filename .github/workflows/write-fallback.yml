@@ -4,16 +4,15 @@
 # "Saving… this can take up to a minute" and reads the answer from /api/write-status.
 #
 # Started by the Worker (repository_dispatch c4n-write, through the GitHub App) the
-# moment a write is queued; every five minutes as a backstop, for one that wasn't
-# started or a run that died. A red run = a write that failed here too: its answer is
+# moment a write is queued, and again by the Worker's own five-minute cron for one
+# that wasn't started or a run that died (worker/writes.mjs backstop()). Not a GitHub
+# schedule: on 13 Oct GitHub ran a five-minute one not once in 3½ hours. A red run = a write that failed here too: its answer is
 # recorded for the page, and /api/health reports it.
 name: write-fallback
 
 on:
   repository_dispatch:
     types: [c4n-write]
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:

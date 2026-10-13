@@ -13,7 +13,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { platform } from '../lib/platform.mjs';
 import { serve } from './adapter.mjs';
-import { health, isWrite, sweep, write, writeStatus } from './writes.mjs';
+import { backstop, health, isWrite, sweep, write, writeStatus } from './writes.mjs';
 
 // Every route is imported here, up front. Cloudflare evaluates this before the first
 // request and doesn't count it in any request's CPU time (measured 11 Oct: a fresh
@@ -140,8 +140,16 @@ export default {
     return forClient(response, env.VERSION?.id);
   },
 
-  /** Daily: drop rate-limit windows that have closed, and old write answers and events. */
-  async scheduled(_event, env) {
+  /**
+   * Every five minutes: the write fallback's backstop. Daily: drop rate-limit windows
+   * that have closed, and old write answers and events.
+   */
+  async scheduled(event, env) {
+    if (event.cron === '*/5 * * * *') {
+      const n = await backstop(env.DB);
+      if (n) console.log(`backstop: ${n} write(s) waiting, write-fallback started`);
+      return;
+    }
     await env.DB.prepare('DELETE FROM hits WHERE until < ?1').bind(Date.now()).run();
     await sweep(env.DB);
   },
