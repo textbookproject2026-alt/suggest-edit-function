@@ -1,0 +1,31 @@
+# c4n-api's live CPU time per endpoint (scripts/cpu-live.mjs): P50/P95/P99/max from
+# Cloudflare, and the endpoints whose P99 is over 7 ms. Reports only.
+name: cpu-live
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: How many days back
+        default: '7'
+  pull_request:
+    paths: [scripts/cpu-live.mjs, .github/workflows/cpu-live.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - run: node scripts/cpu-live.mjs 7
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_TOKEN }}
+          DAYS: ${{ inputs.days || '7' }}

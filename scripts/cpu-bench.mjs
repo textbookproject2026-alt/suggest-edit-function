@@ -25,7 +25,7 @@ const RECORD = mode === 'record' || mode === '--record-one';
 const DISCOVER = mode === 'record';
 const BUDGET = Number(RECORD || mode === '--one' ? 7 : mode ?? 7);
 const RUNS = 15;
-const COLD = Number(process.env.BENCH_COLD ?? 3);
+const COLD = Number(process.env.BENCH_COLD ?? 5);
 const DIR = new URL('../fixtures/cpu/', import.meta.url);
 const SLUGS = mode === 'record' && rest.length ? rest : ['platform-test-book', 'ontology-for-social-research-a-criti'];
 
@@ -238,17 +238,10 @@ const REF_MS = Number(process.env.BENCH_REF_MS ?? 0) || REF_DEFAULT_MS();
 const CF_PER_REF = Number(process.env.BENCH_CF_PER_REF ?? 1.5);
 function REF_DEFAULT_MS() { return 11.7; }
 
-/** How much slower this machine is than the reference one, at what a cold request
- *  pays for: compiling and running code for the first time, and parsing JSON. The median
- *  of 5 fresh processes (`--ref`), each timing a fixed, generated workload once. */
-function machineSpeed() {
-  const times = [];
-  for (let i = 0; i < 5; i++) {
-    const out = execFileSync(process.execPath, [new URL(import.meta.url).pathname, '--ref'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-    times.push(Number(out.split('\n').find((l) => l.startsWith('REF ')).slice(4)));
-  }
-  times.sort((a, b) => a - b);
-  return times[2] / REF_MS;
+/** One run of the reference workload in a fresh process: its ms. */
+function refSample() {
+  const out = execFileSync(process.execPath, [new URL(import.meta.url).pathname, '--ref'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  return Number(out.split('\n').find((l) => l.startsWith('REF ')).slice(4));
 }
 
 /** The reference workload: 400 generated functions compiled and run once each (as a
@@ -338,7 +331,11 @@ if (mode === '--ref') {
 } else {
   const { execFileSync: run } = await import('node:child_process');
   run(process.execPath, [new URL(import.meta.url).pathname, '--prime'], { stdio: 'ignore' });
-  const speed = machineSpeed();
+  // How much slower this machine is than the reference one, at what a cold request pays
+  // for: the median of reference runs taken between the endpoint runs, so a runner that
+  // speeds up or slows down part-way (a noisy neighbour) moves both alike. Five taken
+  // once, up front, ranged x1.09 to x2.95 on GitHub's runners (13 Oct) and failed the gate.
+  const refs = [];
   const results = [];
   for (const slug of SLUGS) {
     for (let n = 0; ; n++) {
@@ -346,6 +343,7 @@ if (mode === '--ref') {
       // makes any one of them noisy).
       const runs = [];
       for (let k = 0; k < COLD; k++) {
+        refs.push(refSample());
         const out = run(process.execPath, [new URL(import.meta.url).pathname, '--one', slug, String(n)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 << 20 });
         const r = JSON.parse(out.split('\n').find((l) => l.startsWith('BENCH ')).slice(6));
         if (!r) break;
@@ -356,10 +354,12 @@ if (mode === '--ref') {
       results.push({ ...runs[0], first: mid(runs.map((r) => r.first)), warm: mid(runs.map((r) => r.warm)) });
     }
   }
+  refs.sort((a, b) => a - b);
+  const speed = refs[Math.floor(refs.length / 2)] / REF_MS;
   // Cloudflare ms: this machine's ms, scaled to the reference machine by the reference
   // workload, then by CF_PER_REF, from live tails (docs: CPU-BUDGET).
   const cf = (ms) => (ms / speed) * CF_PER_REF;
-  console.log(`machine: reference workload ${(speed * REF_MS).toFixed(1)} ms (reference machine ${REF_MS} ms, x${speed.toFixed(2)}); Cloudflare = ms / ${speed.toFixed(2)} x ${CF_PER_REF}`);
+  console.log(`machine: reference workload ${(speed * REF_MS).toFixed(1)} ms (reference machine ${REF_MS} ms, x${speed.toFixed(2)}, median of ${refs.length}); Cloudflare = ms / ${speed.toFixed(2)} x ${CF_PER_REF}`);
   console.log(`${pad('book', 38)}${pad('endpoint', 34)}${pad('status', 8)}${pad('first ms', 10)}${pad('warm ms', 9)}${pad('CF first', 10)}CF warm`);
   let over = 0;
   for (const r of results) {
