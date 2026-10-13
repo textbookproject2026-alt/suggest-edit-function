@@ -25,4 +25,4 @@ jobs:
       - run: scripts/cron-check.sh
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_TOKEN }}
-          HOURS: ${{ inputs.hours || '3' }}
+          HOURS: ${{ inputs.hours || '72' }}
