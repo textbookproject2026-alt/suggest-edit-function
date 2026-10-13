@@ -14,6 +14,14 @@ const { serve } = await import('../worker/adapter.mjs');
 const { platform } = await import('../lib/platform.mjs');
 const { default: worker } = await import('../worker/index.mjs');
 
+// Never a real repository_dispatch: with the App installed it would start a real
+// write-fallback run for every queued test write (13 Oct: ten runs per test run).
+const dispatched = [];
+testing.dispatch = async (key) => {
+  dispatched.push(key);
+  throw new Error('no App in the tests');
+};
+
 const ORIGIN = 'https://platform-test-book-2.pages.dev';
 const KEY = 'k'.repeat(20);
 const post = (query, body = '{"suggestion":"x"}') => {
@@ -127,6 +135,7 @@ test('a forced inline failure (CPU limit) completes through the fallback, once',
   assert.equal((await write(again, '/api/suggest-edit', ua, db, async () => assert.fail('not run'))).status, 201);
 
   // The health check lists it. The dispatch fails here (no App in the tests): logged too.
+  assert.ok(dispatched.includes(KEY), 'the queued write asked for a fallback run (stubbed)');
   const kinds = await events(db);
   assert.deepEqual(kinds.filter((k) => k !== 'dispatch-failed'), ['inline-failed', 'queued', 'fallback-done']);
   const h = await (await health(db)).json();
