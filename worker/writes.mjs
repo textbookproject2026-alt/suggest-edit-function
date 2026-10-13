@@ -21,6 +21,7 @@ import { createResolver, validateRegistry } from '../lib/registry.mjs';
 import { appCredentials, authorise, budget, ghJson } from '../lib/author.mjs';
 import { createRateLimiter } from '../lib/common.mjs';
 import { serve } from './adapter.mjs';
+import { HEARTBEAT } from '../lib/kv-cache.mjs';
 
 /** Routes that write (POST only); everything else is served as before. */
 export const WRITES = new Set([
@@ -43,6 +44,7 @@ const fallbackToken = appCredentials({ contents: 'write' });
  *  `dispatch` is replaced in the tests: they must never start a real fallback run. */
 export const testing = {
   dispatch: (key) => dispatch(key),
+  dispatchEvent: (type, payload) => dispatchEvent(type, payload),
   burn() {
     let x = 0;
     for (let i = 0; i < 4e9; i++) x = (x * 31 + i) % 1000003;
@@ -165,10 +167,30 @@ async function queue(request, path, url, db, key, seen, cors) {
 
 /** Start write-fallback now (the Worker's five-minute backstop picks up anything this misses). */
 async function dispatch(key) {
+  await dispatchEvent('c4n-write', { key });
+}
+
+/** A repository_dispatch on this repository, through the App. */
+async function dispatchEvent(type, payload) {
   const { token } = await fallbackToken({ slug: 'c4n-api', content: { repo: FALLBACK_REPO } }, 'fallback');
   await ghJson(`/repos/${FALLBACK_REPO}/dispatches`, token, budget(8000), {
-    method: 'POST', body: { event_type: 'c4n-write', client_payload: { key } },
+    method: 'POST', body: { event_type: type, client_payload: payload },
   });
+}
+
+/**
+ * Every five minutes, with the backstop: start refresh.yml (scripts/refresh.mjs) when
+ * its heartbeat is over 15 minutes old. GitHub's own 15-minute schedule ran three times
+ * in a day (13 Oct), and without a recent heartbeat every history read is worked out
+ * on the Worker (GitHub calls and parsing, against the 10 ms CPU limit) instead of
+ * read from KV. Returns whether it asked.
+ */
+export async function refreshIfStale(cache, start = (t, p) => testing.dispatchEvent(t, p), now = Date.now()) {
+  if (!cache) return false;
+  const beat = await cache.get(HEARTBEAT, 'json').catch(() => null);
+  if (now - (Number(beat?.at) || 0) < 15 * 60_000) return false;
+  await start('book-built', {}); // no slug: every book, and the heartbeat
+  return true;
 }
 
 // As scripts/fallback.mjs: a claimed write whose run died is taken again after this.

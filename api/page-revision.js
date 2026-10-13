@@ -54,7 +54,7 @@
  */
 import { REGISTRY, SHA_RE, Refusal, appCredentials, budget, encodePath, gh, ghJson, graphqlRepo, query, wrap } from '../lib/author.mjs';
 import { RawJson, clientIp, createRateLimiter, isSafePath, send } from '../lib/common.mjs';
-import { declinedChange, declinedItems } from '../lib/declined.mjs';
+import { declinedChange, declinedItems, newestFirst } from '../lib/declined.mjs';
 import { ahead, cacheKeys as keys } from '../lib/kv-cache.mjs';
 import { platform } from '../lib/platform.mjs';
 
@@ -241,7 +241,7 @@ export async function openItems(book, token, left) {
     seen.add(i.number);
     items.push(openItem(i, labelled(i, 'section-note') ? 'note' : labelled(i, 'proposed-edit') ? 'edit' : 'suggestion'));
   }
-  return items.sort((a, b) => b.date.localeCompare(a.date) || b.number - a.number);
+  return items.sort((a, b) => newestFirst(a.date, b.date) || b.number - a.number);
 }
 
 /** A 200, also kept in KV for good (revKey). */

@@ -13,3 +13,4 @@ node_modules/
 # Cloudflare (wrangler dev)
 .wrangler
 .dev.vars
+.bench-tokens.json

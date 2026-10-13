@@ -61,6 +61,14 @@ jobs:
           npm run test:worker
           echo "FUNCTION_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
+      # Every endpoint's CPU on the Worker's code path, replayed from recorded GitHub
+      # answers (fixtures/cpu/, scripts/cpu-bench.mjs): a fresh isolate's first request
+      # and warm ones, each under the budget, the free plan's 10 ms less headroom.
+      - name: CPU budget per endpoint (recorded fixtures)
+        run: |
+          set -euo pipefail
+          node scripts/cpu-bench.mjs "${CPU_BUDGET_MS:-7}" | grep -v '^config:'
+
       - name: Find the account, the KV namespace and the D1 database
         id: cf
         if: github.event_name != 'pull_request'

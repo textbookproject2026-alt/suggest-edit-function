@@ -32,7 +32,7 @@
  */
 import {
   SHA_RE, appCredentials, authorise, blobBytes, bookFor, booksFor, budget, draftsHead, encodePath, fail, ghJson,
-  isAuthorPath, isTextPath, limits, query, treeAt, wrap, Refusal,
+  graphqlRepo, isAuthorPath, isTextPath, limits, query, treeAt, wrap, Refusal,
 } from '../lib/author.mjs';
 import { jsonWithBase64, send } from '../lib/common.mjs';
 import { SUGGESTED, describeChange, parseSuggestion, readableChange } from '../lib/author-console.mjs';
@@ -91,12 +91,21 @@ async function file(book, token, left, params) {
   return jsonWithBase64({ path, sha: entry.sha, last }, bytes.toString('base64'));
 }
 
+// GraphQL with only the fields the author site shows, not REST's whole issue and pull
+// request objects (on the ontology book, 41 KB and 369 KB of JSON to parse, against the
+// Worker's 10 ms of CPU). The nodes are put in REST's shape for the shared parsers.
+const restOf = (n) => ({
+  number: n.number, title: n.title, body: n.body, created_at: n.createdAt, html_url: n.url, state: 'open',
+  labels: n.labels?.nodes ?? [],
+  user: n.author ? { login: n.author.__typename === 'Bot' ? `${n.author.login}[bot]` : n.author.login } : null,
+});
+
 async function suggestions(book, token, left) {
-  // GitHub's most per page, in one call (the Worker's CPU limit). ponytail: a book with
-  // over 100 open written suggestions shows its newest 100; page with Link if one ever does.
-  const items = await ghJson(
-    `/repos/${book.content.repo}/issues?labels=${SUGGESTED}&state=open&sort=created&direction=desc&per_page=100`, token, left);
-  return { suggestions: (items ?? []).map(parseSuggestion).filter(Boolean) };
+  // ponytail: a book with over 100 open written suggestions shows its newest 100.
+  const r = await graphqlRepo(book.content.repo, `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {
+    issues(states: OPEN, labels: ["${SUGGESTED}"], first: 100, orderBy: { field: CREATED_AT, direction: DESC }) { nodes { number title body createdAt url labels(first: 20) { nodes { name } } } }
+  } }`, {}, token, left);
+  return { suggestions: (r.issues?.nodes ?? []).map(restOf).map(parseSuggestion).filter(Boolean) };
 }
 
 async function suggestionChanges(book, token, left, params) {
@@ -108,10 +117,10 @@ async function suggestionChanges(book, token, left, params) {
 }
 
 async function changes(book, token, left) {
-  const prs = await ghJson(
-    `/repos/${book.content.repo}/pulls?state=open&sort=created&direction=desc&per_page=50&base=${encodeURIComponent(book.content.drafts_branch)}`,
-    token, left);
-  return { changes: (prs ?? []).map(describeChange) };
+  const r = await graphqlRepo(book.content.repo, `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {
+    pullRequests(states: OPEN, baseRefName: ${JSON.stringify(book.content.drafts_branch)}, first: 50, orderBy: { field: CREATED_AT, direction: DESC }) { nodes { number title body createdAt url author { __typename login } } }
+  } }`, {}, token, left);
+  return { changes: (r.pullRequests?.nodes ?? []).map(restOf).map(describeChange) };
 }
 
 async function change(book, token, left, params) {
