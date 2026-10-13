@@ -359,6 +359,8 @@ if (mode === '--ref') {
   // Cloudflare ms: this machine's ms, scaled to the reference machine by the reference
   // workload, then by CF_PER_REF, from live tails (docs: CPU-BUDGET).
   const cf = (ms) => (ms / speed) * CF_PER_REF;
+  const { cpus } = await import('node:os');
+  console.log(`cpu: ${cpus()[0]?.model} x${cpus().length}`);
   console.log(`machine: reference workload ${(speed * REF_MS).toFixed(1)} ms (reference machine ${REF_MS} ms, x${speed.toFixed(2)}, median of ${refs.length}); Cloudflare = ms / ${speed.toFixed(2)} x ${CF_PER_REF}`);
   console.log(`${pad('book', 38)}${pad('endpoint', 34)}${pad('status', 8)}${pad('first ms', 10)}${pad('warm ms', 9)}${pad('CF first', 10)}CF warm`);
   let over = 0;
