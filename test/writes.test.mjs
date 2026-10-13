@@ -266,13 +266,17 @@ test('every cron run logs its start and end and is recorded for /api/health', as
   } finally {
     console.log = log;
   }
-  assert.equal(logs[0], 'cron 1-59/5 * * * * start');
-  assert.match(logs[1], /^cron 1-59\/5 \* \* \* \* end \d+ms waiting=0 refresh=no$/);
-  assert.equal(logs[2], 'cron 17 3 * * * start');
-  assert.match(logs[3], /^cron 17 3 \* \* \* end \d+ms swept$/);
+  assert.deepEqual(logs.map((l) => l.replace(/ \d+ms /, ' Nms ')), [
+    'cron 1-59/5 * * * * start',
+    'cron jobs start',
+    'cron jobs end Nms waiting=0 refresh=no (1-59/5 * * * *)',
+    'cron 1-59/5 * * * * end Nms waiting=0 refresh=no (1-59/5 * * * *)',
+    'cron 17 3 * * * start',
+    'cron 17 3 * * * end Nms swept',
+  ]);
   const { cron } = await (await health(db)).json();
-  assert.deepEqual(Object.keys(cron).sort(), ['1-59/5 * * * *', '17 3 * * *']);
-  assert.equal(cron[EVERY_FIVE].detail, 'waiting=0 refresh=no');
+  assert.deepEqual(Object.keys(cron).sort(), ['1-59/5 * * * *', '17 3 * * *', 'jobs']);
+  assert.equal(cron.jobs.detail, 'waiting=0 refresh=no (1-59/5 * * * *)');
   // A run that fails still logs its end and throws (Cloudflare marks it failed); a D1 that's down can't record it.
   const errors = [];
   const error = console.error;
@@ -283,4 +287,34 @@ test('every cron run logs its start and end and is recorded for /api/health', as
     console.error = error;
   }
   assert.deepEqual(errors, ['cron run not recorded: D1 down']);
+});
+
+test('the five-minute jobs run once for two callers minutes apart (Cloudflare\'s cron, build-nudge\'s)', async () => {
+  const { periodic } = await import('../worker/index.mjs');
+  const db = fakeD1();
+  const log = console.log;
+  console.log = () => {};
+  try {
+    // A write left waiting: each real run would start the fallback.
+    await db.prepare(`INSERT INTO writes (key, route, state, at) VALUES ('left-queued-0000001', '/api/suggest-edit', 'queued', ?1)`).bind(Date.now() - 120_000).run();
+    const starts = [];
+    const saved = testing.dispatch;
+    testing.dispatch = async (key) => { starts.push(key); };
+    try {
+      assert.match(await periodic({ DB: db }, 'build-nudge */15 * * * *'), /^waiting=1 refresh=no/);
+      assert.equal(await periodic({ DB: db }, EVERY_FIVE), 'skipped: the jobs ran under 4 minutes ago');
+      assert.deepEqual(starts, [''], 'one fallback run, not two');
+      // Over four minutes later, it runs again.
+      await db.prepare(`UPDATE cron_runs SET started = started - 300000 WHERE cron = 'jobs'`).run();
+      assert.match(await periodic({ DB: db }, EVERY_FIVE), /^waiting=1/);
+      assert.equal(starts.length, 2);
+    } finally {
+      testing.dispatch = saved;
+    }
+  } finally {
+    console.log = log;
+  }
+  const { cron } = await (await health(db)).json();
+  assert.deepEqual(Object.keys(cron).sort(), ['1-59/5 * * * *', 'build-nudge */15 * * * *', 'jobs']);
+  assert.equal(cron['1-59/5 * * * *'].detail.startsWith('waiting=1'), true);
 });
