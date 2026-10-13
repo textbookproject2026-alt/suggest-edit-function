@@ -235,3 +235,16 @@ test('health: a failed start whose write has since drained is history after 15 m
   await db.prepare('INSERT INTO write_events (at, kind, route, detail) VALUES (?1, ?2, ?3, ?4)').bind(Date.now(), 'dispatch-failed', 'backstop', 'x').run();
   assert.equal((await health(db)).status, 503);
 });
+
+test('the five-minute cron starts the refresh only when its heartbeat is over 15 minutes old', async () => {
+  const { refreshIfStale } = await import('../worker/writes.mjs');
+  const now = Date.parse('2026-10-13T12:00:00Z');
+  const cache = (at) => ({ get: async () => (at === undefined ? null : { at }) });
+  const asked = [];
+  const start = async (type, payload) => { asked.push([type, payload]); };
+  assert.equal(await refreshIfStale(cache(now - 5 * 60_000), start, now), false, 'fresh: nothing');
+  assert.equal(await refreshIfStale(cache(now - 16 * 60_000), start, now), true, 'stale: started');
+  assert.equal(await refreshIfStale(cache(undefined), start, now), true, 'never stamped: started');
+  assert.equal(await refreshIfStale(null, start, now), false, 'no KV (Node): nothing');
+  assert.deepEqual(asked, [['book-built', {}], ['book-built', {}]], 'every book: no slug');
+});

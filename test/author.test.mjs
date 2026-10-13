@@ -619,6 +619,8 @@ test('accepting a draft change: squash-merged with the byline and the proposer\'
   const n = draftChange();
   const list = await get('changes', { book: BOOK.slug });
   assert.equal(list.payload.changes[0].number, n);
+  // From GraphQL (the CPU budget), shown as REST showed it: an App's login keeps [bot].
+  assert.equal(list.payload.changes[0].who, gh.repo(REPO).pulls.get(n).user.login);
   const detail = await get('change', { book: BOOK.slug, number: String(n) });
   assert.equal(detail.payload.readable, true);
   assert.deepEqual(detail.payload.pages[0].lines.find((l) => l.kind === 'after'), { kind: 'after', text: 'The three domains of reality.' });
