@@ -46,10 +46,14 @@ test/author.test.mjs           the author endpoints against test/fake-github.mjs
 test/fake-github.mjs           an in-memory GitHub with real git object ids
 worker/index.mjs               the Cloudflare Worker: routes (vercel.json's rewrites) and the daily D1 cleanup
 worker/adapter.mjs             a Fetch Request to the handlers' Node-style req/res, and back
+worker/writes.mjs              writes: a key per write in D1, the fallback queue, /api/write-status, /api/health
+scripts/fallback.mjs           the write fallback (write-fallback.yml): queued writes, same handlers, in Node
+test/writes.test.mjs           a write sent twice runs once; a failed write completes through the fallback
+test/fake-d1.mjs               D1 for the tests (node:sqlite)
 wrangler.toml                  the Worker: api.confused4now.org, KV TOKENS, D1 DB, vars
-migrations/                    D1 schema (rate-limit windows)
+migrations/                    D1 schema (rate-limit windows, write keys and events)
 test/via-worker.mjs            `npm run test:worker`: the whole suite through worker/adapter.mjs
-vercel.json                    the Vercel fallback: maxDuration and the two rewrites
+vercel.json                    the Vercel rollback (unused, until 27 Oct 2026): maxDuration and the two rewrites
 package.json                   pins Node 22 via engines; test and build scripts
 ```
 
@@ -72,36 +76,51 @@ book, the portal and the author site's proxy use. The same handlers (`api/`, `au
 run on both hosts; `worker/` only adapts a Fetch Request to them and does vercel.json's
 rewrites.
 
-**What runs where (the split).** The Worker is on Cloudflare's free plan: 10 ms of CPU a
-request. Reads and small writes fit; a commit to GitHub doesn't (measured 12 Oct: an
-author's save 12–35 ms). So the Worker forwards every route that commits to
-`https://suggest-edit-function.vercel.app` (Vercel stays as the write back end, not
-retired) and serves the rest itself:
+**Everything runs on the Worker (13 Oct 2026).** Reads, sign-in and every write,
+including the ones that commit to GitHub. Vercel's Hobby plan doesn't allow commercial
+use, so nothing is forwarded to Vercel any more.
 
-| On the Worker | Forwarded to Vercel, unchanged |
-|---|---|
-| `/api/history`, `/api/page-revision` (compare, Show changes, names) | `POST /api/propose-edit` (a reader's proposal) |
-| `GET /api/propose-edit` (the editor's page) | `POST /api/author-send` (an author's save, a decision's change) |
-| `/api/github-auth` (sign-in) | `POST /api/author-import` (an import) |
-| `/api/suggest-edit` (suggestions, notes) | `POST /api/author-act` (accept, decline, comment, publish) |
-| `/api/request-book` | `POST /api/author-people-change` (people, via a registry pull request) |
-| `/api/author-sync`, `author-read`, `author-history`, `author-people`, `GET author-import` | |
-| every `OPTIONS` preflight | |
+**Writes: a key, and a fallback** (`worker/writes.mjs`). The Worker is on Cloudflare's
+free plan, 10 ms of CPU a request, and a commit can take more (measured 12 Oct: an
+author's save 12–35 ms; most still finish). So:
 
-A forwarded request keeps its path, query, body and headers (identity, Origin, content
-type); Vercel's answer (CORS included) comes back as it is, marked `X-Served-By:
-vercel`. The reader's own address goes along in `x-c4n-client-ip`, signed with
-`FORWARD_SECRET` (`x-c4n-forward`, five minutes): Vercel's `clientIp` trusts it only with
-a valid signature, so its limits are per reader, as before. Both hosts hold the same
-`FORWARD_SECRET` and the same `IDENTITY_SECRET` (sign-in is served by the Worker, the
-proposal it signs is checked on Vercel): repository secrets here, copied to the Worker by
-`worker-secrets.yml`, and set on Vercel by hand (`vercel env`). Moving the writes onto the
-Worker too needs Workers Paid (30 s CPU); then empty `WRITES` in `worker/index.mjs`.
+- Every write (`POST` to `suggest-edit`, `propose-edit`, `request-book`, `author-send`,
+  `author-import`, `author-act`, `author-people-change`) carries `?write_key=`, made by
+  the page from the page load and the body. D1 table `writes` claims it before anything
+  is written: the same write sent twice runs once, and the repeat gets the first one's
+  answer (`X-Write: replayed`), or 202 while it is still running. A refusal (4xx) isn't
+  kept, so a corrected write can go again. A request without a key (a page built before
+  keys) is served as before.
+- If the write dies on the CPU limit (Cloudflare's error 1102: a 503 without CORS, which
+  a page sees as a network error) or answers 5xx, the page sends the same request again
+  with `&fallback=<what it saw>`. The Worker stores it in `writes.request` (an author's
+  request is checked first, since the author site's assertion can be read once; the
+  checked member goes with it) and starts `.github/workflows/write-fallback.yml`
+  (`repository_dispatch` `c4n-write`, by the GitHub App; every five minutes as a
+  backstop). That runs `scripts/fallback.mjs`: the same handler, in Node, with no CPU
+  limit, D1 and the cache over Cloudflare's API, and stores its answer. The page shows
+  "Saving… this can take up to a minute" and reads the answer from
+  `GET /api/write-status?write_key=`.
+- `GET /api/health` lists every write that failed on the Worker and every fallback
+  (`write_events`: `inline-failed`, `queued`, `dispatch-failed`, `fallback-done`,
+  `fallback-failed`), the last day's counts and anything still waiting; it answers 503
+  when a fallback failed or couldn't be started in the last day, or a write has waited
+  over ten minutes. Answers are kept a week, events three months (daily cron).
+- On the test books only, `&fail=cpu` spends CPU until Cloudflare stops the request, to
+  prove the fallback.
 
-**Rolling back.** Set `platform.suggest_edit_endpoint` in textbook-registry's
-`registry.json` back to `https://suggest-edit-function.vercel.app/api/suggest-edit` and
-let it rebuild the books; point the author site's proxy (`functions/_lib/core.js`
-`UPSTREAM`, `site/index.html` `tb-api`) back too. Vercel serves every route already.
+ponytail: a write the CPU limit stopped after one of its GitHub calls went through is
+run again from the start by the fallback, so that step can happen twice (an extra
+branch, say). Keeping each step's result per key is the upgrade if that shows up.
+
+**Vercel: unused, kept until 27 Oct 2026 as the rollback.** The Vercel project
+`suggest-edit-function` still deploys from `main` and serves every route, but nothing
+points at it. **Roll back** by setting `platform.suggest_edit_endpoint` in
+textbook-registry's `registry.json` to
+`https://suggest-edit-function.vercel.app/api/suggest-edit` and merging (the books pick it
+up on their next build), and pointing the author site's proxy (`functions/_lib/core.js`
+`UPSTREAM`, `site/index.html` `tb-api`) back too. Vercel holds the same
+`IDENTITY_SECRET`, so sign-ins stay valid. After 27 Oct the project can be retired.
 
 **How it deploys: only from CI.** `.github/workflows/worker.yml` runs on every push to
 `main`, by hand, and from textbook-registry's `deploy.yml` after every registry change
@@ -114,7 +133,7 @@ database `c4n-api`, applies `migrations/`, runs `wrangler deploy`, and waits for
 **Where its state lives.**
 - KV `c4n-api-tokens` (binding `TOKENS`): installation tokens, per repository and
   permission set, until 5 minutes before they expire. Memory caches in front of it.
-- D1 `c4n-api` (binding `DB`), table `hits`: rate limits, one fixed one-hour window per
+- D1 `c4n-api` (binding `DB`), tables `writes` and `write_events` (above), and `hits`: rate limits, one fixed one-hour window per
   limiter and key (an IP or a login), shared by every isolate. A daily cron deletes
   closed windows. A D1 failure lets the request through (logged). Under Node the
   limiters stay in memory, per instance.
@@ -148,26 +167,13 @@ with `minutes` it also tails the Worker and reports CPU time and subrequests per
 | --- | --- | --- |
 | `GITHUB_APP_PRIVATE_KEY` | `SUGGEST_EDIT_APP_PRIVATE_KEY` (the raw `.pem`) | base64-encoded by the workflow |
 | `GITHUB_OAUTH_CLIENT_SECRET` | `SIGNIN_OAUTH_CLIENT_SECRET` | the OAuth App "Textbook sign-in (api.confused4now.org)", callback `https://api.confused4now.org/api/github-auth` |
-| `IDENTITY_SECRET` | `IDENTITY_SECRET` | the same value as Vercel's: sign-in is served here, the proposal it signs is checked on Vercel. Without the repository secret, generated by the workflow as before |
-| `FORWARD_SECRET` | `FORWARD_SECRET` | signs the reader's address on writes forwarded to Vercel; Vercel holds the same value |
+| `IDENTITY_SECRET` | `IDENTITY_SECRET` | signs GitHub sign-ins; the same value as Vercel's (the rollback) and the fallback's. Without the repository secret, generated by the workflow as before |
 
-`GITHUB_APP_ID` and `GITHUB_OAUTH_CLIENT_ID` are plain vars in `wrangler.toml`. The
+`write-fallback.yml` reads the same repository secrets, and `CLOUDFLARE_WORKERS_TOKEN` for
+D1 and KV. `FORWARD_SECRET` (the reader's address on writes forwarded to Vercel, 12–13
+Oct) is gone from both sides. `GITHUB_APP_ID` and `GITHUB_OAUTH_CLIENT_ID` are plain vars in `wrangler.toml`. The
 deploy token is `CLOUDFLARE_WORKERS_TOKEN` (here and in textbook-registry); the account
 id is read from the zone. `PROPOSE_EDIT_ANONYMOUS` is unset (off) on both hosts.
-
-**The write back end: the Vercel project `suggest-edit-function`** at
-`https://suggest-edit-function.vercel.app`. It isn't retired: the Worker forwards every
-route that commits to it ("What runs where" above). Pushes to `main` deploy it, the
-registry's deploy hook rebuilds it, and `deployed.yml` watches it. Its environment holds
-the same `IDENTITY_SECRET` and `FORWARD_SECRET` as the Worker (set with `vercel env`;
-change both together). GitHub sign-in on it directly uses the old OAuth App "Textbook
-sign-in"; through the Worker, sign-in is the Worker's.
-
-**Roll back** by pointing the registry at Vercel: in textbook-registry set
-`platform.suggest_edit_endpoint` to `https://suggest-edit-function.vercel.app/api/suggest-edit`
-and merge. Its `validate` and `deploy` runs, then each book's next build (and the
-portal's and author site's next deploy), pick it up. The author site's proxy has a
-fixed upstream (`functions/` in author-site): change it there too.
 
 ---
 
