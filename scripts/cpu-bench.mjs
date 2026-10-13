@@ -68,7 +68,18 @@ const canned = (method, url, body) => {
 };
 
 const realFetch = globalThis.fetch;
+// Time spent in this stand-in for fetch (tape lookup, building the Response): on
+// Cloudflare a subrequest is I/O, not the Worker's CPU, so it is taken off each request.
+let stubMs = 0;
 globalThis.fetch = async (input, init = {}) => {
+  const t0 = performance.now();
+  try {
+    return await stubFetch(input, init);
+  } finally {
+    stubMs += performance.now() - t0;
+  }
+};
+async function stubFetch(input, init) {
   const url = String(input instanceof Request ? input.url : input);
   const method = (init.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
   const body = typeof init.body === 'string' ? init.body : undefined;
@@ -100,7 +111,7 @@ globalThis.fetch = async (input, init = {}) => {
   const text = (await res.text()).replace(/[A-Za-z0-9._%+-]+@(?!users\.noreply\.)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g, 'someone@example.invalid');
   tape[key] = { status: res.status, body: text, type: res.headers.get('content-type'), link: res.headers.get('link') ?? undefined };
   return new Response(text, { status: res.status, headers: { 'content-type': res.headers.get('content-type') ?? 'application/json', ...(res.headers.get('link') ? { link: res.headers.get('link') } : {}) } });
-};
+}
 
 // --- bindings ---------------------------------------------------------------------------
 const { fakeD1 } = await import('../test/fake-d1.mjs');
@@ -184,9 +195,10 @@ async function send(c) {
   }
   if (c.write) headers['cf-connecting-ip'] = `203.0.113.${1 + Math.floor(Math.random() * 200)}`;
   const req = new Request(c.write ? `${url}${url.includes('?') ? '&' : '?'}write_key=${randomBytes(12).toString('base64url')}` : url, { method: c.method, headers, body: c.body });
+  stubMs = 0;
   const t0 = performance.now();
   const res = await worker.fetch(req, env, ctx);
-  const ms = performance.now() - t0;
+  const ms = performance.now() - t0 - stubMs;
   await res.arrayBuffer();
   return { ms, status: res.status };
 }
@@ -219,6 +231,31 @@ async function one(slug, n) {
   return { slug, name: c.name, status: first.status, first: first.ms, warm: warm[Math.floor(warm.length / 2)] };
 }
 
+// The reference workload's time on the machine the numbers below were fitted on (an
+// M-series Mac, 13 Oct 2026), and Cloudflare's CPU ms per that machine's ms, fitted
+// from live tails of the same code (scripts/cpu-summary.mjs; docs: CPU-BUDGET).
+const REF_MS = Number(process.env.BENCH_REF_MS ?? 0) || REF_DEFAULT_MS();
+const CF_PER_REF = Number(process.env.BENCH_CF_PER_REF ?? 1.5);
+function REF_DEFAULT_MS() { return 10.7; }
+
+/** How much slower this machine is than the reference one: the median of 7 timings of
+ *  a fixed CPU-only workload (parse the ontology book's recorded answers, scan bodies). */
+function machineSpeed() {
+  const text = readFileSync(new URL('ontology-for-social-research-a-criti.json', DIR), 'utf8');
+  const times = [];
+  for (let i = 0; i < 9; i++) {
+    const t0 = performance.now();
+    for (let k = 0; k < 4; k++) {
+      const tape = JSON.parse(text);
+      for (const v of Object.values(tape)) [...v.body.matchAll(/"(?:number|sha|path)":\s*("?)[^",}]+\1/g)].length;
+      JSON.stringify(tape).length;
+    }
+    times.push(performance.now() - t0);
+  }
+  times.sort((a, b) => a - b);
+  return times[4] / REF_MS;
+}
+
 /** Node's own lazily loaded built-ins (undici's Request/Response, WebCrypto, streams),
  *  which workerd has ready in every isolate: used once before the clock, none of the
  *  Worker's code. */
@@ -244,10 +281,17 @@ if (mode === '--prime') {
   for (const slug of SLUGS) {
     tape = JSON.parse(readFileSync(new URL(`${slug}.json`, DIR), 'utf8'));
     for (const c of await cases(slug)) await send(c);
+    // The writes forgot the lists they change: read once more, as the next readers would.
+    for (const c of (await cases(slug)).filter((x) => !x.write)) await send(c);
   }
-  writeFileSync(TOKENS_FILE, JSON.stringify(env.TOKENS.dump()));
+  writeFileSync(TOKENS_FILE, JSON.stringify({ tokens: env.TOKENS.dump(), cache: env.CACHE.dump() }));
 } else if (mode === '--one') {
-  if (existsSync(TOKENS_FILE)) env.TOKENS.load(JSON.parse(readFileSync(TOKENS_FILE, 'utf8')));
+  if (existsSync(TOKENS_FILE)) {
+    const kept = JSON.parse(readFileSync(TOKENS_FILE, 'utf8'));
+    env.TOKENS.load(kept.tokens);
+    // BENCH_KV=1: KV as the refresh and earlier requests leave it (the live tails' path).
+    if (process.env.BENCH_KV === '1') env.CACHE.load(kept.cache);
+  }
   await warmPlatform();
   console.log(`BENCH ${JSON.stringify(await one(rest[0], Number(rest[1])))}`);
 } else if (mode === '--record-one') {
@@ -277,6 +321,7 @@ if (mode === '--prime') {
 } else {
   const { execFileSync: run } = await import('node:child_process');
   run(process.execPath, [new URL(import.meta.url).pathname, '--prime'], { stdio: 'ignore' });
+  const speed = machineSpeed();
   const results = [];
   for (const slug of SLUGS) {
     for (let n = 0; ; n++) {
@@ -294,12 +339,16 @@ if (mode === '--prime') {
       results.push({ ...runs[0], first: mid(runs.map((r) => r.first)), warm: mid(runs.map((r) => r.warm)) });
     }
   }
-  console.log(`${pad('book', 38)}${pad('endpoint', 34)}${pad('status', 8)}${pad('first ms', 10)}warm ms`);
+  // Cloudflare ms: this machine's ms, scaled to the reference machine by the reference
+  // workload, then by CF_PER_REF, from live tails (docs: CPU-BUDGET).
+  const cf = (ms) => (ms / speed) * CF_PER_REF;
+  console.log(`machine: reference workload ${(speed * REF_MS).toFixed(1)} ms (reference machine ${REF_MS} ms, x${speed.toFixed(2)}); Cloudflare = ms / ${speed.toFixed(2)} x ${CF_PER_REF}`);
+  console.log(`${pad('book', 38)}${pad('endpoint', 34)}${pad('status', 8)}${pad('first ms', 10)}${pad('warm ms', 9)}${pad('CF first', 10)}CF warm`);
   let over = 0;
   for (const r of results) {
-    const bad = r.first > BUDGET || r.warm > BUDGET || r.status >= 500;
+    const bad = cf(r.first) > BUDGET || cf(r.warm) > BUDGET || r.status >= 500;
     if (bad) over++;
-    console.log(`${pad(r.slug, 38)}${pad(r.name, 34)}${pad(r.status, 8)}${pad(r.first.toFixed(1), 10)}${r.warm.toFixed(1)}${bad ? '  OVER' : ''}`);
+    console.log(`${pad(r.slug, 38)}${pad(r.name, 34)}${pad(r.status, 8)}${pad(r.first.toFixed(1), 10)}${pad(r.warm.toFixed(1), 9)}${pad(cf(r.first).toFixed(1), 10)}${cf(r.warm).toFixed(1)}${bad ? '  OVER' : ''}`);
   }
   console.log(over ? `${over} over the ${BUDGET} ms budget (or failed).` : `All under the ${BUDGET} ms budget.`);
   process.exitCode = over ? 1 : 0;
