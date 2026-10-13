@@ -194,3 +194,35 @@ test('the Worker: /api/health and /api/write-status; nothing is forwarded to Ver
     globalThis.fetch = saved;
   }
 });
+
+test('the five-minute backstop starts the fallback only for writes left waiting', async () => {
+  const { backstop } = await import('../worker/writes.mjs');
+  const db = fakeD1();
+  const starts = [];
+  const start = async (key) => { starts.push(key); };
+  const at = (ago) => Date.now() - ago;
+  await db.prepare(`INSERT INTO writes (key, route, state, at) VALUES ('fresh-queued-000001', '/api/suggest-edit', 'queued', ?1)`).bind(at(5_000)).run();
+  await db.prepare(`INSERT INTO writes (key, route, state, at) VALUES ('running-fallback-01', '/api/suggest-edit', 'fallback', ?1)`).bind(at(60_000)).run();
+  assert.equal(await backstop(db, start), 0, 'just queued (its own dispatch is on the way) or a fallback still running');
+  assert.deepEqual(starts, []);
+  await db.prepare(`INSERT INTO writes (key, route, state, at) VALUES ('left-queued-0000001', '/api/suggest-edit', 'queued', ?1)`).bind(at(120_000)).run();
+  await db.prepare(`INSERT INTO writes (key, route, state, at) VALUES ('dead-fallback-00001', '/api/suggest-edit', 'fallback', ?1)`).bind(at(11 * 60_000)).run();
+  assert.equal(await backstop(db, start), 2);
+  assert.deepEqual(starts, [''], 'one run, no key: it takes every waiting write');
+  // A start that fails is logged, and health turns 503 while it is recent.
+  await backstop(db, async () => { throw new Error('the app isn\'t installed'); });
+  assert.equal((await health(db)).status, 503);
+});
+
+test('health: a failed start whose write has since drained is history after 15 minutes', async () => {
+  const db = fakeD1();
+  const old = Date.now() - 20 * 60_000;
+  for (const kind of ['inline-failed', 'queued', 'dispatch-failed', 'fallback-done']) {
+    await db.prepare('INSERT INTO write_events (at, kind, route, detail) VALUES (?1, ?2, ?3, ?4)').bind(old, kind, '/api/suggest-edit', '').run();
+  }
+  const h = await health(db);
+  assert.equal(h.status, 200);
+  assert.equal((await h.json()).lastDay['dispatch-failed'], 1, 'still listed');
+  await db.prepare('INSERT INTO write_events (at, kind, route, detail) VALUES (?1, ?2, ?3, ?4)').bind(Date.now(), 'dispatch-failed', 'backstop', 'x').run();
+  assert.equal((await health(db)).status, 503);
+});

@@ -161,12 +161,32 @@ async function queue(request, path, url, db, key, seen, cors) {
   return pending(key, cors, 'queued');
 }
 
-/** Start write-fallback now (its five-minute schedule picks up anything this misses). */
+/** Start write-fallback now (the Worker's five-minute backstop picks up anything this misses). */
 async function dispatch(key) {
   const { token } = await fallbackToken({ slug: 'c4n-api', content: { repo: FALLBACK_REPO } }, 'fallback');
   await ghJson(`/repos/${FALLBACK_REPO}/dispatches`, token, budget(8000), {
     method: 'POST', body: { event_type: 'c4n-write', client_payload: { key } },
   });
+}
+
+// As scripts/fallback.mjs: a claimed write whose run died is taken again after this.
+const STALE_MS = 10 * 60_000;
+// A write queued this recently has a dispatch of its own on the way.
+const FRESH_MS = 60_000;
+
+/**
+ * Every five minutes (the Worker's cron, wrangler.toml): start write-fallback for any
+ * write still waiting, with no key, so the run takes them all. GitHub's own schedule
+ * can't be the backstop: on 13 Oct a five-minute schedule ran not once in 3½ hours,
+ * and a fifteen-minute one three times in a day. Returns how many were waiting.
+ */
+export async function backstop(db, start = dispatch) {
+  const now = Date.now();
+  const w = await db.prepare(`SELECT COUNT(*) AS n FROM writes WHERE (state = 'queued' AND at < ?1) OR (state = 'fallback' AND at < ?2)`)
+    .bind(now - FRESH_MS, now - STALE_MS).first();
+  if (!w?.n) return 0;
+  await start('').catch((err) => event(db, 'dispatch-failed', 'backstop', err.message));
+  return w.n;
 }
 
 /** GET /api/write-status?write_key=: the answer once there is one, else 202. */
@@ -182,8 +202,10 @@ export async function writeStatus(url, db) {
 
 /**
  * GET /api/health: every write that failed on the Worker and every fallback, the last
- * day's counts, and anything still waiting. 503 when a fallback failed or couldn't be
- * started in the last day, or a queued write has waited over ten minutes.
+ * day's counts, and anything still waiting. 503 when a fallback failed in the last day,
+ * a fallback couldn't be started in the last 15 minutes (the backstop tries again every
+ * five, so an older failure whose write has since drained is history, not a fault), or a
+ * queued write has waited over ten minutes.
  */
 export async function health(db) {
   const now = Date.now();
@@ -194,7 +216,8 @@ export async function health(db) {
   ]);
   const day = Object.fromEntries((counts.results ?? []).map((r) => [r.kind, r.n]));
   const stuck = waiting?.n > 0 && now - waiting.oldest > 10 * 60_000;
-  const ok = !day['fallback-failed'] && !day['dispatch-failed'] && !stuck;
+  const startFailing = (recent.results ?? []).some((e) => e.kind === 'dispatch-failed' && now - e.at < 15 * 60_000);
+  const ok = !day['fallback-failed'] && !startFailing && !stuck;
   return json(ok ? 200 : 503, {
     ok,
     lastDay: day,
