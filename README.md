@@ -177,6 +177,41 @@ id is read from the zone. `PROPOSE_EDIT_ANONYMOUS` is unset (off) on both hosts.
 
 ---
 
+## CPU budget (`scripts/cpu-bench.mjs`)
+
+The Worker runs on Cloudflare's free plan: 10 ms of CPU per request, and a request over
+it fails with error 1102. Most requests on a quiet site land in a fresh isolate, where
+every function the route runs is compiled on the way, so a route's *first* request is
+what has to fit.
+
+`node scripts/cpu-bench.mjs [budgetMs]` sends every endpoint through the Worker's own
+`fetch()` (worker/index.mjs). GitHub's answers come from `fixtures/cpu/` (two books,
+recorded), and so does the author site's assertion read-back. KV, D1 and the Cache API
+are in memory. Each endpoint runs in its own fresh process (the median of 3) for its
+first request, then warm; the time spent in the stand-in `fetch` is taken off, because
+on Cloudflare a subrequest is I/O, not the Worker's CPU. `BENCH_KV=1` starts each
+process with KV as the refresh and earlier requests leave it.
+
+The numbers are in Cloudflare milliseconds. They are this machine's milliseconds,
+scaled by a reference workload (compiling and running generated code once, then parsing
+JSON, in a fresh process; 11.7 ms on the machine the fit was made on) and by 1.5,
+Cloudflare's CPU per reference-machine millisecond. The 1.5 was fitted from live tails
+(`measure.yml`, `scripts/cpu-summary.mjs`) of the same routes on 13 Oct 2026: about 1×
+at the median and 2× at p95. Override with `BENCH_REF_MS` and `BENCH_CF_PER_REF`.
+
+`worker.yml` runs it on every pull request and fails at 7 ms (the 10 ms limit less
+headroom). After a change to which GitHub calls a route makes, re-record:
+`node scripts/cpu-bench.mjs record` (gh's token, GETs and read-only GraphQL only;
+writes are answered with canned replies, never sent; email addresses are scrubbed).
+
+What keeps routes under it:
+- no `localeCompare` (or other `Intl`) on a request path: its first call sets up ICU,
+  about 8 ms;
+- GraphQL with only the fields shown, not REST list objects;
+- what doesn't change kept in KV (`lib/kv-cache.mjs`); the compare of two commits is
+  kept under both heads;
+- refresh.yml kept fresh by the Worker's five-minute cron, so history reads come from KV.
+
 ## The contract
 
 Fixed by the live front-end. Do not change either side alone.
