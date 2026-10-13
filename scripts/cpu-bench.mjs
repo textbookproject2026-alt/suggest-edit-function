@@ -241,10 +241,10 @@ function REF_DEFAULT_MS() { return 11.7; }
 /** How much slower this machine is than the reference one, at what a cold request
  *  pays for: compiling and running code for the first time, and parsing JSON. The median
  *  of 5 fresh processes (`--ref`), each timing a fixed, generated workload once. */
-function machineSpeed() {
+function machineSpeed(flags = []) {
   const times = [];
   for (let i = 0; i < 5; i++) {
-    const out = execFileSync(process.execPath, [new URL(import.meta.url).pathname, '--ref'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const out = execFileSync(process.execPath, [...flags, new URL(import.meta.url).pathname, '--ref'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     times.push(Number(out.split('\n').find((l) => l.startsWith('REF ')).slice(4)));
   }
   times.sort((a, b) => a - b);
@@ -339,6 +339,8 @@ if (mode === '--ref') {
   const { execFileSync: run } = await import('node:child_process');
   run(process.execPath, [new URL(import.meta.url).pathname, '--prime'], { stdio: 'ignore' });
   const speed = machineSpeed();
+  const os = await import('node:os');
+  console.log(`EXPERIMENT cpu=${os.cpus()[0]?.model} n=${os.cpus().length} ref=${(speed * REF_MS).toFixed(1)} ref-single=${(machineSpeed(['--single-threaded']) * REF_MS).toFixed(1)}`);
   const results = [];
   for (const slug of SLUGS) {
     for (let n = 0; ; n++) {
