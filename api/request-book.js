@@ -448,7 +448,7 @@ async function handle(req, res) {
   }
   // A bot is never told it was caught.
   if (asString(body.website)) {
-    console.warn(`honeypot: discarded book request from ip=${ip}`);
+    console.warn(`honeypot: discarded book request`);
     send(res, 201, { reference: 'received' });
     return;
   }
@@ -459,7 +459,7 @@ async function handle(req, res) {
 
   const v = validate(body);
   if (!v.ok) {
-    console.warn(`${v.error} (ip=${ip})`);
+    console.warn(`${v.error}`);
     send(res, 400, { error: v.error, userMessage: v.userMessage });
     return;
   }
@@ -476,7 +476,7 @@ async function handle(req, res) {
     try {
       const checked = checkAll(await checkParts(credential.token, d.files));
       if (!checked.ok) {
-        console.warn(`validation: ${checked.why} (ip=${ip})`);
+        console.warn(`validation: ${checked.why}`);
         send(res, 400, { error: `validation: ${checked.why}`, userMessage: checked.user ?? 'One of the files could not be read.' });
         return;
       }

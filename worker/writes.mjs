@@ -19,7 +19,7 @@
 import BUNDLE from '../registry/bundled.mjs';
 import { createResolver, validateRegistry } from '../lib/registry.mjs';
 import { appCredentials, authorise, budget, ghJson } from '../lib/author.mjs';
-import { createRateLimiter } from '../lib/common.mjs';
+import { createRateLimiter, hashKey } from '../lib/common.mjs';
 import { serve } from './adapter.mjs';
 import { HEARTBEAT } from '../lib/kv-cache.mjs';
 
@@ -154,7 +154,8 @@ async function queue(request, path, url, db, key, seen, cors) {
     const v = request.headers.get(h);
     if (v) headers[h] = v;
   }
-  if (ip) headers['cf-connecting-ip'] = ip;
+  // Never the address itself: its rate-limit key, which the fallback's limiter uses as it is.
+  if (ip) headers['cf-connecting-ip'] = await hashKey(ip, now);
   const stored = JSON.stringify({ path, search: search.toString(), headers, body, auth: auth && { identity: auth.identity, tag: auth.tag } });
   const queued = await db.prepare(
     `INSERT INTO writes (key, route, state, at, request) VALUES (?1, ?2, 'queued', ?3, ?4)

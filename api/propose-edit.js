@@ -567,13 +567,13 @@ async function handlePost(req, res, book, origin, tag) {
   const ip = clientIp(req);
   // Honeypot: only the anonymous form has the field. A bot gets a success shape.
   if (asString(body.website)) {
-    console.warn(`honeypot: discarded proposal from ip=${ip} ${tag}`);
+    console.warn(`honeypot: discarded proposal ${tag}`);
     send(res, 201, { prUrl: `https://github.com/${book.content.repo}/pulls` });
     return;
   }
   const result = validate(body, origin);
   if (!result.ok) {
-    console.warn(`${result.error} (ip=${ip}) ${tag}`);
+    console.warn(`${result.error} ${tag}`);
     send(res, result.status, { error: result.error, userMessage: result.userMessage });
     return;
   }
