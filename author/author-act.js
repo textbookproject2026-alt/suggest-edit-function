@@ -34,15 +34,17 @@
  * (one send path), which replies and closes after the commit.
  */
 import { lintAt, lintWords } from '../lib/lint-job.mjs';
+import { NEEDS_LOOK, markNeedsLook, readPull, reapply, startRefresh } from '../lib/reapply.mjs';
+import { platform } from '../lib/platform.mjs';
 import {
-  SHA_RE, Refusal, appCredentials, authorise, bookFor, budget, byline, fail, gh, ghJson, limits, wrap,
+  GitHubError, SHA_RE, Refusal, appCredentials, authorise, bookFor, budget, byline, fail, gh, ghJson, limits, wrap,
 } from '../lib/author.mjs';
 import { isJsonContentType, parseBody, send, withLabels } from '../lib/common.mjs';
 import { cacheKeys, forget } from '../lib/kv-cache.mjs';
 import { COMMENT_MIN, cleanText, commentOf, declineComment, isDeclined, kindOf, memberComment } from '../lib/declined.mjs';
 import {
   ACCEPTED, ACCEPTED_LABEL, NEEDS_TRIAGE, PUBLISH_STATE_WORDS, PUBLISH_TITLE, PUBLISHED_STEPS, checkReply, declined,
-  describePublish, publishRequestBody, takenOn, thanksWithChange,
+  describeChange, describePublish, publishRequestBody, takenOn, thanksWithChange,
 } from '../lib/author-console.mjs';
 import {
   acceptedAt, changesSince, compareDrafts, liveServes, mergeability, openPublishRequest, publishChecks, suggestion,
@@ -212,8 +214,8 @@ async function suggestionMade(book, body, ctx) {
 // --- draft changes and going live -------------------------------------------------
 
 /** An open PR into this book's drafts branch, from anywhere, or a Refusal. */
-async function draftChange(book, n, token, left) {
-  const pr = await ghJson(`/repos/${book.content.repo}/pulls/${n}`, token, left);
+async function draftChange(book, n, token, left, read = null) {
+  const pr = read ?? await ghJson(`/repos/${book.content.repo}/pulls/${n}`, token, left);
   if (pr?.state !== 'open' || pr.base?.ref !== book.content.drafts_branch
       || String(pr.base?.repo?.full_name).toLowerCase() !== book.content.repo.toLowerCase()) {
     throw new Refusal(409, 'not an open draft change', "That isn't an open draft change for this book any more. Press “Check again”.");
@@ -258,9 +260,9 @@ async function openOrRefresh(book, token, left, identity, tag) {
  * in-site edit is the App; the reader's own commits carry their noreply address, and
  * this keeps their credit in the one commit that lands. Bots are left out.
  */
-async function coAuthors(book, pr, token, left, tag) {
+async function coAuthors(book, pr, token, left, tag, read = null) {
   try {
-    const commits = await ghJson(`/repos/${book.content.repo}/pulls/${pr.number}/commits?per_page=100`, token, left);
+    const commits = read ?? await ghJson(`/repos/${book.content.repo}/pulls/${pr.number}/commits?per_page=100`, token, left);
     const seen = new Map();
     for (const c of commits ?? []) {
       const a = c?.commit?.author;
@@ -274,23 +276,95 @@ async function coAuthors(book, pr, token, left, tag) {
   }
 }
 
+const hasLook = (pr) => (pr.labels ?? []).some((l) => l?.name === NEEDS_LOOK);
+const OVERLAP_WORDS = 'This paragraph has changed since this suggestion was made.';
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Re-apply a proposal onto the drafts as they are now, or refuse in words the author can act on. -> the new head sha. */
+async function refreshed(book, pr, ctx, prefer, commits) {
+  const { token, left, tag } = ctx;
+  if (platform.cpuCapped) {
+    // Merging it again is more than the Worker's 10 ms of CPU allows on top of an accept:
+    // answered 503 at once, before any of it, so the page sends it to the Actions fallback
+    // ("Applying…"), which runs this same accept with no cap.
+    console.log(`draft change #${pr.number}: the drafts moved under it, left to the fallback to merge again ${tag}`);
+    throw new Refusal(503, 'reapply in actions', 'Applying… this can take up to a minute.');
+  }
+  const r = await reapply(book, pr, token, left, { prefer, commits });
+  if (r.state === 'overlap') {
+    if (!hasLook(pr)) await markNeedsLook(book, pr.number, true, token, left, tag);
+    throw new Refusal(409, 'overlap', OVERLAP_WORDS, { overlap: { number: pr.number, paragraphs: r.overlaps } });
+  }
+  if (r.state === 'already') {
+    throw new Refusal(409, 'already in drafts', 'Everything this suggestion changes is already in the drafts, so there is nothing left to accept. You can decline it as outdated.');
+  }
+  if (r.state === 'unsupported') {
+    throw new Refusal(409, 'cannot reapply', `The drafts have changed since this suggestion was made, and it can't be brought up to date here because ${r.why}. Open it on GitHub, or decline it as outdated.`);
+  }
+  if (hasLook(pr)) await markNeedsLook(book, pr.number, false, token, left, tag);
+  console.log(`draft change #${pr.number} brought up to date with the drafts${prefer === 'suggested' ? ' (the suggestion kept where it overlapped)' : ''} ${tag}`);
+  return r.sha;
+}
+
+/** Squash-merge at `sha`; GitHub may take a moment to see a branch that just moved. -> merged, or the GitHub error. */
+async function squash(book, pr, sha, message, ctx) {
+  const { token, left } = ctx;
+  for (let i = 0; ; i++) {
+    try {
+      return await ghJson(`/repos/${book.content.repo}/pulls/${pr.number}/merge`, token, left, { method: 'PUT', body: { ...message, merge_method: 'squash', sha } });
+    } catch (err) {
+      if (!(err instanceof GitHubError) || err.status !== 405 || i >= 3 || !ctx.retry) throw err;
+      await sleep(1500);
+    }
+  }
+}
+
 async function changeAccept(book, body, ctx) {
   const { token, left, identity, tag } = ctx;
-  const pr = await draftChange(book, number(body), token, left);
+  if (body.resolve !== undefined && body.resolve !== 'suggestion') throw new Refusal(400, 'validation: resolve', "That isn't one of the choices offered.");
+  const prefer = body.resolve === 'suggestion' ? 'suggested' : 'current';
+  // Accepted already (a second click, or Actions finishing what the API began): done, not an error.
+  const was = await readPull(book.content.repo, number(body), token, left);
+  if (!was) throw new Refusal(409, 'not an open draft change', "That isn't an open draft change for this book any more. Press “Check again”.");
+  if (was?.merged && was.base?.ref === book.content.drafts_branch) {
+    return { done: true, steps: ['This change is already in the drafts area.'], publish: null };
+  }
+  const pr = await draftChange(book, number(body), token, left, was);
   const title = String(body.title ?? pr.title ?? 'Accepted draft change').replace(/\s+/g, ' ').slice(0, 200);
-  const credits = await coAuthors(book, pr, token, left, tag);
-  const merged = await ghJson(`/repos/${book.content.repo}/pulls/${pr.number}/merge`, token, left, {
-    method: 'PUT',
-    body: {
-      merge_method: 'squash',
-      commit_title: `${title} (#${pr.number})`,
-      commit_message: `Proposed in #${pr.number}.\n\nAccepted ${byline(identity)}.${credits}`,
-      sha: pr.head?.sha,
-    },
-  });
+  const commits = await ghJson(`/repos/${book.content.repo}/pulls/${pr.number}/commits?per_page=100`, token, left);
+  const credits = await coAuthors(book, pr, token, left, tag, commits);
+  const message = { commit_title: `${title} (#${pr.number})`, commit_message: `Proposed in #${pr.number}.\n\nAccepted ${byline(identity)}.${credits}` };
+  // A proposal GitHub can't merge (the drafts changed under it), or one whose overlap the
+  // author has chosen for: merged again word by word first.
+  let sha = pr.head?.sha;
+  let redone = false;
+  if (pr.mergeable === false || body.resolve) {
+    sha = await refreshed(book, pr, ctx, prefer, commits);
+    redone = true;
+  }
+  let merged;
+  try {
+    merged = await squash(book, pr, sha, message, { ...ctx, retry: redone });
+  } catch (err) {
+    if (!(err instanceof GitHubError) || err.status !== 405 || redone) throw err;
+    sha = await refreshed(book, pr, ctx, prefer, commits); // GitHub hadn't yet said it couldn't merge
+    merged = await squash(book, pr, sha, message, { ...ctx, retry: true });
+  }
   if (!merged?.merged) throw new Refusal(502, 'merge not confirmed', 'GitHub did not confirm the change was accepted. Press “Check again” and look before trying once more.');
   console.log(`draft change #${pr.number} accepted ${byline(identity)} ${tag}`);
   const steps = ['The change was folded into the drafts area.'];
+  // The other proposals on its page, brought up to date (or marked "needs a look") so the
+  // next Accept just works: in Actions (proposals.yml, about a minute), as that is more
+  // GitHub calls and merging than an accept has time or CPU for.
+  const path = describeChange(pr).path;
+  if (path) {
+    try {
+      await startRefresh(book.slug, path, left, tag);
+      steps.push('Other suggestions on this page are being brought up to date, so they can be accepted too (about a minute).');
+    } catch (err) {
+      console.warn(`after #${pr.number}: other proposals not refreshed — ${err.message} ${tag}`);
+    }
+  }
   let publish;
   try {
     publish = await openOrRefresh(book, token, left, identity, tag);

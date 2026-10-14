@@ -49,6 +49,7 @@ worker/index.mjs               the Cloudflare Worker: routes (vercel.json's rewr
 worker/adapter.mjs             a Fetch Request to the handlers' Node-style req/res, and back
 worker/writes.mjs              writes: a key per write in D1, the fallback queue, /api/write-status, /api/health
 scripts/fallback.mjs           the write fallback (write-fallback.yml): queued writes, same handlers, in Node
+scripts/refresh-proposals.mjs  readers' proposals merged again with the drafts word by word (proposals.yml); after an accept, and the backlog
 test/writes.test.mjs           a write sent twice runs once; a failed write completes through the fallback
 test/fake-d1.mjs               D1 for the tests (node:sqlite)
 wrangler.toml                  the Worker: api.confused4now.org, KV TOKENS, D1 DB, vars

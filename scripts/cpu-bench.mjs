@@ -66,6 +66,12 @@ const canned = (method, url, body) => {
   if (/\/issues\/\d+$/.test(path) && method === 'PATCH') return json(200, { number: 1, state: 'closed' });
   if (/\/labels/.test(path)) return json(200, [{ name: 'x' }]);
   if (/\/dispatches$/.test(path)) return new Response(null, { status: 204 });
+  // Accepting a proposal (author-act change-accept): the merge commit on its branch, the merge, the publish request.
+  if (/\/git\/(trees|commits)$/.test(path) && method === 'POST') return json(201, { sha: 'b'.repeat(40) });
+  if (/\/git\/refs\/heads\//.test(path) && method === 'PATCH') return json(200, { object: { sha: 'b'.repeat(40) } });
+  if (/\/pulls\/\d+\/merge$/.test(path) && method === 'PUT') return json(200, { merged: true, sha: 'c'.repeat(40) });
+  if (/\/pulls\/\d+$/.test(path) && method === 'PATCH') return null; // answered from the tape's GET, below
+
   return null;
 };
 
@@ -93,6 +99,8 @@ async function stubFetch(input, init) {
   if (!(method === 'GET' || graphql)) {
     const c = canned(method, url, body);
     if (c) return c;
+    // A PATCH of a pull request answers with the pull request: as recorded by its GET.
+    if (method === 'PATCH' && /\/pulls\/\d+$/.test(url.split('?')[0])) return stubFetch(url, { method: 'GET' });
   }
   if (method === 'POST' && /access_tokens$/.test(url)) return canned(method, url, body);
   if (method === 'GET' && /\/installation$/.test(url)) return canned(method, url);
@@ -166,13 +174,18 @@ async function cases(slug) {
   if (meta.suggestion) {
     out.push({ name: 'author-act[suggestion-decline]', member: true, method: 'POST', url: '/api/author-act', body: JSON.stringify({ book: slug, action: 'suggestion-decline', number: meta.suggestion, reason: 'A measured decline, never sent.' }), write: true });
   }
+  if (meta.proposal) {
+    // Accepting a reader's edit the drafts have moved under: on the Worker, handed to the
+    // Actions fallback (503) before any merging, which costs more CPU than it has.
+    out.push({ name: 'author-act[change-accept]', member: true, method: 'POST', url: '/api/author-act', body: JSON.stringify({ book: slug, action: 'change-accept', number: meta.proposal }), write: true, expect: 503 });
+  }
   if (meta.declined) {
     out.push({ name: 'author-act[comment-add]', member: true, method: 'POST', url: '/api/author-act', body: JSON.stringify({ book: slug, action: 'comment-add', number: meta.declined, text: 'A measured comment, never sent.' }), write: true });
   }
   return out;
 }
 
-/** What the cases need from the book: a page, two of its commits, an open suggestion, a declined item. */
+/** What the cases need from the book: a page, two of its commits, an open suggestion, a declined item, a proposal that conflicts. */
 async function discover(book) {
   const gh = (p) => JSON.parse(execFileSync('gh', ['api', p], { encoding: 'utf8', maxBuffer: 64 << 20 }));
   const repo = book.content.repo;
@@ -182,7 +195,10 @@ async function discover(book) {
   const suggestion = gh(`/repos/${repo}/issues?labels=suggested-edit&state=open&per_page=1`)[0]?.number ?? null;
   const declined = gh(`/repos/${repo}/issues?state=closed&per_page=30`).find((i) => i.state_reason === 'not_planned')?.number ?? null;
   const draftsHead = gh(`/repos/${repo}/branches/${book.content.drafts_branch}`).commit.sha;
-  return { page, shas, suggestion, declined, draftsHead };
+  // An open proposal GitHub can't merge (the drafts moved under it), if there is one.
+  const open = gh(`/repos/${repo}/pulls?state=open&base=${book.content.drafts_branch}&per_page=30`).filter((p) => p.head.ref.startsWith('proposed-edits/'));
+  const proposal = open.map((p) => gh(`/repos/${repo}/pulls/${p.number}`)).find((p) => p.mergeable === false)?.number ?? null;
+  return { page, shas, suggestion, declined, draftsHead, proposal };
 }
 
 async function send(c) {
@@ -230,7 +246,7 @@ async function one(slug, n) {
   const warm = [];
   for (let i = 0; i < RUNS; i++) warm.push((await send(c)).ms);
   warm.sort((a, b) => a - b);
-  return { slug, name: c.name, status: first.status, first: first.ms, warm: warm[Math.floor(warm.length / 2)] };
+  return { slug, name: c.name, status: first.status, expect: c.expect, first: first.ms, warm: warm[Math.floor(warm.length / 2)] };
 }
 
 // The reference workload's time on the machine the first fit was made on (an M-series
@@ -322,7 +338,9 @@ if (mode === '--ref') {
   if (c) {
     const r = await send(c);
     const before = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {};
-    writeFileSync(file, `${JSON.stringify({ ...before, ...tape })}\n`);
+    // New answers only: one already on the tape stays as it was, so a case recorded later
+    // can't move what the others replay (a branch's head, say).
+    writeFileSync(file, `${JSON.stringify({ ...tape, ...before })}\n`);
     console.error(`recorded ${slug} ${c.name}: ${r.status}`);
   }
   console.log(`BENCH ${JSON.stringify(c ? { name: c.name } : null)}`);
@@ -375,7 +393,7 @@ if (mode === '--ref') {
   const warn = [];
   for (const r of results) {
     const worst = Math.max(cf(r.first), cf(r.warm));
-    const mark = worst > FAIL || r.status >= 500 ? '  OVER' : worst > BUDGET ? '  warn' : '';
+    const mark = worst > FAIL || (r.status >= 500 && r.status !== r.expect) ? '  OVER' : worst > BUDGET ? '  warn' : '';
     if (mark === '  OVER') over.push(r);
     else if (mark) warn.push(r);
     console.log(`${pad(r.slug, 38)}${pad(r.name, 34)}${pad(r.status, 8)}${pad(r.first.toFixed(1), 10)}${pad(r.warm.toFixed(1), 9)}${pad(cf(r.first).toFixed(1), 10)}${cf(r.warm).toFixed(1)}${mark}`);

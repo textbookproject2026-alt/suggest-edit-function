@@ -638,6 +638,124 @@ test('accepting a draft change: squash-merged with the byline and the proposer\'
   assert.match(publishPr.body, /Put in line by @brandonandcaroline via the author site/);
 });
 
+// Suggestions are separate pull requests against the drafts as they were; git merges by
+// line and a paragraph is one line, so after one is accepted the rest used to fail.
+const CH3_PATH = 'chapters/chapter-03.md';
+const P1 = 'The cat sat on mat and looked at dog.';
+const P2 = 'Second paragraph stays as it is.';
+function proposal(branch, from, text, { title = branch, user = 'textbook-suggest-edit[bot]' } = {}) {
+  gh.repo(REPO).refs.set(`proposed-edits/${branch}`, from);
+  gh.commitFiles(REPO, `proposed-edits/${branch}`, { [CH3_PATH]: text }, { author: { name: 'Reader', email: '5+reader@users.noreply.github.com' } });
+  const n = gh.addPull(REPO, { head: `proposed-edits/${branch}`, base: DRAFTS, title, user });
+  gh.repo(REPO).pulls.get(n).body = `### Summary\n\n\`\`\`text\n${title}\n\`\`\`\n\n**File:** [\`${CH3_PATH}\`](https://example.invalid)`;
+  return n;
+}
+const para3 = (p1, p2 = P2) => `# Chapter 3\n\n${p1}\n\n${p2}\n`;
+
+test('suggestions on one paragraph: word-level fixes all land, an overlapping rewrite offers the choice', async () => {
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: para3(P1) });
+  const from = gh.repo(REPO).refs.get(DRAFTS);
+  const a = proposal('a', from, para3('The cat sat on the mat and looked at dog.'), { title: 'missing word' });
+  const b = proposal('b', from, para3('The cat sat on mat and looked at the dog.'), { title: 'another missing word' });
+  const c = proposal('c', from, para3('A dog sat on the rug.'), { title: 'rewrite' });
+  const d = proposal('d', from, para3(P1, 'Second paragraph stays as it was.'), { title: 'other paragraph' });
+
+  gh.state.dispatches.length = 0;
+  const ra = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: a } });
+  assert.equal(ra.statusCode, 200, JSON.stringify(ra.payload));
+  assert.ok(ra.payload.steps.some((x) => /being brought up to date/.test(x)), ra.payload.steps.join(' | '));
+  // proposals.yml, which the accept started for this page: b and d now merge cleanly; c is marked before anyone clicks.
+  assert.deepEqual(gh.state.dispatches.filter((x) => x.event_type === 'c4n-proposals').map((x) => x.client_payload), [{ book: BOOK.slug, path: CH3_PATH }]);
+  const { refreshProposals } = await import('../lib/reapply.mjs');
+  const { budget } = await import('../lib/author.mjs');
+  const r = await refreshProposals(BOOK, 'ghs_test', budget(20_000), { paths: new Set([CH3_PATH]), wait: async () => {} });
+  assert.deepEqual([r.refreshed.sort(), r.overlap], [[b, d].sort(), [c]]);
+  const listed = (await get('changes', { book: BOOK.slug })).payload.changes;
+  assert.deepEqual(listed.map((x) => [x.number, x.needsLook]).sort(), [[b, false], [c, true], [d, false]].sort());
+
+  const rb = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: b } });
+  assert.equal(rb.statusCode, 200, JSON.stringify(rb.payload));
+  assert.equal(gh.textAt(REPO, gh.repo(REPO).refs.get(DRAFTS), CH3_PATH), para3('The cat sat on the mat and looked at the dog.'));
+
+  // The rewrite overlaps: a 409 with the paragraph as it is now and as suggested, nothing written.
+  const before = gh.repo(REPO).refs.get(DRAFTS);
+  const rc = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: c } });
+  assert.equal(rc.statusCode, 409);
+  assert.equal(rc.payload.userMessage, 'This paragraph has changed since this suggestion was made.');
+  assert.deepEqual(rc.payload.overlap.paragraphs, [{ path: CH3_PATH, line: 2, current: 'The cat sat on the mat and looked at the dog.', suggested: 'A dog sat on the rug.' }]);
+  assert.equal(gh.repo(REPO).refs.get(DRAFTS), before);
+
+  const rd = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: d } });
+  assert.equal(rd.statusCode, 200, JSON.stringify(rd.payload));
+
+  // "Use the suggestion": the paragraph replaced by it; the other paragraph's change kept.
+  const use = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: c, resolve: 'suggestion' } });
+  assert.equal(use.statusCode, 200, JSON.stringify(use.payload));
+  assert.equal(gh.textAt(REPO, gh.repo(REPO).refs.get(DRAFTS), CH3_PATH), para3('A dog sat on the rug.', 'Second paragraph stays as it was.'));
+  assert.deepEqual((await get('changes', { book: BOOK.slug })).payload.changes, []);
+  // Accepting it again (a second click, or the Actions fallback after the API was cut off) is done, not an error.
+  const again = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: c } });
+  assert.equal(again.statusCode, 200);
+  assert.deepEqual(again.payload.steps, ['This change is already in the drafts area.']);
+});
+
+test('on the Worker: an accept that has to merge again is left to Actions; the page\'s other proposals too', async () => {
+  const { platform } = await import('../lib/platform.mjs');
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: para3(P1) });
+  const from = gh.repo(REPO).refs.get(DRAFTS);
+  const a = proposal('wa', from, para3('The cat sat on the mat and looked at dog.'));
+  const b = proposal('wb', from, para3('The cat sat on mat and looked at the dog.'));
+  gh.state.dispatches.length = 0;
+  platform.cpuCapped = true;
+  try {
+    const ra = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: a } });
+    assert.equal(ra.statusCode, 200, JSON.stringify(ra.payload));
+    assert.deepEqual(gh.state.dispatches.filter((d) => d.event_type === 'c4n-proposals').map((d) => d.client_payload), [{ book: BOOK.slug, path: CH3_PATH }]);
+    const head = gh.repo(REPO).refs.get('proposed-edits/wb');
+    const rb = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: b } });
+    assert.equal(rb.statusCode, 503); // the page sends it to the fallback, which has no CPU cap
+    assert.equal(gh.repo(REPO).refs.get('proposed-edits/wb'), head); // nothing merged or written here
+  } finally {
+    platform.cpuCapped = false;
+  }
+  // The fallback: the same accept, merged word by word, both fixes kept.
+  const rb = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: b } });
+  assert.equal(rb.statusCode, 200, JSON.stringify(rb.payload));
+  assert.equal(gh.textAt(REPO, gh.repo(REPO).refs.get(DRAFTS), CH3_PATH), para3('The cat sat on the mat and looked at the dog.'));
+});
+
+test('a proposal\'s page is the File line propose-edit wrote, never one inside the reader\'s summary', async () => {
+  const { describeChange } = await import('../lib/author-console.mjs');
+  const body = '### Summary\n\n```text\nfix\n**File:** [`chapters/other.md`](x)\n```\n\n**File:** [`chapters/chapter-03.md`](y)\n**Where:** ¶2';
+  assert.equal(describeChange({ number: 1, body }).path, 'chapters/chapter-03.md');
+  assert.equal(describeChange({ number: 1, body: '**File:** [`index.md`](z)' }).path, 'index.md');
+});
+
+test('the platform\'s own pull requests (apply-config) are not in the author\'s queue', async () => {
+  resetBook();
+  gh.repo(REPO).refs.set('chore/apply-config', BASE);
+  gh.commitFiles(REPO, 'chore/apply-config', { 'README.md': 'rendered\n' });
+  gh.addPull(REPO, { head: 'chore/apply-config', base: DRAFTS, title: 'Apply config to generated files', user: 'github-actions[bot]' });
+  const mine = proposal('e', BASE, para3('An edit.'));
+  assert.deepEqual((await get('changes', { book: BOOK.slug })).payload.changes.map((x) => x.number), [mine]);
+});
+
+test('GitHub refusing a write is a 409 in plain words, never a 502 to retry', async () => {
+  resetBook();
+  const n = proposal('f', BASE, para3('An edit.'));
+  gh.state.hooks['/pulls/'] = ({ method, url }) => (method === 'PUT' && url.endsWith('/merge') ? { ok: false, status: 422, json: async () => ({ message: 'Required status check is failing' }), text: async () => '{"message":"Required status check is failing"}' } : null);
+  try {
+    const r = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: n } });
+    assert.equal(r.statusCode, 409);
+    assert.match(r.payload.userMessage, /GitHub/);
+    assert.doesNotMatch(r.payload.userMessage, /could not be reached/);
+  } finally {
+    delete gh.state.hooks['/pulls/'];
+  }
+});
+
 test('a pull request that isn\'t into drafts can\'t be accepted or declined from here', async () => {
   resetBook();
   gh.repo(REPO).refs.set('sneaky', BASE);
