@@ -201,6 +201,8 @@ test('attribution and an open item, as the panel shows them', () => {
   assert.equal(attributionOf('**Proposed by:** a reader (`j***@x`)'), null);
   const item = openItem({ number: 7, html_url: 'u', created_at: '2026-10-09T10:00:00Z', title: 'Update one.md', body: '### Summary\n\n```text\n(no summary given)\n```\n' }, 'edit');
   assert.equal(item.summary, 'Update one.md', 'no summary: the title');
+  // The platform's own account is never the reader (13 Oct).
+  assert.equal(openItem({ number: 8, body: '**Submitted by:** @textbookproject2026-alt (signed in with GitHub)' }, 'note').who, null);
 });
 
 test('mode=item: a reader item the App opened or attributed, labelled; anything else is 404 (batch 2b notify)', async () => {
@@ -211,6 +213,7 @@ test('mode=item: a reader item the App opened or attributed, labelled; anything 
   const ok = await get({ book: BOOK.slug, mode: 'item', number: String(note) });
   assert.equal(ok.statusCode, 200);
   assert.deepEqual([ok.payload.kind, ok.payload.number, ok.payload.summary, ok.payload.paragraph], ['note', note, 'This needs a source.', { n: 4, url: 'https://b.example/chapters/one#p4' }]);
+  assert.deepEqual([ok.payload.state, ok.payload.merged, ok.payload.accepted, ok.payload.files], ['open', false, false, ['chapters/one.md']]);
   assert.equal((await get({ book: BOOK.slug, mode: 'item', number: String(byApp) })).statusCode, 200);
   for (const n of [unlabelled, plain, 99999]) assert.equal((await get({ book: BOOK.slug, mode: 'item', number: String(n) })).statusCode, 404, `#${n}`);
   assert.equal((await get({ book: 'nope', mode: 'item', number: '1' })).statusCode, 404);

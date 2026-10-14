@@ -72,5 +72,9 @@ test('backfill: the last comment by the book\'s people or the maintainer, else n
   assert.equal(d.decliner, 'brandonandcaroline');
   const none = declinedItem(issue({ closed_by: { login: 'textbookproject2026-alt', type: 'User' } }), [{ user: { login: 'gobi10k' }, body: 'please' }], people);
   assert.equal(none.reason, null);
-  assert.equal(none.decliner, 'textbookproject2026-alt');
+  // The platform's own account is never shown as a person: no decliner named.
+  assert.equal(none.decliner, null);
+  // Nor as the reader who sent it (13 Oct).
+  const own = declinedItem(issue({ body: '**Submitted by:** @textbookproject2026-alt (signed in with GitHub)' }), [], people);
+  assert.equal(own.who, null);
 });
