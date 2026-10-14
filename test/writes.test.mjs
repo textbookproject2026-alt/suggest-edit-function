@@ -115,6 +115,9 @@ test('a forced inline failure (CPU limit) completes through the fallback, once',
 
   // The fallback: the same request, through the same route, without &fail.
   const claimed = await db.prepare(`UPDATE writes SET state = 'fallback', at = ?2 WHERE key = ?1 AND state = 'queued' RETURNING key, request`).bind(KEY, Date.now()).first();
+  // The queue holds no IP address: only its rate-limit key.
+  assert.ok(!claimed.request.includes('203.0.113.9'));
+  assert.match(JSON.parse(claimed.request).headers['cf-connecting-ip'], /^h:[0-9a-f]{64}$/);
   let seen;
   const route = (url) => (url.pathname === '/api/suggest-edit' ? async (req, res) => {
     seen = { url: req.url, ip: req.headers['x-forwarded-for'], origin: req.headers.origin, body: req.body };
@@ -123,7 +126,7 @@ test('a forced inline failure (CPU limit) completes through the fallback, once',
   const { event } = await import('../worker/writes.mjs');
   assert.equal(await runOne(db, claimed, { route, serve, platform, event }), 201);
   assert.equal(seen.url, `/api/suggest-edit?write_key=${KEY}`);
-  assert.equal(seen.ip, '203.0.113.9');
+  assert.match(seen.ip, /^h:[0-9a-f]{64}$/);
   assert.equal(seen.origin, ORIGIN);
   assert.deepEqual(seen.body, { suggestion: 'x' });
 
@@ -317,6 +320,9 @@ test('the five-minute jobs run once for two callers minutes apart (Cloudflare\'s
   try {
     // A write left waiting: each real run would start the fallback.
     await db.prepare(`INSERT INTO writes (key, route, state, at) VALUES ('left-queued-0000001', '/api/suggest-edit', 'queued', ?1)`).bind(Date.now() - 120_000).run();
+    // Yesterday's rate-limit salt is gone after the jobs; today's stays.
+    const today = Math.floor(Date.now() / 86_400_000);
+    await db.prepare(`INSERT INTO salts (day, salt) VALUES (?1, 'old'), (?2, 'new')`).bind(today - 1, today).run();
     const starts = [];
     const saved = testing.dispatch;
     testing.dispatch = async (key) => { starts.push(key); };
@@ -324,6 +330,7 @@ test('the five-minute jobs run once for two callers minutes apart (Cloudflare\'s
       assert.match(await periodic({ DB: db }, 'build-nudge */15 * * * *'), /^waiting=1 refresh=no/);
       assert.equal(await periodic({ DB: db }, EVERY_FIVE), 'skipped: the jobs ran under 4 minutes ago');
       assert.deepEqual(starts, [''], 'one fallback run, not two');
+      assert.deepEqual(db.raw.prepare('SELECT day FROM salts').all().map((r) => r.day), [today]);
       // Over four minutes later, it runs again.
       await db.prepare(`UPDATE cron_runs SET started = started - 300000 WHERE cron = 'jobs'`).run();
       assert.match(await periodic({ DB: db }, EVERY_FIVE), /^waiting=1/);

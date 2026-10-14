@@ -330,7 +330,7 @@ async function handle(req, res) {
   // never told it was caught, or it learns to fix its input. issueUrl points at the
   // resolved book's issues index so the field is populated with something real and harmless.
   if (asString(body.website)) {
-    console.warn(`honeypot: discarded submission from ip=${ip} ${tag}`);
+    console.warn(`honeypot: discarded submission ${tag}`);
     send(res, 201, { issueUrl: `https://github.com/${book.content.repo}/issues` });
     return;
   }
@@ -338,7 +338,7 @@ async function handle(req, res) {
   // --- Validation ---------------------------------------------------------
   const result = validate(body);
   if (!result.ok) {
-    console.warn(`${result.error} (ip=${ip}) ${tag}`);
+    console.warn(`${result.error} ${tag}`);
     send(res, 400, { error: result.error, userMessage: result.userMessage });
     return;
   }
@@ -346,7 +346,7 @@ async function handle(req, res) {
   // --- Rate limit (valid submissions only) --------------------------------
   const until = await isRateLimited(ip, Date.now());
   if (until) {
-    console.warn(`rate limit: ip=${ip} exceeded ${RATE_LIMIT_MAX}/hour ${tag}`);
+    console.warn(`rate limit: exceeded ${RATE_LIMIT_MAX}/hour ${tag}`);
     sendLimited(res, until, "You've sent a lot from here in the last hour. Your text is still in the form.");
     return;
   }

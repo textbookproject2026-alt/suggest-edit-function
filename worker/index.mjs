@@ -170,7 +170,8 @@ export default {
   async scheduled(event, env) {
     if (event.cron === EVERY_FIVE) return periodic(env, event.cron);
     await recorded(env, event.cron, async () => {
-      await env.DB.prepare('DELETE FROM hits WHERE until < ?1').bind(Date.now()).run();
+      // Closed windows, and any key that isn't hashed (none since 0004: lib/common.mjs hashKey).
+      await env.DB.prepare("DELETE FROM hits WHERE until < ?1 OR k NOT LIKE '%:h:%'").bind(Date.now()).run();
       await sweep(env.DB);
       return 'swept';
     });
@@ -194,6 +195,8 @@ export async function periodic(env, source) {
       .bind(now, now - JOBS_GAP_MS, `running, for ${source}`).first();
     if (!claimed) return 'skipped: the jobs ran under 4 minutes ago';
     const detail = await recorded(env, 'jobs', async () => {
+      // Yesterday's rate-limit salt goes within five minutes of 00:00 UTC (lib/common.mjs hashKey).
+      await env.DB.prepare('DELETE FROM salts WHERE day < ?1').bind(Math.floor(now / 86_400_000)).run();
       const n = await backstop(env.DB);
       if (n) console.log(`backstop: ${n} write(s) waiting, write-fallback started`);
       const refresh = await refreshIfStale(env.CACHE).catch((err) => console.error(`refresh: not started (${err?.message})`));
