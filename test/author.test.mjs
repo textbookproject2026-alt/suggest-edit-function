@@ -682,22 +682,95 @@ test('suggestions on one paragraph: word-level fixes all land, an overlapping re
   const before = gh.repo(REPO).refs.get(DRAFTS);
   const rc = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: c } });
   assert.equal(rc.statusCode, 409);
-  assert.equal(rc.payload.userMessage, 'This paragraph has changed since this suggestion was made.');
-  assert.deepEqual(rc.payload.overlap.paragraphs, [{ path: CH3_PATH, line: 2, current: 'The cat sat on the mat and looked at the dog.', suggested: 'A dog sat on the rug.' }]);
+  assert.equal(rc.payload.userMessage, 'This suggestion was made on an older version of this paragraph.');
+  assert.deepEqual(rc.payload.overlap.paragraphs, [{ path: CH3_PATH, line: 2, base: P1, current: 'The cat sat on the mat and looked at the dog.', suggested: 'A dog sat on the rug.' }]);
   assert.equal(gh.repo(REPO).refs.get(DRAFTS), before);
 
   const rd = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: d } });
   assert.equal(rd.statusCode, 200, JSON.stringify(rd.payload));
 
-  // "Use the suggestion": the paragraph replaced by it; the other paragraph's change kept.
+  // Taking the suggestion over the changed paragraph would bring back its old wording: refused, nothing written.
+  const drafted = gh.repo(REPO).refs.get(DRAFTS);
   const use = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: c, resolve: 'suggestion' } });
-  assert.equal(use.statusCode, 200, JSON.stringify(use.payload));
-  assert.equal(gh.textAt(REPO, gh.repo(REPO).refs.get(DRAFTS), CH3_PATH), para3('A dog sat on the rug.', 'Second paragraph stays as it was.'));
-  assert.deepEqual((await get('changes', { book: BOOK.slug })).payload.changes, []);
-  // Accepting it again (a second click, or the Actions fallback after the API was cut off) is done, not an error.
-  const again = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: c } });
+  assert.equal(use.statusCode, 400);
+  assert.equal(gh.repo(REPO).refs.get(DRAFTS), drafted);
+  assert.equal(gh.textAt(REPO, drafted, CH3_PATH), para3('The cat sat on the mat and looked at the dog.', 'Second paragraph stays as it was.'));
+});
+
+test('accepting a draft change: a second click (or the Actions fallback after the API was cut off) is done, not an error', async () => {
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: para3(P1) });
+  const n = proposal('twice', gh.repo(REPO).refs.get(DRAFTS), para3('The cat sat on the mat and looked at dog.'));
+  assert.equal((await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: n } })).statusCode, 200);
+  const again = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: n } });
   assert.equal(again.statusCode, 200);
   assert.deepEqual(again.payload.steps, ['This change is already in the drafts area.']);
+});
+
+// Item 5 (14 Oct): Accept is a three-way merge against the proposal's base, never the
+// suggester's copy of the page over the drafts.
+const drafts3 = () => gh.textAt(REPO, gh.repo(REPO).refs.get(DRAFTS), CH3_PATH);
+const publishDrafts = () => gh.repo(REPO).refs.set(LIVE, gh.repo(REPO).refs.get(DRAFTS));
+const overlapOf = async (n) => {
+  const before = gh.repo(REPO).refs.get(DRAFTS);
+  const r = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: n } });
+  assert.equal(r.statusCode, 409, JSON.stringify(r.payload));
+  assert.equal(r.payload.error, 'overlap');
+  assert.equal(r.payload.userMessage, 'This suggestion was made on an older version of this paragraph.');
+  assert.equal(gh.repo(REPO).refs.get(DRAFTS), before, 'nothing written');
+  return r.payload.overlap.paragraphs;
+};
+
+test('three-way accept: a clean merge applies both sides, after a draft edit to another paragraph of the page', async () => {
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: para3(P1) });
+  const n = proposal('clean', gh.repo(REPO).refs.get(DRAFTS), para3(P1, 'Second paragraph stays as it was.'));
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: para3('The cat sat on the mat and looked at the dog.') }); // the author, since
+  const r = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: n } });
+  assert.equal(r.statusCode, 200, JSON.stringify(r.payload));
+  assert.equal(drafts3(), para3('The cat sat on the mat and looked at the dog.', 'Second paragraph stays as it was.'));
+});
+
+test('three-way accept: overlap after a draft edit is refused with old, suggested and current', async () => {
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: para3(P1) });
+  const n = proposal('over-draft', gh.repo(REPO).refs.get(DRAFTS), para3('The cat sat on mat and looked at a dog.'));
+  const now = para3('The cat sat on the mat and looked at the dog.');
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: now });
+  assert.deepEqual(await overlapOf(n), [{ path: CH3_PATH, line: 2, base: P1, current: 'The cat sat on the mat and looked at the dog.', suggested: 'The cat sat on mat and looked at a dog.' }]);
+  assert.equal(drafts3(), now);
+});
+
+test('three-way accept: overlap after publish is refused the same way; neither drafts nor the live book changes', async () => {
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: para3(P1) });
+  publishDrafts();
+  const n = proposal('over-live', gh.repo(REPO).refs.get(DRAFTS), para3('The cat sat on mat and looked at a dog.'));
+  const now = para3('The cat sat on the mat and looked at the dog.');
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: now });
+  publishDrafts();
+  const live = gh.repo(REPO).refs.get(LIVE);
+  const paragraphs = await overlapOf(n);
+  assert.deepEqual(paragraphs.map((p) => [p.base, p.current, p.suggested]), [[P1, 'The cat sat on the mat and looked at the dog.', 'The cat sat on mat and looked at a dog.']]);
+  assert.equal(gh.repo(REPO).refs.get(LIVE), live);
+  assert.equal(gh.textAt(REPO, live, CH3_PATH), now);
+});
+
+test('three-way accept: a whole-page proposal against a chapter changed since keeps every draft change', async () => {
+  resetBook();
+  const page = (title, p1, p2) => `# ${title}\n\n${p1}\n\n${p2}\n`;
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: page('Chapter 3', P1, P2) });
+  // The reader's whole page: one fix in each paragraph.
+  const n = proposal('whole', gh.repo(REPO).refs.get(DRAFTS), page('Chapter 3', 'The cat sat on mat and looked at the dog.', 'Second paragraph stays as it was.'));
+  // The author since: a new title and another fix in the first paragraph.
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: page('Chapter 3: Cats', 'The cat sat on the mat and looked at dog.', P2) });
+  const r = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: n } });
+  assert.equal(r.statusCode, 200, JSON.stringify(r.payload));
+  assert.equal(drafts3(), page('Chapter 3: Cats', 'The cat sat on the mat and looked at the dog.', 'Second paragraph stays as it was.'));
+  // And one that rewrote the title the author also changed: refused, the drafts' title kept.
+  const m = proposal('whole-2', gh.repo(REPO).refs.get(DRAFTS), page('Chapter Three', 'The cat sat on the mat and looked at the dog.', 'Second paragraph stays as it was.'));
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: page('Chapter 3: Felines', 'The cat sat on the mat and looked at the dog.', 'Second paragraph stays as it was.') });
+  assert.deepEqual((await overlapOf(m)).map((p) => [p.base, p.current, p.suggested]), [['# Chapter 3: Cats', '# Chapter 3: Felines', '# Chapter Three']]);
 });
 
 test('on the Worker: an accept that has to merge again is left to Actions; the page\'s other proposals too', async () => {

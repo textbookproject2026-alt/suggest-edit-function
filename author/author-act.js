@@ -277,11 +277,11 @@ async function coAuthors(book, pr, token, left, tag, read = null) {
 }
 
 const hasLook = (pr) => (pr.labels ?? []).some((l) => l?.name === NEEDS_LOOK);
-const OVERLAP_WORDS = 'This paragraph has changed since this suggestion was made.';
+const OVERLAP_WORDS = 'This suggestion was made on an older version of this paragraph.';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Re-apply a proposal onto the drafts as they are now, or refuse in words the author can act on. -> the new head sha. */
-async function refreshed(book, pr, ctx, prefer, commits) {
+async function refreshed(book, pr, ctx, commits) {
   const { token, left, tag } = ctx;
   if (platform.cpuCapped) {
     // Merging it again is more than the Worker's 10 ms of CPU allows on top of an accept:
@@ -290,7 +290,7 @@ async function refreshed(book, pr, ctx, prefer, commits) {
     console.log(`draft change #${pr.number}: the drafts moved under it, left to the fallback to merge again ${tag}`);
     throw new Refusal(503, 'reapply in actions', 'Applying… this can take up to a minute.');
   }
-  const r = await reapply(book, pr, token, left, { prefer, commits });
+  const r = await reapply(book, pr, token, left, { commits });
   if (r.state === 'overlap') {
     if (!hasLook(pr)) await markNeedsLook(book, pr.number, true, token, left, tag);
     throw new Refusal(409, 'overlap', OVERLAP_WORDS, { overlap: { number: pr.number, paragraphs: r.overlaps } });
@@ -302,7 +302,7 @@ async function refreshed(book, pr, ctx, prefer, commits) {
     throw new Refusal(409, 'cannot reapply', `The drafts have changed since this suggestion was made, and it can't be brought up to date here because ${r.why}. Open it on GitHub, or decline it as outdated.`);
   }
   if (hasLook(pr)) await markNeedsLook(book, pr.number, false, token, left, tag);
-  console.log(`draft change #${pr.number} brought up to date with the drafts${prefer === 'suggested' ? ' (the suggestion kept where it overlapped)' : ''} ${tag}`);
+  console.log(`draft change #${pr.number} brought up to date with the drafts ${tag}`);
   return r.sha;
 }
 
@@ -321,8 +321,9 @@ async function squash(book, pr, sha, message, ctx) {
 
 async function changeAccept(book, body, ctx) {
   const { token, left, identity, tag } = ctx;
-  if (body.resolve !== undefined && body.resolve !== 'suggestion') throw new Refusal(400, 'validation: resolve', "That isn't one of the choices offered.");
-  const prefer = body.resolve === 'suggestion' ? 'suggested' : 'current';
+  // Taking the suggestion over a paragraph that changed since would put back its old
+  // wording: no longer offered. The author opens it in the editor or declines it.
+  if (body.resolve !== undefined) throw new Refusal(400, 'validation: resolve', "That isn't one of the choices offered.");
   // Accepted already (a second click, or Actions finishing what the API began): done, not an error.
   const was = await readPull(book.content.repo, number(body), token, left);
   if (!was) throw new Refusal(409, 'not an open draft change', "That isn't an open draft change for this book any more. Press “Check again”.");
@@ -334,12 +335,11 @@ async function changeAccept(book, body, ctx) {
   const commits = await ghJson(`/repos/${book.content.repo}/pulls/${pr.number}/commits?per_page=100`, token, left);
   const credits = await coAuthors(book, pr, token, left, tag, commits);
   const message = { commit_title: `${title} (#${pr.number})`, commit_message: `Proposed in #${pr.number}.\n\nAccepted ${byline(identity)}.${credits}` };
-  // A proposal GitHub can't merge (the drafts changed under it), or one whose overlap the
-  // author has chosen for: merged again word by word first.
+  // A proposal GitHub can't merge (the drafts changed under it): merged again word by word first.
   let sha = pr.head?.sha;
   let redone = false;
-  if (pr.mergeable === false || body.resolve) {
-    sha = await refreshed(book, pr, ctx, prefer, commits);
+  if (pr.mergeable === false) {
+    sha = await refreshed(book, pr, ctx, commits);
     redone = true;
   }
   let merged;
@@ -347,7 +347,7 @@ async function changeAccept(book, body, ctx) {
     merged = await squash(book, pr, sha, message, { ...ctx, retry: redone });
   } catch (err) {
     if (!(err instanceof GitHubError) || err.status !== 405 || redone) throw err;
-    sha = await refreshed(book, pr, ctx, prefer, commits); // GitHub hadn't yet said it couldn't merge
+    sha = await refreshed(book, pr, ctx, commits); // GitHub hadn't yet said it couldn't merge
     merged = await squash(book, pr, sha, message, { ...ctx, retry: true });
   }
   if (!merged?.merged) throw new Refusal(502, 'merge not confirmed', 'GitHub did not confirm the change was accepted. Press “Check again” and look before trying once more.');
@@ -357,6 +357,8 @@ async function changeAccept(book, body, ctx) {
   // next Accept just works: in Actions (proposals.yml, about a minute), as that is more
   // GitHub calls and merging than an accept has time or CPU for.
   const path = describeChange(pr).path;
+  // The in-site editor's copy of the page (kept ahead in KV): the next reader starts from this.
+  if (path) await forget(cacheKeys.source(book.content.repo, book.content.drafts_branch, path));
   if (path) {
     try {
       await startRefresh(book.slug, path, left, tag);
