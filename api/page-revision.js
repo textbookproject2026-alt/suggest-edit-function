@@ -235,9 +235,11 @@ export async function openItems(book, token, left) {
   } }`, {}, token, left);
   const rest = (n) => ({ number: n.number, html_url: n.url, title: n.title, body: n.body, created_at: n.createdAt, labels: n.labels?.nodes ?? [] });
   const seen = new Set();
-  const items = (open.pulls?.nodes ?? []).map((n) => openItem(rest(n), 'edit'));
+  // The platform's own tests are never in a book's history (as declined: lib/declined.mjs).
+  const test = (i) => labelled(i, 'platform-test');
+  const items = (open.pulls?.nodes ?? []).map(rest).filter((i) => !test(i)).map((i) => openItem(i, 'edit'));
   for (const i of [...(open.notes?.nodes ?? []), ...(open.suggestions?.nodes ?? [])].map(rest)) {
-    if (seen.has(i.number)) continue;
+    if (seen.has(i.number) || test(i)) continue;
     seen.add(i.number);
     items.push(openItem(i, labelled(i, 'section-note') ? 'note' : labelled(i, 'proposed-edit') ? 'edit' : 'suggestion'));
   }
