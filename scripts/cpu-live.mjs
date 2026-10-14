@@ -59,6 +59,13 @@ async function main() {
     console.log(`${r.dimensions.date}  requests=${r.sum.requests} errors=${r.sum.errors}  p50=${(q.cpuTimeP50 / 1000).toFixed(1)} p90=${(q.cpuTimeP90 / 1000).toFixed(1)} p99=${(q.cpuTimeP99 / 1000).toFixed(1)} p99.9=${(q.cpuTimeP999 / 1000).toFixed(1)}`);
   }
 
+  if (process.env.GAPS) {
+    // TEMP: KV operations per day, the free plan's 1,000 writes a day.
+    const kq = await api('/graphql', { query: `query($a: String!, $from: Date!) { viewer { accounts(filter: {accountTag: $a}) {
+      kvOperationsAdaptiveGroups(limit: 100, filter: {date_geq: $from}) { sum { requests } dimensions { date actionType namespaceId } } } } }`,
+      variables: { a: account, from: new Date(from).toISOString().slice(0, 10) } });
+    console.log(`kv ${JSON.stringify(kq.errors ?? kq.data?.viewer.accounts[0].kvOperationsAdaptiveGroups.filter((g) => g.dimensions.actionType !== 'read').map((g) => [g.dimensions.date, g.dimensions.actionType, g.dimensions.namespaceId.slice(0, 6), g.sum.requests]))}`);
+  }
   const byLabel = new Map();
   const shapes = new Set();
   let first = Infinity;
