@@ -35,7 +35,7 @@ import {
   graphqlRepo, isAuthorPath, isTextPath, limits, query, treeAt, wrap, Refusal,
 } from '../lib/author.mjs';
 import { jsonWithBase64, send } from '../lib/common.mjs';
-import { SUGGESTED, describeChange, parseSuggestion, readableChange } from '../lib/author-console.mjs';
+import { SUGGESTED, describeChange, isProposal, parseSuggestion, readableChange } from '../lib/author-console.mjs';
 import { acceptedAt, changesSince, draftsDiff, publishState, suggestion } from '../lib/author-console-reads.mjs';
 import { declinedChange, declinedItems } from '../lib/declined.mjs';
 import { lintAt } from '../lib/lint-job.mjs';
@@ -118,9 +118,10 @@ async function suggestionChanges(book, token, left, params) {
 
 async function changes(book, token, left) {
   const r = await graphqlRepo(book.content.repo, `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {
-    pullRequests(states: OPEN, baseRefName: ${JSON.stringify(book.content.drafts_branch)}, first: 50, orderBy: { field: CREATED_AT, direction: DESC }) { nodes { number title body createdAt url author { __typename login } } }
+    pullRequests(states: OPEN, baseRefName: ${JSON.stringify(book.content.drafts_branch)}, first: 50, orderBy: { field: CREATED_AT, direction: DESC }) { nodes { number title body createdAt url headRefName author { __typename login } labels(first: 10) { nodes { name } } } }
   } }`, {}, token, left);
-  return { changes: (r.pullRequests?.nodes ?? []).map(restOf).map(describeChange) };
+  // Readers' proposals only: the platform's own pull requests aren't the author's to answer.
+  return { changes: (r.pullRequests?.nodes ?? []).map((n) => ({ ...restOf(n), head: { ref: n.headRefName } })).filter(isProposal).map(describeChange) };
 }
 
 async function change(book, token, left, params) {

@@ -113,6 +113,20 @@ export function createFakeGitHub() {
     return number;
   }
 
+  /**
+   * A proposal's mergeability as GitHub would see it, conservatively: false once the base
+   * changed a file the proposal changes since it forked (or last took the base in).
+   */
+  function proposalMerges(r, p) {
+    const base = r.refs.get(p.base.ref);
+    const head = r.refs.get(p.head.ref);
+    const onBase = new Set(ancestors(r, base));
+    if (onBase.has(head)) return true;
+    const fork = ancestors(r, head).find((id) => onBase.has(id));
+    const mine = diff(r, fork, head).map((f) => f.filename);
+    return mine.every((path) => filesAt(r, base).get(path) === filesAt(r, fork).get(path));
+  }
+
   async function fetchImpl(url, opts = {}) {
     url = String(url);
     const method = opts.method ?? 'GET';
@@ -171,7 +185,12 @@ export function createFakeGitHub() {
         number: x.number, url: x.html_url, title: x.title ?? '', body: x.body ?? '',
         createdAt: x.created_at ?? null, author: gqlUser(x.user ? { type: /\[bot\]$/.test(x.user.login) ? 'Bot' : 'User', ...x.user } : null), closedAt: x.closed_at ?? null, updatedAt: x.updated_at ?? x.closed_at ?? x.created_at ?? null,
         labels: { nodes: (x.labels ?? []).map((l) => ({ name: typeof l === 'string' ? l : l.name })) },
-        ...(pull ? {} : { stateReason: x.state_reason ? x.state_reason.toUpperCase() : null }),
+        ...(pull ? {
+          headRefName: x.head?.ref ?? null, baseRefName: x.base?.ref ?? null, headRefOid: r?.refs.get(x.head?.ref) ?? x.head?.sha ?? null,
+          state: x.merged ? 'MERGED' : x.state === 'open' ? 'OPEN' : 'CLOSED', merged: Boolean(x.merged),
+          mergeable: ((x.head?.ref ?? '').startsWith('proposed-edits/') && !x.mergeableSet && x.state === 'open' && r?.refs.has(x.head.ref) && r.refs.has(x.base?.ref) ? proposalMerges(r, x) : x.mergeable !== false) ? 'MERGEABLE' : 'CONFLICTING',
+          headRepository: { nameWithOwner: r?.full ?? null }, baseRepository: { nameWithOwner: x.base?.repo?.full_name ?? r?.full ?? null },
+        } : { stateReason: x.state_reason ? x.state_reason.toUpperCase() : null }),
         timelineItems: { nodes: x.closed_by ? [{ actor: gqlUser(x.closed_by) }] : [] },
         comments: { nodes: (x.comments ?? []).map((text, k) => ({ databaseId: x.commentMeta?.[k]?.id ?? k + 1, author: gqlUser(x.commentMeta?.[k]?.user ?? { login: 'someone', type: 'User' }), body: text, createdAt: x.commentMeta?.[k]?.created_at ?? null })) },
       });
@@ -256,6 +275,11 @@ export function createFakeGitHub() {
       const head = r.refs.get(q.get('ref') ?? '') ?? q.get('ref');
       const id = r.commits.has(head) ? filesAt(r, head).get(decodeURIComponent(m[1])) : undefined;
       return id ? new Response(r.blobs.get(id), { status: 200, headers: { 'content-type': 'application/vnd.github.raw; charset=utf-8' } }) : json(404, { message: 'Not Found' });
+    }
+
+    if ((m = /^\/branches\/(.+)$/.exec(rest)) && method === 'GET') {
+      const sha = r.refs.get(decodeURIComponent(m[1]));
+      return sha ? json(200, { name: decodeURIComponent(m[1]), commit: { sha, commit: { tree: { sha: r.commits.get(sha).tree } } } }) : json(404, { message: 'Branch not found' });
     }
 
     // --- git data
@@ -347,7 +371,8 @@ export function createFakeGitHub() {
       const commits = ancestors(r, b).filter((id) => !behind.has(id)).reverse();
       const ahead = new Set(ancestors(r, b));
       const behindBy = ancestors(r, a).filter((id) => !ahead.has(id)).length;
-      return json(200, { base_commit: { sha: a }, ahead_by: commits.length, behind_by: behindBy, status: behindBy ? (commits.length ? 'diverged' : 'behind') : commits.length ? 'ahead' : 'identical', commits: commits.map((id) => commitJson(r, id)), files: diff(r, a, b) });
+      const mergeBase = ancestors(r, a).find((id) => ahead.has(id)) ?? null;
+      return json(200, { base_commit: { sha: a, commit: { tree: { sha: r.commits.get(a).tree } } }, merge_base_commit: mergeBase && { sha: mergeBase }, ahead_by: commits.length, behind_by: behindBy, status: behindBy ? (commits.length ? 'diverged' : 'behind') : commits.length ? 'ahead' : 'identical', commits: commits.map((id) => commitJson(r, id)), files: diff(r, a, b) });
     }
 
     // --- issues
@@ -396,6 +421,18 @@ export function createFakeGitHub() {
       return json(204, null);
     }
     if ((m = /^\/issues\/(\d+)\/events$/.exec(rest))) return json(200, r.issues.get(Number(m[1]))?.events ?? []);
+    // Labels on a pull request (it is an issue too).
+    if ((m = /^\/issues\/(\d+)\/labels$/.exec(rest)) && method === 'POST' && r.pulls.has(Number(m[1]))) {
+      const p = r.pulls.get(Number(m[1]));
+      p.labels = [...new Set([...(p.labels ?? []).map((l) => l.name ?? l), ...body.labels])].map((name) => ({ name }));
+      return json(200, p.labels);
+    }
+    if ((m = /^\/issues\/(\d+)\/labels\/(.+)$/.exec(rest)) && method === 'DELETE' && r.pulls.has(Number(m[1]))) {
+      const p = r.pulls.get(Number(m[1]));
+      const had = (p.labels ?? []).length;
+      p.labels = (p.labels ?? []).filter((l) => (l.name ?? l) !== decodeURIComponent(m[2]));
+      return p.labels.length < had ? json(200, p.labels) : json(404, { message: 'Label does not exist' });
+    }
     if ((m = /^\/issues\/(\d+)\/labels$/.exec(rest)) && method === 'POST') {
       const i = r.issues.get(Number(m[1]));
       for (const name of body.labels) {
@@ -420,6 +457,7 @@ export function createFakeGitHub() {
       const list = [...r.pulls.values()].filter((p) => (q.get('state') === 'all' || p.state === 'open')
         && (!q.get('base') || p.base.ref === q.get('base'))
         && (!head || `${r.full.split('/')[0]}:${p.head.ref}` === head)).reverse();
+      for (const p of list) if (r.refs.has(p.head.ref)) p.head.sha = r.refs.get(p.head.ref);
       return json(200, list);
     }
     if (rest === '/pulls' && method === 'POST') {
@@ -431,6 +469,8 @@ export function createFakeGitHub() {
     if ((m = /^\/pulls\/(\d+)$/.exec(rest))) {
       const p = r.pulls.get(Number(m[1]));
       if (!p) return json(404, {});
+      if (p.state === 'open' && r.refs.has(p.head.ref)) p.head.sha = r.refs.get(p.head.ref); // as GitHub: where the branch is now
+      if (p.state === 'open' && p.head.ref.startsWith('proposed-edits/') && !p.mergeableSet) p.mergeable = proposalMerges(r, p);
       if (method === 'PATCH') Object.assign(p, body);
       return json(200, p);
     }
@@ -438,12 +478,22 @@ export function createFakeGitHub() {
       const p = r.pulls.get(Number(m[1]));
       return json(200, diff(r, r.refs.get(p.base.ref), r.refs.get(p.head.ref)));
     }
-    if ((m = /^\/pulls\/(\d+)\/commits$/.exec(rest))) return json(200, r.pulls.get(Number(m[1])).prCommits);
+    if ((m = /^\/pulls\/(\d+)\/commits$/.exec(rest))) {
+      // Given ones (authors only), or as GitHub: the branch's commits not on the base, oldest first.
+      const p = r.pulls.get(Number(m[1]));
+      if (p.prCommits.length) return json(200, p.prCommits);
+      const onBase = new Set(ancestors(r, r.refs.get(p.base.ref)));
+      const mine = ancestors(r, r.refs.get(p.head.ref)).filter((id) => !onBase.has(id)).reverse();
+      return json(200, mine.map((id) => ({ ...commitJson(r, id), parents: r.commits.get(id).parents.map((sha) => ({ sha })) })));
+    }
     if ((m = /^\/pulls\/(\d+)\/merge$/.exec(rest)) && method === 'PUT') {
       const p = r.pulls.get(Number(m[1]));
-      if (!p.mergeable) return json(405, { message: 'not mergeable' });
       const baseHead = r.refs.get(p.base.ref);
       const headSha = r.refs.get(p.head.ref);
+      // `mergeable: false` (a conflict) holds until the drafts are merged into the branch.
+      const mergeable = p.head.ref.startsWith('proposed-edits/') && !p.mergeableSet ? proposalMerges(r, p) : p.mergeable;
+      if (!mergeable && !ancestors(r, headSha).includes(baseHead)) return json(405, { message: 'Pull Request is not mergeable' });
+      if (body.sha && body.sha !== headSha) return json(409, { message: 'Head branch was modified. Review and try the merge again.' });
       const tree = r.commits.get(headSha).tree;
       const parents = body.merge_method === 'merge' ? [baseHead, headSha] : [baseHead];
       const id = putCommit(r, { tree, parents, message: `${body.commit_title}\n\n${body.commit_message ?? ''}`, author: { name: 'textbook-suggest-edit[bot]', email: 'bot@example.invalid' } });

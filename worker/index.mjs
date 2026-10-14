@@ -110,6 +110,7 @@ export default {
     platform.kv = env.TOKENS ?? null;
     platform.cache = env.CACHE ?? null;
     platform.db = env.DB ?? null;
+    platform.cpuCapped = true;
 
     const url = new URL(request.url);
     // Writes (worker/writes.mjs): their fallback's answers, and the health check.

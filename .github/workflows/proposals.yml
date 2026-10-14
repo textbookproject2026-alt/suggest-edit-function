@@ -1,0 +1,56 @@
+# Readers' proposals brought up to date with the drafts (scripts/refresh-proposals.mjs):
+# each one GitHub can't merge (a paragraph is one line to git, so two suggestions on one
+# paragraph conflict) is merged again word by word and committed to its branch, or, where
+# the words overlap, labelled "paragraph changed" for the author. Accepts, declines and
+# merges nothing: those stay the authors'.
+#
+# Started by the Worker after an accept, for that page (repository_dispatch
+# c4n-proposals, through the GitHub App): the merging is more than its CPU allows. By
+# hand (Run workflow) for one book, or every book with no input: the backlog.
+name: proposals
+
+on:
+  repository_dispatch:
+    types: [c4n-proposals]
+  workflow_dispatch:
+    inputs:
+      book:
+        description: One book's slug (empty for every book)
+        default: ''
+      path:
+        description: One page of it, e.g. chapters/introduction.md (empty for all)
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: proposals-${{ github.event.client_payload.book || inputs.book || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Bring the proposals up to date
+        env:
+          BOOK: ${{ github.event.client_payload.book || inputs.book }}
+          PAGE: ${{ github.event.client_payload.path || inputs.path }}
+          APP_KEY: ${{ secrets.SUGGEST_EDIT_APP_PRIVATE_KEY }}
+          # As in wrangler.toml [vars].
+          GITHUB_APP_ID: '4951384'
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund
+          FUNCTION_SHA="$(git rev-parse HEAD)" npm run -s registry:bundle
+          GITHUB_APP_PRIVATE_KEY="$(printf '%s\n' "$APP_KEY" | base64 -w0)" node scripts/refresh-proposals.mjs "${BOOK:-}" "${PAGE:-}"
