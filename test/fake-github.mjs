@@ -177,6 +177,42 @@ export function createFakeGitHub() {
       }
       return json(200, { data: { repository } });
     }
+    if (u.pathname === '/graphql' && method === 'POST' && body.query.includes('file(path: $path) { object { ... on Blob { text isBinary')) {
+      // lib/review.mjs gather: the drafts' head and page, the open proposals with their commits, open suggestions.
+      const r = repos.get(`${body.variables.owner}/${body.variables.name}`.toLowerCase());
+      const v = body.variables;
+      const head = r.refs.get(v.ref.replace(/^refs\/heads\//, ''));
+      const id = head && filesAt(r, head).get(v.path);
+      const user = (x) => ({ __typename: /\[bot\]$/.test(x?.login ?? '') ? 'Bot' : 'User', login: String(x?.login ?? '').replace(/\[bot\]$/, '') });
+      const one = /one: pullRequest\(number: (\d+)\)/.exec(body.query)?.[1];
+      const pulls = [...r.pulls.values()].filter((p) => (one ? p.number === Number(one) : p.state === 'open')).map((p) => {
+        const tip = r.refs.get(p.head.ref) ?? p.head.sha;
+        const base = r.refs.get(p.base.ref);
+        const onBase = new Set(ancestors(r, base));
+        const mine = ancestors(r, tip).filter((c) => !onBase.has(c)).reverse();
+        return {
+          number: p.number, title: p.title, body: p.body ?? '', url: p.html_url, headRefName: p.head.ref, headRefOid: tip,
+          changedFiles: diff(r, ancestors(r, tip).find((c) => onBase.has(c)), tip).length, author: user(p.user), headRepository: { nameWithOwner: r.full },
+          labels: { nodes: (p.labels ?? []).map((l) => ({ name: l.name ?? l })) },
+          commits: { nodes: mine.map((c) => ({ commit: { oid: c, parents: { nodes: r.commits.get(c).parents.map((oid) => ({ oid })) } } })) },
+        };
+      });
+      const issues = [...r.issues.values()].filter((i) => i.state === 'open' && (i.labels ?? []).some((l) => (l.name ?? l) === 'suggested-edit')).map((i) => ({
+        number: i.number, title: i.title ?? '', body: i.body ?? '', createdAt: i.created_at, url: i.html_url, labels: { nodes: (i.labels ?? []).map((l) => ({ name: l.name ?? l })) } }));
+      return json(200, { data: { repository: {
+        ref: head ? { target: { oid: head, tree: { oid: r.commits.get(head).tree }, file: id ? { object: { text: r.blobs.get(id).toString('utf8'), isBinary: false } } : null } } : null,
+        ...(one ? { one: pulls[0] ? { ...pulls[0], merged: Boolean(r.pulls.get(Number(one)).merged) } : null } : { pullRequests: { nodes: pulls }, issues: { nodes: issues } }) } } });
+    }
+    if (u.pathname === '/graphql' && method === 'POST' && body.query.includes('object(expression:')) {
+      const r = repos.get(`${body.variables.owner}/${body.variables.name}`.toLowerCase());
+      const repository = {};
+      for (const [, alias, expr] of body.query.matchAll(/(\w+): object\(expression: ("[^"]+")\)/g)) {
+        const [sha, path] = JSON.parse(expr).split(/:(.*)/s);
+        const id = r.commits.has(sha) && filesAt(r, sha).get(path);
+        repository[alias] = id ? { text: r.blobs.get(id).toString('utf8'), isBinary: false } : null;
+      }
+      return json(200, { data: { repository } });
+    }
     if (u.pathname === '/graphql' && method === 'POST' && /(?:pullRequests|issues)\(states:|(?:issue|pullRequest)\(number:/.test(body.query)) {
       // History lists (page-revision openItems, lib/declined.mjs), from the REST data.
       const r = repos.get(`${body.variables.owner}/${body.variables.name}`.toLowerCase());
@@ -298,6 +334,11 @@ export function createFakeGitHub() {
       const current = r.refs.get(name);
       if (!body.force && current && !ancestors(r, body.sha).includes(current)) return json(422, { message: 'Update is not a fast forward' });
       r.refs.set(name, body.sha);
+      // As GitHub: an open pull request whose head is now in its base is marked merged.
+      const now = new Set(ancestors(r, body.sha));
+      for (const p of r.pulls.values()) {
+        if (p.state === 'open' && p.base.ref === name && now.has(r.refs.get(p.head.ref) ?? p.head.sha)) Object.assign(p, { merged: true, merged_at: tick(), state: 'closed' });
+      }
       return json(200, { object: { sha: body.sha } });
     }
     if ((m = /^\/git\/refs\/heads\/(.+)$/.exec(rest)) && method === 'DELETE') {

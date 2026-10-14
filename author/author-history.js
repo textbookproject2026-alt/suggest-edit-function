@@ -34,7 +34,13 @@ const describe = (c, waiting) => ({
   when: c.commit?.author?.date ?? null,
   message: String(c.commit?.message ?? '').split('\n')[0],
   live: !waiting.has(c.sha),
+  // Review all in chapter's one commit names each item it accepted (author-act review-accept): listed one by one.
+  ...(/^Accept \d+ reader suggestions? on /.test(c.commit?.message ?? '') ? { accepted: acceptedIn(c.commit.message) } : {}),
 });
+
+/** "- #12 proposed edit “Title” by Name (1 of 2 changes)" lines -> [{ number, kind, title, who, part }]. */
+export const acceptedIn = (message) => [...String(message).matchAll(/^- #(\d+) (proposed edit|suggestion)(?: “(.*)”)? by (.+?)(?: \((\d+ of \d+) changes\))?$/gm)]
+  .map(([, n, kind, title, who, part]) => ({ number: Number(n), kind: kind === 'suggestion' ? 'suggestion' : 'edit', title: title ?? '', who, part: part ?? null }));
 
 // ponytail: compare lists at most 250 commits, so drafts more than 250 ahead of live
 // would show the oldest extras as live. Page the compare if a book ever gets there.

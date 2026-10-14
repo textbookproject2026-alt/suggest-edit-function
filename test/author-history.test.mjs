@@ -98,3 +98,13 @@ test('refused: a non-author, no identity, another origin, a bad sha, page or pat
   assert.equal((await get({ path: 'README.md' })).statusCode, 400);
   assert.equal((await get({ sha: edit, path: '.github/workflows/x.yml' })).statusCode, 400);
 });
+
+test('a review\'s one commit lists each item it accepted, one by one', async () => {
+  const { acceptedIn } = await import('../author/author-history.js');
+  const message = 'Accept 3 reader suggestions on chapter-03\n\n- #12 proposed edit “missing word” by Jane Doe\n- #15 proposed edit “whole page” by @bob (1 of 2 changes)\n- #20 suggestion by Sam\n\nAccepted by @alec via the author site.';
+  assert.deepEqual(acceptedIn(message), [
+    { number: 12, kind: 'edit', title: 'missing word', who: 'Jane Doe', part: null },
+    { number: 15, kind: 'edit', title: 'whole page', who: '@bob', part: '1 of 2' },
+    { number: 20, kind: 'suggestion', title: '', who: 'Sam', part: null },
+  ]);
+});

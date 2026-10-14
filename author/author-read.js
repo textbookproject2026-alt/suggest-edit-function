@@ -21,6 +21,8 @@
  *     -> { items: [...] }                               with reasons and comments (lib/declined.mjs), fresh
  *   ?what=declined-change&book=<slug>&number=<n>      a declined proposal's change
  *     -> { number, files: [{ path, before, after }] }   (through the author site's proxy, not the public endpoint)
+ *   ?what=review&book=<slug>&path=<path>               Review all in chapter: the drafts' text with
+ *     -> { path, drafts, paragraphs, items, hunks, notes } every pending proposal merged in (lib/review.mjs)
  *   ?what=publish&book=<slug>                         what stands between drafts and live
  *     -> { publish: null | {...} }                    (with `lint` whenever it could be run)
  *   ?what=drafts&book=<slug>                          drafts vs live, file by file, readers'
@@ -39,6 +41,8 @@ import { SUGGESTED, describeChange, isProposal, parseSuggestion, readableChange 
 import { acceptedAt, changesSince, draftsDiff, publishState, suggestion } from '../lib/author-console-reads.mjs';
 import { declinedChange, declinedItems } from '../lib/declined.mjs';
 import { lintAt } from '../lib/lint-job.mjs';
+import { gather, viewOf } from '../lib/review.mjs';
+import { platform } from '../lib/platform.mjs';
 
 const appToken = appCredentials({ contents: 'read', pull_requests: 'read', issues: 'read' });
 const MAX_FILE = 5 * 1024 * 1024;
@@ -131,7 +135,18 @@ async function change(book, token, left, params) {
   return readableChange(files ?? []);
 }
 
-const READS = { tree, file, drafts: draftsDiff, suggestions, 'suggestion-changes': suggestionChanges, changes, change, declined: async (book, token, left) => ({ items: await declinedItems(book, token, left) }),
+async function review(book, token, left, params) {
+  const path = params.get('path') ?? '';
+  if (!isAuthorPath(path)) throw new Refusal(400, 'validation: path rejected', 'That file is outside what the author site works on.');
+  // On the Worker in parts (lib/review.mjs gather): the page asks for each proposal on its own.
+  const number = params.has('number') ? Number(params.get('number')) : null;
+  if (number !== null && !(Number.isSafeInteger(number) && number > 0)) throw new Refusal(400, 'validation: number', "That change isn't one the author site listed.");
+  const g = await gather(book, path, token, left, { number, light: platform.cpuCapped && !number });
+  if (!g) throw new Refusal(404, 'file not found', "That page isn't in the drafts area, or isn't text.");
+  return viewOf(g, path);
+}
+
+const READS = { tree, file, review, drafts: draftsDiff, suggestions, 'suggestion-changes': suggestionChanges, changes, change, declined: async (book, token, left) => ({ items: await declinedItems(book, token, left) }),
   'declined-change': async (book, token, left, params) => {
     const d = await declinedChange(book, Number(params.get('number')), token, left);
     if (!d) throw new Refusal(404, 'not declined', "That isn't a declined proposal of this book.");

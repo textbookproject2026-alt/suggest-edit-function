@@ -164,6 +164,8 @@ async function cases(slug) {
     authorGet('changes'),
     authorGet('declined'),
     authorGet('publish'),
+    // Review all in chapter: every open proposal and suggestion on the page, merged in (lib/review.mjs).
+    authorGet('review', { path: meta.page }),
     { name: 'author-history', member: true, method: 'GET', url: `/api/author-history?${new URLSearchParams({ book: slug })}` },
     { name: 'suggest POST', method: 'POST', url: '/api/suggest-edit', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Bench', path: meta.page, suggestion: 'A measured suggestion, never sent.' }), write: true },
   ];
@@ -178,6 +180,10 @@ async function cases(slug) {
     // Accepting a reader's edit the drafts have moved under: on the Worker, handed to the
     // Actions fallback (503) before any merging, which costs more CPU than it has.
     out.push({ name: 'author-act[change-accept]', member: true, method: 'POST', url: '/api/author-act', body: JSON.stringify({ book: slug, action: 'change-accept', number: meta.proposal }), write: true, expect: 503 });
+  }
+  if (meta.reviewProposal) {
+    // The same review, one proposal of it read in full (the page asks for each on its own).
+    out.push({ ...authorGet('review', { path: meta.page, number: meta.reviewProposal }), name: 'author-read[review#n]' });
   }
   if (meta.declined) {
     out.push({ name: 'author-act[comment-add]', member: true, method: 'POST', url: '/api/author-act', body: JSON.stringify({ book: slug, action: 'comment-add', number: meta.declined, text: 'A measured comment, never sent.' }), write: true });
@@ -198,7 +204,10 @@ async function discover(book) {
   // An open proposal GitHub can't merge (the drafts moved under it), if there is one.
   const open = gh(`/repos/${repo}/pulls?state=open&base=${book.content.drafts_branch}&per_page=30`).filter((p) => p.head.ref.startsWith('proposed-edits/'));
   const proposal = open.map((p) => gh(`/repos/${repo}/pulls/${p.number}`)).find((p) => p.mergeable === false)?.number ?? null;
-  return { page, shas, suggestion, declined, draftsHead, proposal };
+  // The biggest proposal on the page (most changed lines), for one part of the review.
+  const onPage = open.filter((p) => String(p.body ?? '').includes(`[\`${page}\`]`)).map((p) => gh(`/repos/${repo}/pulls/${p.number}`));
+  const reviewProposal = onPage.sort((a, b) => b.additions + b.deletions - a.additions - a.deletions)[0]?.number ?? null;
+  return { page, shas, suggestion, declined, draftsHead, proposal, reviewProposal };
 }
 
 async function send(c) {
