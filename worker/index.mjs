@@ -45,11 +45,11 @@ let cold = true;
 // for the first time, unoptimised), the rest load=0.
 const loaded = new Set();
 // /api/health is polled: its answer (four D1 reads, up to 9–12 ms CPU live) is kept a
-// minute per isolate. Not in KV: a write every few minutes would take a third of the free
-// plan's 1,000 a day, and a cache the jobs wrote in memory would reach only their isolate.
-const HEALTH_MS = 60_000;
-// Kept as text: a Response (its body a stream) can't be used by another request's I/O.
-let healthKept = null; // { db, at, status, headers, body }
+// minute in the Cache API, which every isolate in a data centre shares (a memory cache
+// missed: polls 10 s apart met a different isolate each time). Not in KV: a write every
+// minute or few would take much of the free plan's 1,000 writes a day.
+const HEALTH_S = 60;
+
 const realFetch = globalThis.fetch;
 globalThis.fetch = (...args) => {
   const store = counter.getStore();
@@ -115,11 +115,20 @@ export default {
     // Writes (worker/writes.mjs): their fallback's answers, and the health check.
     if (url.pathname === '/api/write-status' && env.DB) return forClient(await writeStatus(url, env.DB), env.VERSION?.id);
     if (url.pathname === '/api/health' && env.DB) {
-      if (healthKept?.db !== env.DB || Date.now() - healthKept.at >= HEALTH_MS) {
-        const r = await health(env.DB);
-        healthKept = { db: env.DB, at: Date.now(), status: r.status, headers: [...r.headers], body: await r.text() };
+      const edge = globalThis.caches?.default; // none under node --test
+      const key = new Request(`${url.origin}/api/health`);
+      const hit = await edge?.match(key);
+      if (hit) {
+        const out = forClient(hit, env.VERSION?.id);
+        out.headers.set('Cache-Control', 'no-store');
+        return out;
       }
-      return forClient(new Response(healthKept.body, { status: healthKept.status, headers: healthKept.headers }), env.VERSION?.id);
+      const answer = await health(env.DB);
+      const copy = new Response(answer.body, answer);
+      copy.headers.set('Cache-Control', `public, max-age=${HEALTH_S}`);
+      if (edge) ctx.waitUntil(edge.put(key, copy.clone()));
+      copy.headers.set('Cache-Control', 'no-store');
+      return forClient(copy, env.VERSION?.id);
     }
     const asSent = new URL(request.url);
     const handler = route(url);

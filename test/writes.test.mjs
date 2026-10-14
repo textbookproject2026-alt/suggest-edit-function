@@ -186,14 +186,26 @@ test('the Worker: /api/health and /api/write-status; nothing is forwarded to Ver
   const h = await worker.fetch(new Request('https://api.confused4now.org/api/health'), env, { waitUntil() {} });
   assert.equal(h.status, 200);
   assert.equal((await h.json()).ok, true);
-  // Kept a minute: a second poll doesn't ask D1 again.
+  // Kept a minute in the Cache API: a second poll doesn't ask D1 again.
+  const kept = new Map();
+  globalThis.caches = { default: { match: async (k) => kept.get(k.url)?.clone(), put: async (k, r) => void kept.set(k.url, r) } };
   let asked = 0;
   const prepare = db.prepare.bind(db);
   db.prepare = (...a) => (asked++, prepare(...a));
-  const again = await worker.fetch(new Request('https://api.confused4now.org/api/health'), env, { waitUntil() {} });
-  assert.equal((await again.json()).ok, true);
-  assert.equal(asked, 0);
-  db.prepare = prepare;
+  const pending = [];
+  try {
+    const first = await worker.fetch(new Request('https://api.confused4now.org/api/health'), env, { waitUntil: (p) => pending.push(p) });
+    await Promise.all(pending);
+    assert.equal(first.headers.get('cache-control'), 'no-store');
+    assert.equal(kept.get('https://api.confused4now.org/api/health').headers.get('cache-control'), 'public, max-age=60');
+    const n = asked;
+    const again = await worker.fetch(new Request('https://api.confused4now.org/api/health'), env, { waitUntil() {} });
+    assert.equal((await again.json()).ok, true);
+    assert.equal(asked, n);
+  } finally {
+    db.prepare = prepare;
+    delete globalThis.caches;
+  }
   const s = await worker.fetch(new Request(`https://api.confused4now.org/api/write-status?write_key=${KEY}`), env, { waitUntil() {} });
   assert.equal(s.status, 404);
   const saved = globalThis.fetch;
