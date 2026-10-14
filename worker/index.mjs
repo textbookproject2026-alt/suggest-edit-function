@@ -44,6 +44,11 @@ let cold = true;
 // Routes this isolate has served: the first request of each logs load=1 (its code runs
 // for the first time, unoptimised), the rest load=0.
 const loaded = new Set();
+// /api/health is polled: its answer (four D1 reads, up to 9–12 ms CPU live) is kept a
+// minute per isolate. Not in KV: a write every few minutes would take a third of the free
+// plan's 1,000 a day, and a cache the jobs wrote in memory would reach only their isolate.
+const HEALTH_MS = 60_000;
+let healthKept = null; // { db, at, response }
 const realFetch = globalThis.fetch;
 globalThis.fetch = (...args) => {
   const store = counter.getStore();
@@ -108,7 +113,10 @@ export default {
     const url = new URL(request.url);
     // Writes (worker/writes.mjs): their fallback's answers, and the health check.
     if (url.pathname === '/api/write-status' && env.DB) return forClient(await writeStatus(url, env.DB), env.VERSION?.id);
-    if (url.pathname === '/api/health' && env.DB) return forClient(await health(env.DB), env.VERSION?.id);
+    if (url.pathname === '/api/health' && env.DB) {
+      if (healthKept?.db !== env.DB || Date.now() - healthKept.at >= HEALTH_MS) healthKept = { db: env.DB, at: Date.now(), response: await health(env.DB) };
+      return forClient(healthKept.response.clone(), env.VERSION?.id);
+    }
     const asSent = new URL(request.url);
     const handler = route(url);
     if (!handler) {
