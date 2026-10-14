@@ -118,6 +118,14 @@ async function main() {
   const outcomes = new Map();
   for (const xs of byLabel.values()) for (const x of xs) outcomes.set(x[2], (outcomes.get(x[2]) ?? 0) + 1);
   console.log(`== outcomes: ${JSON.stringify(Object.fromEntries(outcomes))}`);
+  if (process.env.GAPS) {
+    // TEMP: each /api/health since SPLIT with the gap since the Worker's previous invocation.
+    const all = [...byLabel.values()].flat().map((x) => x[0]).sort((a, b) => a - b);
+    for (const x of (byLabel.get('/api/health') ?? []).filter((x) => x[0] >= Date.parse(process.env.SPLIT)).sort((a, b) => a[0] - b[0])) {
+      const i = all.indexOf(x[0]);
+      console.log(`gap ${new Date(x[0]).toISOString()} cpu=${x[1]} gap=${i > 0 ? Math.round((x[0] - all[i - 1]) / 1000) : '-'}s`);
+    }
+  }
   console.log('== every invocation not ok (or 5xx)');
   for (const [l, xs] of byLabel) for (const x of xs) if ((x[2] && x[2] !== 'ok') || x[3] >= 500) console.log(`${new Date(x[0]).toISOString()}  ${l}  outcome=${x[2]} status=${x[3]} cpu=${x[1]}`);
   table(0, `${n} invocations from ${Number.isFinite(first) ? new Date(first).toISOString() : '-'} to ${new Date(to).toISOString()}`);
