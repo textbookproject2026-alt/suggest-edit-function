@@ -1081,3 +1081,16 @@ test('publish: with no request open yet, the drafts\' own lint comes back', asyn
   assert.ok(Array.isArray(p.lint), JSON.stringify(p));
   assert.equal(p.lint_job, undefined);
 });
+
+test('a suggestion: the text the reader started from, only when the whole of it is there', async () => {
+  const { parseSuggestion } = await import('../lib/author-console.mjs');
+  const issue = (quote) => ({
+    number: 5, title: 'Note on ¶2: chapters/a.md', labels: ['suggested-edit'], state: 'open',
+    body: ['**File:** [`chapters/a.md`](x)', '**Where:** [¶2](y)', ...(quote ? ['', '```text', quote, '```'] : []),
+      '', '### Suggested edit', '', '```text', 'The new words.', '```'].join('\n'),
+  });
+  assert.equal(parseSuggestion(issue('The old words.')).original, 'The old words.');
+  assert.equal(parseSuggestion(issue('The old start…')).original, '');
+  assert.equal(parseSuggestion(issue('')).original, '');
+  assert.equal(parseSuggestion(issue('')).suggestion, 'The new words.');
+});

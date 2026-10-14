@@ -11,7 +11,8 @@
  *
  *   A note on one paragraph (the ¶ margin's "Note to the authors about ¶n") adds
  *     paragraph   the paragraph's number (a positive integer)
- *     quote       the start of its text (<= 300 characters), as the reader saw it
+ *     quote       its text as the reader saw it (<= 5000 characters): the start of it for a
+ *                 note, the whole text the box started from for a suggestion
  *     page        the page's path on the book's site ("/chapters/chapter-03"), for
  *                 the #p<n> permalink on the book's own domain
  *   and gets the label `section-note`. A body without them is a note on the page,
@@ -67,7 +68,7 @@ const LABEL_DEFAULTS = {
 const MAX_SUGGESTION = 5000;
 const MAX_REASONING = 5000;
 const MAX_NAME = 200;
-const MAX_QUOTE = 300;
+const MAX_QUOTE = 5000;
 // A page's path on the book's site: Quartz's slugs, so no spaces, quotes or "..".
 const PAGE_RE = /^\/(?:[A-Za-z0-9._~%-]+\/)*[A-Za-z0-9._~%-]*$/;
 
