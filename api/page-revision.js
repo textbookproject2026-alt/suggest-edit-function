@@ -54,7 +54,7 @@
  */
 import { REGISTRY, SHA_RE, Refusal, appCredentials, budget, encodePath, gh, ghJson, graphqlRepo, query, wrap } from '../lib/author.mjs';
 import { RawJson, clientIp, createRateLimiter, isSafePath, send } from '../lib/common.mjs';
-import { declinedChange, declinedItems, newestFirst } from '../lib/declined.mjs';
+import { declinedChange, declinedItems, newestFirst, readerOrNull } from '../lib/declined.mjs';
 import { ahead, cacheKeys as keys } from '../lib/kv-cache.mjs';
 import { platform } from '../lib/platform.mjs';
 
@@ -217,7 +217,7 @@ export function openItem(item, kind) {
     url: item.html_url,
     date: String(item.created_at ?? '').slice(0, 10),
     summary: cut(summary === '(no summary given)' ? String(item.title ?? '') : summary),
-    who: attributionOf(body),
+    who: readerOrNull(attributionOf(body)),
     ...(para ? { paragraph: Number(para) } : {}),
     files,
   };
@@ -392,7 +392,9 @@ const READER_LABELS = { 'proposed-edit': 'edit', 'section-note': 'note', 'sugges
  * the App, for the author site's reader-suggestion emails (batch 2b). Only an item
  * that exists, is labelled proposed-edit, section-note or suggested-edit, and was
  * opened by the platform's App or carries the platform's attribution line; anything
- * else is 404. Public fields only, as mode=open.
+ * else is 404. Public fields only, as mode=open. Also the book's /history follow link
+ * (13 Oct): its state, whether it was merged or taken on (`accepted` label), and how an
+ * issue was closed (`reason`: completed / not_planned), for an item the build hasn't drawn.
  */
 async function item(req, res, q) {
   const slug = q.get('book') ?? '';
@@ -417,8 +419,12 @@ async function item(req, res, q) {
     const one = openItem(it, kinds.includes('note') ? 'note' : kinds.includes('edit') ? 'edit' : 'suggestion');
     const where = /^\*\*Where:\*\* \[¶(\d+)\]\((https:\/\/[^)\s]+)\)/m.exec(String(it.body ?? ''));
     res.setHeader('Cache-Control', 'no-store');
+    // The follow link (/history#issue-<n>, #pr-<n>) asks this for an item the build hasn't
+    // drawn yet: open, accepted (merged, or the suggestion taken on or done) or declined.
     return send(res, 200, {
       number: one.number, kind: one.kind, url: one.url, summary: one.summary, state: it.state, created: it.created_at,
+      who: one.who, files: one.files, closed: it.closed_at ?? null, merged: Boolean(it.pull_request?.merged_at),
+      reason: it.state_reason ?? null, accepted: labels.includes('accepted'),
       ...(where ? { paragraph: { n: Number(where[1]), url: where[2] } } : {}),
     });
   } catch (err) {
