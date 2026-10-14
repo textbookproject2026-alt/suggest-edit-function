@@ -117,6 +117,8 @@ async function main() {
   const outcomes = new Map();
   for (const xs of byLabel.values()) for (const x of xs) outcomes.set(x[2], (outcomes.get(x[2]) ?? 0) + 1);
   console.log(`== outcomes: ${JSON.stringify(Object.fromEntries(outcomes))}`);
+  console.log('== every invocation not ok (or 5xx)');
+  for (const [l, xs] of byLabel) for (const x of xs) if ((x[2] && x[2] !== 'ok') || x[3] >= 500) console.log(`${new Date(x[0]).toISOString()}  ${l}  outcome=${x[2]} status=${x[3]} cpu=${x[1]}`);
   table(0, `${n} invocations from ${Number.isFinite(first) ? new Date(first).toISOString() : '-'} to ${new Date(to).toISOString()}`);
   if (process.env.SPLIT) {
     table(Date.parse(process.env.SPLIT), `since ${process.env.SPLIT}`);
