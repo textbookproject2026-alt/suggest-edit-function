@@ -19,7 +19,8 @@ const api = async (path, body) => {
       headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
       body: body && JSON.stringify(body),
     });
-    if (res.status === 429 && i < 5) { await new Promise((r) => setTimeout(r, 2000 * (i + 1))); continue; }
+    // Rate limited, or an HTML error page from Cloudflare's edge: wait and ask again.
+    if ((res.status === 429 || res.status >= 500) && i < 5) { await new Promise((r) => setTimeout(r, 2000 * (i + 1))); continue; }
     return res.json();
   }
 };
