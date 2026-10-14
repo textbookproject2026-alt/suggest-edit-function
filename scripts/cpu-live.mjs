@@ -35,6 +35,8 @@ export function label(url) {
 
 // The Worker's routes (worker/index.mjs); anything else is a scanner or a measurement.
 const ROUTE = /^\/api\/(author-[a-z-]+|history|page-revision|propose-edit|suggest-edit|request-book|github-auth|health|write-status)(\[|$)/;
+// Key paths only, never values: an event can carry request headers.
+const keys = (o, p = '') => (o && typeof o === 'object' ? Object.entries(o).flatMap(([k, v]) => keys(v, `${p}${k}.`)) : [p.slice(0, -1)]);
 const pct = (xs, p) => xs[Math.min(xs.length - 1, Math.ceil((p / 100) * xs.length) - 1)];
 
 async function main() {
@@ -57,6 +59,7 @@ async function main() {
   }
 
   const byLabel = new Map();
+  const shapes = new Set();
   let first = Infinity;
   let n = 0;
   async function window(a, b) {
@@ -64,7 +67,6 @@ async function main() {
       queryId: 'cpu-live', view: 'events', limit: 2000, timeframe: { from: a, to: b },
       parameters: { datasets: ['cloudflare-workers'], filterCombination: 'and', filters: [
         { key: '$metadata.service', type: 'string', operation: 'eq', value: 'c4n-api' },
-        { key: '$workers.eventType', type: 'string', operation: 'eq', value: 'fetch' },
       ] },
     });
     if (r.errors?.length) throw new Error(JSON.stringify(r.errors));
@@ -77,32 +79,51 @@ async function main() {
     }
     for (const e of events) {
       const w = e.$workers ?? {};
+      if (typeof w.cpuTimeMs !== 'number') continue; // a log line, not the invocation
       const url = w.event?.request?.url;
-      if (typeof w.cpuTimeMs !== 'number' || !url) continue; // a log line, not the invocation
-      const l = label(url);
+      if (w.eventType === 'fetch' && !url) continue;
+      if (process.env.SHAPE && !shapes.has(w.eventType)) { shapes.add(w.eventType); console.log(`shape ${w.eventType}: ${keys(e).join(' ')} outcome=${w.outcome} entrypoint=${w.entrypoint}`); }
+      const l = w.eventType === 'fetch' ? label(url) : `(${w.eventType} ${w.entrypoint ?? w.scriptName ?? ''})`;
       if (!byLabel.has(l)) byLabel.set(l, []);
-      byLabel.get(l).push([e.timestamp, w.cpuTimeMs]);
+      byLabel.get(l).push([e.timestamp, w.cpuTimeMs, w.outcome, w.event?.response?.status, w.event?.request?.headers?.['user-agent']]);
       first = Math.min(first, e.timestamp);
       n++;
     }
   }
   for (let a = from; a < to; a += 3_600_000) await window(a, Math.min(a + 3_600_000, to));
 
-  const table = (since, title) => {
+  // Outcomes: exceededCpu is error 1102; "other" is any other non-ok outcome or a 5xx.
+  const table = (since, title, skip = () => false) => {
     console.log(`\n== per endpoint (Observability), ${title}, cpu ms`);
-    console.log(`${'endpoint'.padEnd(34)}${'n'.padStart(7)}${'p50'.padStart(6)}${'p95'.padStart(6)}${'p99'.padStart(6)}${'max'.padStart(6)}`);
+    console.log(`${'endpoint'.padEnd(34)}${'n'.padStart(7)}${'p50'.padStart(6)}${'p95'.padStart(6)}${'p99'.padStart(6)}${'max'.padStart(6)}${'cpu1102'.padStart(9)}${'other'.padStart(7)}`);
     const rows = [...byLabel]
-      .filter(([l]) => ROUTE.test(l))
-      .map(([l, xs]) => [l, xs.filter(([t]) => t >= since).map(([, ms]) => ms).sort((x, y) => x - y)])
+      .filter(([l]) => ROUTE.test(l) || l.startsWith('('))
+      .map(([l, xs]) => [l, xs.filter((x) => x[0] >= since && !skip(l, x))])
       .filter(([, xs]) => xs.length)
+      .map(([l, xs]) => [l, xs.map((x) => x[1]).sort((x, y) => x - y),
+        xs.filter((x) => x[2] === 'exceededCpu').length,
+        xs.filter((x) => (x[2] && x[2] !== 'ok' && x[2] !== 'exceededCpu') || x[3] >= 500).length])
       .sort((x, y) => pct(y[1], 99) - pct(x[1], 99));
-    for (const [l, xs] of rows) {
+    for (const [l, xs, cpu, other] of rows) {
       const over = pct(xs, 99) > FLAG ? `  P99 over ${FLAG}` : '';
-      console.log(`${l.padEnd(34)}${String(xs.length).padStart(7)}${String(pct(xs, 50)).padStart(6)}${String(pct(xs, 95)).padStart(6)}${String(pct(xs, 99)).padStart(6)}${String(xs.at(-1)).padStart(6)}${over}`);
+      console.log(`${l.padEnd(34)}${String(xs.length).padStart(7)}${String(pct(xs, 50)).padStart(6)}${String(pct(xs, 95)).padStart(6)}${String(pct(xs, 99)).padStart(6)}${String(xs.at(-1)).padStart(6)}${String(cpu).padStart(9)}${String(other).padStart(7)}${over}`);
     }
   };
+  // Who asks for /api/health: polling (curl, scripts) against the site's own checks.
+  const agents = new Map();
+  for (const x of byLabel.get('/api/health') ?? []) if (x[0] >= Date.parse(process.env.SPLIT ?? 0)) agents.set(x[4] ?? '-', (agents.get(x[4] ?? '-') ?? 0) + 1);
+  console.log(`\n== /api/health user agents${process.env.SPLIT ? ` since ${process.env.SPLIT}` : ''}`);
+  for (const [a, k] of agents) console.log(`${String(k).padStart(6)}  ${a}`);
+  const outcomes = new Map();
+  for (const xs of byLabel.values()) for (const x of xs) outcomes.set(x[2], (outcomes.get(x[2]) ?? 0) + 1);
+  console.log(`== outcomes: ${JSON.stringify(Object.fromEntries(outcomes))}`);
   table(0, `${n} invocations from ${Number.isFinite(first) ? new Date(first).toISOString() : '-'} to ${new Date(to).toISOString()}`);
-  if (process.env.SPLIT) table(Date.parse(process.env.SPLIT), `since ${process.env.SPLIT}`);
+  if (process.env.SPLIT) {
+    table(Date.parse(process.env.SPLIT), `since ${process.env.SPLIT}`);
+    // Polling: command-line clients and scripts (curl, node), not a browser.
+    const POLL = /^(curl|node|undici|python|Wget|-)/i;
+    table(Date.parse(process.env.SPLIT), `since ${process.env.SPLIT}, /api/health without polling`, (l, x) => l === '/api/health' && POLL.test(x[4] ?? '-'));
+  }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) await main();

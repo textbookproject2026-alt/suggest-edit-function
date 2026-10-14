@@ -34,3 +34,4 @@ jobs:
           DAYS: ${{ inputs.days || '7' }}
           # On a pull request: since fn #50's deploy (13 Oct), the CPU work.
           SPLIT: ${{ inputs.split || '2026-10-13T17:13:30Z' }}
+          SHAPE: ${{ github.event_name == 'pull_request' && '1' || '' }}
