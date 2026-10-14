@@ -683,18 +683,69 @@ test('suggestions on one paragraph: word-level fixes all land, an overlapping re
   const rc = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: c } });
   assert.equal(rc.statusCode, 409);
   assert.equal(rc.payload.userMessage, 'This suggestion was made on an older version of this paragraph.');
-  assert.deepEqual(rc.payload.overlap.paragraphs, [{ path: CH3_PATH, line: 2, base: P1, current: 'The cat sat on the mat and looked at the dog.', suggested: 'A dog sat on the rug.' }]);
+  assert.deepEqual(rc.payload.overlap.paragraphs.map(({ merged, ...p }) => p), [{ path: CH3_PATH, line: 2, base: P1, current: 'The cat sat on the mat and looked at the dog.', suggested: 'A dog sat on the rug.' }]);
   assert.equal(gh.repo(REPO).refs.get(DRAFTS), before);
 
   const rd = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: d } });
   assert.equal(rd.statusCode, 200, JSON.stringify(rd.payload));
 
-  // Taking the suggestion over the changed paragraph would bring back its old wording: refused, nothing written.
+  const { CHOICES } = await import('../lib/author-console.mjs');
+  // "Use the suggestion" is the same word-by-word accept: the clash is refused, nothing written,
+  // never the suggester's copy over the changed paragraph. The ways on come with the refusal.
   const drafted = gh.repo(REPO).refs.get(DRAFTS);
-  const use = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: c, resolve: 'suggestion' } });
-  assert.equal(use.statusCode, 400);
+  const use = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: c, resolve: CHOICES.use.resolve } });
+  assert.equal(use.statusCode, 409);
+  assert.deepEqual(use.payload.choices, JSON.parse(JSON.stringify(CHOICES)));
   assert.equal(gh.repo(REPO).refs.get(DRAFTS), drafted);
   assert.equal(gh.textAt(REPO, drafted, CH3_PATH), para3('The cat sat on the mat and looked at the dog.', 'Second paragraph stays as it was.'));
+  // Anything else is refused as before.
+  assert.equal((await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: c, resolve: 'theirs' } })).statusCode, 400);
+});
+
+test('every choice the page is sent is one the API takes, on a fresh and on an outdated suggestion', async () => {
+  const listed = async () => (await get('changes', { book: BOOK.slug })).payload.changes;
+  for (const key of ['accept', 'use', 'edit']) {
+    // Fresh: GitHub merges it as it is.
+    resetBook();
+    gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: para3(P1) });
+    const n = proposal(`fresh-${key}`, gh.repo(REPO).refs.get(DRAFTS), para3('The cat sat on the mat and looked at dog.'));
+    const choice = (await listed()).find((x) => x.number === n).choices[key];
+    const r = await call(act, { body: { book: BOOK.slug, action: choice.action, number: n, ...(choice.resolve ? { resolve: choice.resolve } : {}) } });
+    assert.equal(r.statusCode, 200, `${key}: ${JSON.stringify(r.payload)}`);
+    // Outdated: the drafts made a glossary link of a word next to the reader's insertion since.
+    resetBook();
+    gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: para3('The **cat** sat on mat and looked at dog.') });
+    const m = proposal(`old-${key}`, gh.repo(REPO).refs.get(DRAFTS), para3('The black **cat** sat on mat and looked at dog.'));
+    gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: para3('The **[[glossary#cat|cat]]** sat on mat and looked at dog.') });
+    const r2 = await call(act, { body: { book: BOOK.slug, action: choice.action, number: m, ...(choice.resolve ? { resolve: choice.resolve } : {}) } });
+    assert.equal(r2.statusCode, 200, `${key}: ${JSON.stringify(r2.payload)}`);
+    assert.equal(drafts3(), para3('The black **[[glossary#cat|cat]]** sat on mat and looked at dog.'), key);
+  }
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: para3(P1) });
+  const d = proposal('old-decline', gh.repo(REPO).refs.get(DRAFTS), para3('A dog sat on the rug.'));
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: para3('The cat sat on the rug and looked at dog.') });
+  const choice = (await listed()).find((x) => x.number === d).choices.decline;
+  const r = await call(act, { body: { book: BOOK.slug, action: choice.action, number: d, reason: 'The paragraph has changed since this suggestion was made.' } });
+  assert.equal(r.statusCode, 200, JSON.stringify(r.payload));
+});
+
+test('Edit before accepting: the reader\'s other words go in, the drafts\' words where both changed them, the reader credited', async () => {
+  const { CHOICES } = await import('../lib/author-console.mjs');
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: para3(P1) });
+  // The reader: "mat" -> "rug" and "dog." -> "a dog."; the author since: "dog." -> "the dog." (the same place).
+  const n = proposal('edit', gh.repo(REPO).refs.get(DRAFTS), para3('The cat sat on rug and looked at a dog.'));
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: para3('The cat sat on mat and looked at the dog.') });
+  await overlapOf(n);
+  const r = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: n, resolve: CHOICES.edit.resolve } });
+  assert.equal(r.statusCode, 200, JSON.stringify(r.payload));
+  assert.equal(drafts3(), para3('The cat sat on rug and looked at the dog.'));
+  assert.deepEqual(r.payload.edit, { path: CH3_PATH, line: 2, paragraphs: [{ path: CH3_PATH, line: 2, base: P1, current: 'The cat sat on mat and looked at the dog.', suggested: 'The cat sat on rug and looked at a dog.', merged: 'The cat sat on rug and looked at the dog.' }] });
+  assert.match(r.payload.steps[0], /your wording was kept/);
+  const pr = gh.repo(REPO).pulls.get(n);
+  assert.match(pr.mergeBody.commit_message, /Co-authored-by: Reader <5\+reader@users\.noreply\.github\.com>/);
+  assert.match(pr.mergeBody.commit_message, /Accepted by @brandonandcaroline via the author site\./);
 });
 
 test('accepting a draft change: a second click (or the Actions fallback after the API was cut off) is done, not an error', async () => {
@@ -737,7 +788,7 @@ test('three-way accept: overlap after a draft edit is refused with old, suggeste
   const n = proposal('over-draft', gh.repo(REPO).refs.get(DRAFTS), para3('The cat sat on mat and looked at a dog.'));
   const now = para3('The cat sat on the mat and looked at the dog.');
   gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: now });
-  assert.deepEqual(await overlapOf(n), [{ path: CH3_PATH, line: 2, base: P1, current: 'The cat sat on the mat and looked at the dog.', suggested: 'The cat sat on mat and looked at a dog.' }]);
+  assert.deepEqual(await overlapOf(n), [{ path: CH3_PATH, line: 2, base: P1, current: 'The cat sat on the mat and looked at the dog.', suggested: 'The cat sat on mat and looked at a dog.', merged: 'The cat sat on the mat and looked at the dog.' }]);
   assert.equal(drafts3(), now);
 });
 

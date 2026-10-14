@@ -13,9 +13,12 @@
  *       closes an accepted suggestion with a link to `sha`, which must be the newest
  *       commit on drafts to have changed its page since it was accepted
  *       (GET author-read?what=suggestion-changes names it)
- *   { book, action: "change-accept", number, title? }
+ *   { book, action: "change-accept", number, title?, resolve? }
  *       squash-merges a draft change (an open PR into drafts) and puts the drafts in
- *       line for the live book (opens or refreshes the one publish request)
+ *       line for the live book (opens or refreshes the one publish request); merged
+ *       again word by word if the drafts moved. resolve "suggestion" is the same;
+ *       "edit" keeps the drafts' words where both changed them and answers `edit`
+ *       ({ path, line, paragraphs }) for the editor (lib/author-console.mjs CHOICES)
  *   { book, action: "change-decline", number, reason }
  *       the reason, a note thanking them, then closed unmerged and locked
  *   { book, action: "comment-add", number, text }
@@ -44,7 +47,7 @@ import { cacheKeys, forget } from '../lib/kv-cache.mjs';
 import { COMMENT_MIN, cleanText, commentOf, declineComment, isDeclined, kindOf, memberComment } from '../lib/declined.mjs';
 import {
   ACCEPTED, ACCEPTED_LABEL, NEEDS_TRIAGE, PUBLISH_STATE_WORDS, PUBLISH_TITLE, PUBLISHED_STEPS, checkReply, declined,
-  describeChange, describePublish, publishRequestBody, takenOn, thanksWithChange,
+  CHOICES, describeChange, describePublish, publishRequestBody, takenOn, thanksWithChange,
 } from '../lib/author-console.mjs';
 import {
   acceptedAt, changesSince, compareDrafts, liveServes, mergeability, openPublishRequest, publishChecks, suggestion,
@@ -276,12 +279,19 @@ async function coAuthors(book, pr, token, left, tag, read = null) {
   }
 }
 
+// The `resolve` values change-accept takes, from the one list the page's buttons come from.
+const RESOLVES = new Set(Object.values(CHOICES).filter((c) => c.action === 'change-accept' && c.resolve).map((c) => c.resolve));
+
 const hasLook = (pr) => (pr.labels ?? []).some((l) => l?.name === NEEDS_LOOK);
 const OVERLAP_WORDS = 'This suggestion was made on an older version of this paragraph.';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Re-apply a proposal onto the drafts as they are now, or refuse in words the author can act on. -> the new head sha. */
-async function refreshed(book, pr, ctx, commits) {
+/**
+ * Re-apply a proposal onto the drafts as they are now, or refuse in words the author can act on.
+ * `partial` (Edit before accepting): an overlap keeps the drafts' words there instead of refusing.
+ * -> { sha, overlaps }
+ */
+async function refreshed(book, pr, ctx, commits, partial = false) {
   const { token, left, tag } = ctx;
   if (platform.cpuCapped) {
     // Merging it again is more than the Worker's 10 ms of CPU allows on top of an accept:
@@ -290,10 +300,10 @@ async function refreshed(book, pr, ctx, commits) {
     console.log(`draft change #${pr.number}: the drafts moved under it, left to the fallback to merge again ${tag}`);
     throw new Refusal(503, 'reapply in actions', 'Applying… this can take up to a minute.');
   }
-  const r = await reapply(book, pr, token, left, { commits });
+  const r = await reapply(book, pr, token, left, { commits, partial });
   if (r.state === 'overlap') {
     if (!hasLook(pr)) await markNeedsLook(book, pr.number, true, token, left, tag);
-    throw new Refusal(409, 'overlap', OVERLAP_WORDS, { overlap: { number: pr.number, paragraphs: r.overlaps } });
+    throw new Refusal(409, 'overlap', OVERLAP_WORDS, { overlap: { number: pr.number, paragraphs: r.overlaps }, choices: CHOICES });
   }
   if (r.state === 'already') {
     throw new Refusal(409, 'already in drafts', 'Everything this suggestion changes is already in the drafts, so there is nothing left to accept. You can decline it as outdated.');
@@ -302,8 +312,8 @@ async function refreshed(book, pr, ctx, commits) {
     throw new Refusal(409, 'cannot reapply', `The drafts have changed since this suggestion was made, and it can't be brought up to date here because ${r.why}. Open it on GitHub, or decline it as outdated.`);
   }
   if (hasLook(pr)) await markNeedsLook(book, pr.number, false, token, left, tag);
-  console.log(`draft change #${pr.number} brought up to date with the drafts ${tag}`);
-  return r.sha;
+  console.log(`draft change #${pr.number} brought up to date with the drafts${r.state === 'partial' ? ', the drafts\' words kept where both changed them' : ''} ${tag}`);
+  return { sha: r.sha, overlaps: r.overlaps ?? [] };
 }
 
 /** Squash-merge at `sha`; GitHub may take a moment to see a branch that just moved. -> merged, or the GitHub error. */
@@ -321,9 +331,10 @@ async function squash(book, pr, sha, message, ctx) {
 
 async function changeAccept(book, body, ctx) {
   const { token, left, identity, tag } = ctx;
-  // Taking the suggestion over a paragraph that changed since would put back its old
-  // wording: no longer offered. The author opens it in the editor or declines it.
-  if (body.resolve !== undefined) throw new Refusal(400, 'validation: resolve', "That isn't one of the choices offered.");
+  // Never the suggester's copy of a paragraph that changed since: "use" is a plain accept
+  // (word by word), "edit" keeps the drafts' words where both changed them (CHOICES).
+  if (body.resolve !== undefined && !RESOLVES.has(body.resolve)) throw new Refusal(400, 'validation: resolve', "That isn't one of the choices offered.");
+  const partial = body.resolve === CHOICES.edit.resolve;
   // Accepted already (a second click, or Actions finishing what the API began): done, not an error.
   const was = await readPull(book.content.repo, number(body), token, left);
   if (!was) throw new Refusal(409, 'not an open draft change', "That isn't an open draft change for this book any more. Press “Check again”.");
@@ -338,8 +349,9 @@ async function changeAccept(book, body, ctx) {
   // A proposal GitHub can't merge (the drafts changed under it): merged again word by word first.
   let sha = pr.head?.sha;
   let redone = false;
+  let kept = [];
   if (pr.mergeable === false) {
-    sha = await refreshed(book, pr, ctx, commits);
+    ({ sha, overlaps: kept } = await refreshed(book, pr, ctx, commits, partial));
     redone = true;
   }
   let merged;
@@ -347,16 +359,20 @@ async function changeAccept(book, body, ctx) {
     merged = await squash(book, pr, sha, message, { ...ctx, retry: redone });
   } catch (err) {
     if (!(err instanceof GitHubError) || err.status !== 405 || redone) throw err;
-    sha = await refreshed(book, pr, ctx, commits); // GitHub hadn't yet said it couldn't merge
+    ({ sha, overlaps: kept } = await refreshed(book, pr, ctx, commits, partial)); // GitHub hadn't yet said it couldn't merge
     merged = await squash(book, pr, sha, message, { ...ctx, retry: true });
   }
   if (!merged?.merged) throw new Refusal(502, 'merge not confirmed', 'GitHub did not confirm the change was accepted. Press “Check again” and look before trying once more.');
   console.log(`draft change #${pr.number} accepted ${byline(identity)} ${tag}`);
-  const steps = ['The change was folded into the drafts area.'];
+  const steps = [kept.length
+    ? 'The reader\'s change was folded into the drafts area, except where you had both changed the same words: there your wording was kept.'
+    : 'The change was folded into the drafts area.'];
   // The other proposals on its page, brought up to date (or marked "needs a look") so the
   // next Accept just works: in Actions (proposals.yml, about a minute), as that is more
   // GitHub calls and merging than an accept has time or CPU for.
   const path = describeChange(pr).path;
+  // Edit before accepting: where the editor opens next, with what was kept beside it.
+  const edit = partial && (kept[0]?.path ?? path) ? { path: kept[0]?.path ?? path, line: kept[0]?.line ?? null, paragraphs: kept } : undefined;
   // The in-site editor's copy of the page (kept ahead in KV): the next reader starts from this.
   if (path) await forget(cacheKeys.source(book.content.repo, book.content.drafts_branch, path));
   if (path) {
@@ -372,19 +388,19 @@ async function changeAccept(book, body, ctx) {
     publish = await openOrRefresh(book, token, left, identity, tag);
   } catch (err) {
     console.error(`publish request: ${err.message} ${tag}`);
-    return { done: true, steps, publish: null, warning:
+    return { done: true, steps, publish: null, edit, warning:
       'The change is safely in the drafts area, but it could not be put in line for the live book. Nothing has reached readers, and nothing was lost. Press “Put it in line” to try again.' };
   }
   if (!publish) {
     steps.push('The live book already has this, so there is nothing waiting to go to readers.');
-    return { done: true, steps, publish: null };
+    return { done: true, steps, publish: null, edit };
   }
   steps.push(publish.opened
     ? 'It was put in line for the live book, along with everything else waiting in the drafts area.'
     : 'It joined the changes already in line for the live book.');
   steps.push('Nothing has reached readers yet. Publishing is a separate press, under “Going live”.');
   if (publish.state !== 'conflict') steps.push(publish.state_words);
-  return { done: true, steps, publish, ...(publish.state === 'conflict' ? { warning: publish.state_words } : {}) };
+  return { done: true, steps, publish, edit, ...(publish.state === 'conflict' ? { warning: publish.state_words } : {}) };
 }
 
 async function changeDecline(book, body, ctx) {

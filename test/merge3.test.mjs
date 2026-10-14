@@ -13,7 +13,8 @@ test('two fixes in different places of one paragraph both land', () => {
 test('changes to the same words overlap: the paragraph kept as now, with old, current and suggested', () => {
   const now = doc('The cat sat on the mat and looked at dog.');
   const sug = doc('A dog sat on the rug.');
-  const want = [{ line: 2, base: 'The cat sat on mat and looked at dog.', current: 'The cat sat on the mat and looked at dog.', suggested: 'A dog sat on the rug.' }];
+  // An insertion before a rewrite starting there ("the " + "the rug.") is an overlap too: no "the the".
+  const want = [{ line: 2, base: 'The cat sat on mat and looked at dog.', current: 'The cat sat on the mat and looked at dog.', suggested: 'A dog sat on the rug.', merged: 'A dog sat on the mat and looked at dog.' }];
   assert.deepEqual(merge3(BASE, now, sug), { text: now, overlaps: want });
 });
 
@@ -40,7 +41,7 @@ test('no overlap ever brings back words the drafts changed: hard-wrapped paragra
   const sug = 'Placeholder text.\nmisspelling, which is definitely wrong.\n';
   const r = merge3(base, now, sug);
   assert.equal(r.text, now);
-  assert.deepEqual(r.overlaps, [{ line: 1, base: 'misspelling, which is definately wrong.', current: 'misspelling; which is definitively wrong.', suggested: 'misspelling, which is definitely wrong.' }]);
+  assert.deepEqual(r.overlaps, [{ line: 1, base: 'misspelling, which is definately wrong.', current: 'misspelling; which is definitively wrong.', suggested: 'misspelling, which is definitely wrong.', merged: 'misspelling; which is definitively wrong.' }]);
   // A suggestion several paragraphs long, overlapping in one: that one's old text is in `base`.
   const b2 = 'A one.\n\nB two.\n\nC three.\n';
   const r2 = merge3(b2, 'A one.\n\nB 2.\n\nC three.\n', 'A one.\n\nB deux.\n\nNew.\n\nC three.\n');
@@ -52,4 +53,24 @@ test('the same edit on both sides, or none, is no overlap', () => {
   const now = doc('The cat sat on the mat and looked at dog.');
   assert.deepEqual(merge3(BASE, now, now), { text: now, overlaps: [] });
   assert.deepEqual(merge3(BASE, now, BASE), { text: now, overlaps: [] });
+});
+
+test('glossary links added in the drafts since survive the reader\'s words added beside them', () => {
+  // ontology #40, 14 Oct: the reader added words before "**individuals and groups**"; the drafts made it a link.
+  const base = doc('The **individuals and groups** debate asks where causal power is located.');
+  const now = doc('The **[[glossary#individuals and groups|individuals and groups]]** debate asks where causal power is located.');
+  const sug = doc('The first and most concrete is the **individuals and groups** debate, which asks where causal power is located.');
+  assert.deepEqual(merge3(base, now, sug), {
+    text: doc('The first and most concrete is the **[[glossary#individuals and groups|individuals and groups]]** debate, which asks where causal power is located.'),
+    overlaps: [],
+  });
+});
+
+test('partial: the reader\'s other words go in, the drafts\' words kept where both changed them', () => {
+  const now = doc('The cat sat on mat and looked at the dog.');
+  const sug = doc('The cat sat on rug and looked at a dog.');
+  const strict = merge3(BASE, now, sug);
+  assert.equal(strict.text, now);
+  assert.equal(strict.overlaps[0].merged, 'The cat sat on rug and looked at the dog.');
+  assert.deepEqual(merge3(BASE, now, sug, { partial: true }), { text: doc('The cat sat on rug and looked at the dog.'), overlaps: strict.overlaps });
 });
