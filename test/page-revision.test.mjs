@@ -176,6 +176,8 @@ test('what is proposed: open proposals and notes, public fields only, by page; c
   Object.assign(gh.repo(REPO).pulls.get(other), { body: '', labels: [] });
   const note = gh.addIssue(REPO, { title: 'Note on ¶4: chapters/one.md', body: NOTE_BODY, labels: [{ name: 'suggested-edit' }, { name: 'section-note' }] });
   gh.addIssue(REPO, { title: 'Elsewhere', body: '**File:** [`chapters/two.md`](x)\n\n**Submitted by:** `C`\n', labels: [{ name: 'suggested-edit' }] });
+  // The platform's own tests are left out.
+  gh.addIssue(REPO, { title: 'A test', body: NOTE_BODY.replace('Bea Reader', 'c4n-api check'), labels: [{ name: 'suggested-edit' }, { name: 'platform-test' }] });
   const res = await get({ book: BOOK.slug, mode: 'open', path: PAGE });
   assert.equal(res.statusCode, 200);
   assert.equal(res.headers['cache-control'], 'public, max-age=60, s-maxage=90');
