@@ -3,6 +3,9 @@
  * invocation's cpuTimeMs and URL from Workers Observability, an hour at a time, labelled
  * as worker/index.mjs labels its log line (`/api/history[declined]`…), then P50/P95/P99/max
  * per label. Also the whole Worker's daily quantiles from the analytics API.
+ * Every invocation type: fetch by route, the Jobs entrypoint's RPC runs as `(jsrpc Jobs)`,
+ * cron runs as `(scheduled c4n-api)`; per row the exceededCpu outcomes (error 1102) and
+ * any other failure (another non-ok outcome, or a 5xx), each failure listed with its time.
  * Needs CLOUDFLARE_API_TOKEN. DAYS (default 7) is how far back; Observability keeps what
  * the plan keeps, and the first event found is printed. SPLIT (an ISO time, e.g. a
  * deploy's) prints the table again for what came after it.
@@ -36,8 +39,6 @@ export function label(url) {
 
 // The Worker's routes (worker/index.mjs); anything else is a scanner or a measurement.
 const ROUTE = /^\/api\/(author-[a-z-]+|history|page-revision|propose-edit|suggest-edit|request-book|github-auth|health|write-status)(\[|$)/;
-// Key paths only, never values: an event can carry request headers.
-const keys = (o, p = '') => (o && typeof o === 'object' ? Object.entries(o).flatMap(([k, v]) => keys(v, `${p}${k}.`)) : [p.slice(0, -1)]);
 const pct = (xs, p) => xs[Math.min(xs.length - 1, Math.ceil((p / 100) * xs.length) - 1)];
 
 async function main() {
@@ -59,15 +60,7 @@ async function main() {
     console.log(`${r.dimensions.date}  requests=${r.sum.requests} errors=${r.sum.errors}  p50=${(q.cpuTimeP50 / 1000).toFixed(1)} p90=${(q.cpuTimeP90 / 1000).toFixed(1)} p99=${(q.cpuTimeP99 / 1000).toFixed(1)} p99.9=${(q.cpuTimeP999 / 1000).toFixed(1)}`);
   }
 
-  if (process.env.GAPS) {
-    // TEMP: KV operations per day, the free plan's 1,000 writes a day.
-    const kq = await api('/graphql', { query: `query($a: String!, $from: Date!) { viewer { accounts(filter: {accountTag: $a}) {
-      kvOperationsAdaptiveGroups(limit: 100, filter: {date_geq: $from}) { sum { requests } dimensions { date actionType namespaceId } } } } }`,
-      variables: { a: account, from: new Date(from).toISOString().slice(0, 10) } });
-    console.log(`kv ${JSON.stringify(kq.errors ?? kq.data?.viewer.accounts[0].kvOperationsAdaptiveGroups.filter((g) => g.dimensions.actionType !== 'read').map((g) => [g.dimensions.date, g.dimensions.actionType, g.dimensions.namespaceId.slice(0, 6), g.sum.requests]))}`);
-  }
   const byLabel = new Map();
-  const shapes = new Set();
   let first = Infinity;
   let n = 0;
   async function window(a, b) {
@@ -90,7 +83,6 @@ async function main() {
       if (typeof w.cpuTimeMs !== 'number') continue; // a log line, not the invocation
       const url = w.event?.request?.url;
       if (w.eventType === 'fetch' && !url) continue;
-      if (process.env.SHAPE && !shapes.has(w.eventType)) { shapes.add(w.eventType); console.log(`shape ${w.eventType}: ${keys(e).join(' ')} outcome=${w.outcome} entrypoint=${w.entrypoint}`); }
       const l = w.eventType === 'fetch' ? label(url) : `(${w.eventType} ${w.entrypoint ?? w.scriptName ?? ''})`;
       if (!byLabel.has(l)) byLabel.set(l, []);
       byLabel.get(l).push([e.timestamp, w.cpuTimeMs, w.outcome, w.event?.response?.status, w.event?.request?.headers?.['user-agent']]);
@@ -125,14 +117,6 @@ async function main() {
   const outcomes = new Map();
   for (const xs of byLabel.values()) for (const x of xs) outcomes.set(x[2], (outcomes.get(x[2]) ?? 0) + 1);
   console.log(`== outcomes: ${JSON.stringify(Object.fromEntries(outcomes))}`);
-  if (process.env.GAPS) {
-    // TEMP: each /api/health since SPLIT with the gap since the Worker's previous invocation.
-    const all = [...byLabel.values()].flat().map((x) => x[0]).sort((a, b) => a - b);
-    for (const x of (byLabel.get('/api/health') ?? []).filter((x) => x[0] >= Date.parse(process.env.SPLIT)).sort((a, b) => a[0] - b[0])) {
-      const i = all.indexOf(x[0]);
-      console.log(`gap ${new Date(x[0]).toISOString()} cpu=${x[1]} gap=${i > 0 ? Math.round((x[0] - all[i - 1]) / 1000) : '-'}s`);
-    }
-  }
   console.log('== every invocation not ok (or 5xx)');
   for (const [l, xs] of byLabel) for (const x of xs) if ((x[2] && x[2] !== 'ok') || x[3] >= 500) console.log(`${new Date(x[0]).toISOString()}  ${l}  outcome=${x[2]} status=${x[3]} cpu=${x[1]}`);
   table(0, `${n} invocations from ${Number.isFinite(first) ? new Date(first).toISOString() : '-'} to ${new Date(to).toISOString()}`);

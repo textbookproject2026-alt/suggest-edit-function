@@ -186,6 +186,14 @@ test('the Worker: /api/health and /api/write-status; nothing is forwarded to Ver
   const h = await worker.fetch(new Request('https://api.confused4now.org/api/health'), env, { waitUntil() {} });
   assert.equal(h.status, 200);
   assert.equal((await h.json()).ok, true);
+  // Kept a minute: a second poll doesn't ask D1 again.
+  let asked = 0;
+  const prepare = db.prepare.bind(db);
+  db.prepare = (...a) => (asked++, prepare(...a));
+  const again = await worker.fetch(new Request('https://api.confused4now.org/api/health'), env, { waitUntil() {} });
+  assert.equal((await again.json()).ok, true);
+  assert.equal(asked, 0);
+  db.prepare = prepare;
   const s = await worker.fetch(new Request(`https://api.confused4now.org/api/write-status?write_key=${KEY}`), env, { waitUntil() {} });
   assert.equal(s.status, 404);
   const saved = globalThis.fetch;
