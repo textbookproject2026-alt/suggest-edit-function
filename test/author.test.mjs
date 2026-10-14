@@ -1145,3 +1145,145 @@ test('a suggestion: the text the reader started from, only when the whole of it 
   assert.equal(parseSuggestion(issue('')).original, '');
   assert.equal(parseSuggestion(issue('')).suggestion, 'The new words.');
 });
+
+// --- Review all in chapter (lib/review.mjs) ---------------------------------------------
+
+const Q1 = 'The cat sat on mat.';
+const Q2 = 'Dogs bark at night.';
+const page2 = (a, b) => `# Chapter 3\n\n${a}\n\n${b}\n`;
+function written(number, original, suggestion) {
+  return gh.addIssue(REPO, { title: `Note on ¶2: ${CH3_PATH}`, labels: [{ name: 'suggested-edit' }, { name: 'section-note' }, { name: 'needs-triage' }],
+    body: `**File:** [\`${CH3_PATH}\`](https://example.invalid)\n**Where:** [¶2](https://example.invalid#p2)\n\n\`\`\`text\n${original}\n\`\`\`\n\n### Suggested edit\n\n\`\`\`text\n${suggestion}\n\`\`\`\n\n---\n\n**Submitted by:** \`Sam\`` });
+}
+const reviewOf = async () => {
+  const r = await get('review', { book: BOOK.slug, path: CH3_PATH });
+  assert.equal(r.statusCode, 200, JSON.stringify(r.payload));
+  return r.payload;
+};
+const hunksOf = (view, n) => view.items.find((i) => i.number === n).hunks;
+
+test('review: a mixed batch lands as one drafts commit; whole proposals merged, a partial one closed and credited, the suggestion closed', async () => {
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: page2(Q1, Q2) });
+  const from = gh.repo(REPO).refs.get(DRAFTS);
+  const a = proposal('ra', from, page2('The cat sat on the mat.', Q2), { title: 'missing word' });
+  const b = proposal('rb', from, page2(Q1, 'Dogs bark loudly at night.'), { title: 'louder' });
+  const whole = proposal('rc', from, page2('The cat sat on the mat today.', 'Dogs bark at midnight.'), { title: 'whole page' });
+  const s = written(0, 'Dogs bark', 'Hounds bark');
+  const view = await reviewOf();
+  assert.equal(view.drafts, from);
+  assert.equal(view.paragraphs.join(''), page2(Q1, Q2));
+  // whole's first paragraph overlaps a's; its second overlaps b's and the suggestion's.
+  const [w1, w2] = hunksOf(view, whole);
+  assert.deepEqual(view.hunks.find((x) => x.id === w1).overlaps, hunksOf(view, a));
+  // Tick a and b whole, and nothing of `whole` that clashes: it can't be all of it.
+  const refused = await call(act, { body: { book: BOOK.slug, action: 'review-accept', path: CH3_PATH, drafts: from, hunks: [...hunksOf(view, a), w1] } });
+  assert.equal(refused.statusCode, 409);
+  assert.deepEqual(refused.payload.invalid.map((x) => x.why), ['it overlaps another ticked change']);
+  assert.equal(gh.repo(REPO).refs.get(DRAFTS), from, 'nothing written');
+
+  const heads = { a: gh.repo(REPO).pulls.get(a).head.sha, b: gh.repo(REPO).pulls.get(b).head.sha };
+  const ok = await call(act, { body: { book: BOOK.slug, action: 'review-accept', path: CH3_PATH, drafts: from, hunks: [...hunksOf(view, a), w2] } });
+  assert.equal(ok.statusCode, 200, JSON.stringify(ok.payload));
+  const head = gh.repo(REPO).refs.get(DRAFTS);
+  assert.equal(gh.textAt(REPO, head, CH3_PATH), page2('The cat sat on the mat.', 'Dogs bark at midnight.'));
+  const c = gh.repo(REPO).commits.get(head);
+  assert.deepEqual(c.parents, [from, heads.a], 'the drafts, then each proposal accepted whole');
+  assert.match(c.message, new RegExp(`^Accept 2 reader suggestions on chapter-03\\n\\n- #${a} proposed edit “missing word” by .+\\n- #${whole} proposed edit “whole page” by .+ \\(1 of 2 changes\\)\\n\\nAccepted by @brandonandcaroline via the author site\\.$`));
+  assert.equal(gh.repo(REPO).pulls.get(a).merged, true, 'GitHub marks it merged');
+  const w = gh.repo(REPO).pulls.get(whole);
+  assert.equal(w.state, 'closed');
+  assert.ok(!w.merged);
+  assert.ok(w.labels.some((l) => (l.name ?? l) === 'accepted-in-part'));
+  assert.match(w.comments.at(-1), /Part of it was accepted .*\n\nThe part accepted:\n\n> Dogs bark at midnight\./s);
+  assert.deepEqual(ok.payload.accepted.map((x) => [x.number, x.all]), [[a, true], [whole, false]]);
+  // Still open, untouched: b and the suggestion.
+  assert.equal(gh.repo(REPO).pulls.get(b).state, 'open');
+  assert.equal(gh.repo(REPO).issues.get(s).state, 'open');
+  // A proposal accepted in part is never listed as declined.
+  const declined = await get('declined', { book: BOOK.slug });
+  assert.ok(!declined.payload.items.some((x) => x.number === whole));
+
+  // The suggestion's words are gone now ("at midnight" replaced its paragraph's end, not "Dogs bark"):
+  // it is still exact, and accepted alone it closes as completed with the thank-you.
+  const v2 = await reviewOf();
+  const r2 = await call(act, { body: { book: BOOK.slug, action: 'review-accept', path: CH3_PATH, drafts: v2.drafts, hunks: hunksOf(v2, s) } });
+  assert.equal(r2.statusCode, 200, JSON.stringify(r2.payload));
+  const issue = gh.repo(REPO).issues.get(s);
+  assert.equal(issue.state, 'closed');
+  assert.equal(issue.state_reason, 'completed');
+  assert.ok(issue.comments.at(-1).includes(r2.payload.url));
+  assert.equal(gh.textAt(REPO, gh.repo(REPO).refs.get(DRAFTS), CH3_PATH), page2('The cat sat on the mat.', 'Hounds bark at midnight.'));
+
+  // Its leftover part: declined with a reason (a comment), then kept open (open again).
+  const d = await call(act, { body: { book: BOOK.slug, action: 'part-decline', number: whole, reason: 'The first sentence reads better as it is.', part: 'The cat sat on the mat today.' } });
+  assert.equal(d.statusCode, 200, JSON.stringify(d.payload));
+  assert.match(w.comments.at(-1), /tb-declined[\s\S]*The part declined:\n\n> The cat sat on the mat today\./);
+  const short = await call(act, { body: { book: BOOK.slug, action: 'part-decline', number: whole, reason: 'no', part: 'x' } });
+  assert.equal(short.statusCode, 400, 'never declined without a reason');
+  const k = await call(act, { body: { book: BOOK.slug, action: 'part-keep', number: whole } });
+  assert.equal(k.statusCode, 200, JSON.stringify(k.payload));
+  assert.equal(w.state, 'open');
+});
+
+test('review: drafts moved since the view (a second tab saved): rebuilt, good ticks kept, the rest named, nothing written', async () => {
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: page2(Q1, Q2) });
+  const from = gh.repo(REPO).refs.get(DRAFTS);
+  const a = proposal('ma', from, page2('The cat sat on the mat.', Q2));
+  const b = proposal('mb', from, page2(Q1, 'Dogs bark loudly at night.'));
+  const view = await reviewOf();
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: page2('The cat sat on a mat.', Q2) }); // the other tab
+  const moved = gh.repo(REPO).refs.get(DRAFTS);
+  const ticks = [...hunksOf(view, a), ...hunksOf(view, b)];
+  const r = await call(act, { body: { book: BOOK.slug, action: 'review-accept', path: CH3_PATH, drafts: from, hunks: ticks } });
+  assert.equal(r.statusCode, 409);
+  assert.match(r.payload.userMessage, /changed while you were reviewing/);
+  assert.equal(r.payload.view.drafts, moved);
+  assert.deepEqual(r.payload.kept, hunksOf(view, b));
+  assert.deepEqual(r.payload.invalid, [{ id: hunksOf(view, a)[0], why: 'its paragraph changed in the drafts since' }]);
+  assert.equal(gh.repo(REPO).refs.get(DRAFTS), moved, 'nothing written');
+  assert.equal(gh.repo(REPO).pulls.get(a).state, 'open');
+});
+
+test('review: an empty batch is refused; on the Worker the batch goes to Actions before any work', async () => {
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: page2(Q1, Q2) });
+  const from = gh.repo(REPO).refs.get(DRAFTS);
+  const empty = await call(act, { body: { book: BOOK.slug, action: 'review-accept', path: CH3_PATH, drafts: from, hunks: [] } });
+  assert.equal(empty.statusCode, 400);
+  assert.equal(empty.payload.userMessage, 'Tick at least one change to accept.');
+  const { platform } = await import('../lib/platform.mjs');
+  platform.cpuCapped = true;
+  try {
+    const before = gh.state.calls.length;
+    const r = await call(act, { body: { book: BOOK.slug, action: 'review-accept', path: CH3_PATH, drafts: from, hunks: ['p1-x'] } });
+    assert.equal(r.statusCode, 503);
+    assert.ok(!gh.state.calls.slice(before).some((x) => x.url.includes('/graphql') || x.method !== 'POST' || !x.url.includes('access_tokens')), 'no GitHub reads');
+  } finally {
+    platform.cpuCapped = false;
+  }
+});
+
+test('review on the Worker: read in parts (the page, then each proposal), the same hunks as read whole', async () => {
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: page2(Q1, Q2) });
+  const from = gh.repo(REPO).refs.get(DRAFTS);
+  const a = proposal('pa', from, page2('The cat sat on the mat.', 'Dogs bark at midnight.'));
+  written(0, 'Dogs bark', 'Hounds bark');
+  const whole = await reviewOf();
+  const { platform } = await import('../lib/platform.mjs');
+  platform.cpuCapped = true;
+  try {
+    const light = await reviewOf();
+    const item = light.items.find((i) => i.number === a);
+    assert.equal(item.deferred, true);
+    assert.deepEqual(item.hunks, []);
+    const one = await get('review', { book: BOOK.slug, path: CH3_PATH, number: String(a) });
+    assert.equal(one.statusCode, 200, JSON.stringify(one.payload));
+    assert.equal(one.payload.drafts, light.drafts);
+    assert.deepEqual(one.payload.hunks.map(({ overlaps, ...x }) => x), whole.hunks.filter((x) => x.item === `p${a}`).map(({ overlaps, ...x }) => x));
+  } finally {
+    platform.cpuCapped = false;
+  }
+});

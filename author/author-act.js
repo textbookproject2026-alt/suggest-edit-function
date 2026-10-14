@@ -21,6 +21,19 @@
  *       ({ path, line, paragraphs }) for the editor (lib/author-console.mjs CHOICES)
  *   { book, action: "change-decline", number, reason }
  *       the reason, a note thanking them, then closed unmerged and locked
+ *   { book, action: "review-accept", path, drafts, hunks: [id] }
+ *       Review all in chapter (lib/review.mjs): the ticked hunks, merged again here
+ *       against the drafts, in one commit on drafts, all or nothing. Its parents are
+ *       the drafts and the head of every proposal ticked whole, so GitHub marks those
+ *       merged; one ticked in part is closed unmerged with the parts quoted and labelled
+ *       accepted-in-part (credited); a written suggestion ticked is closed as completed
+ *       with the thank-you. `drafts` is the commit the view was built on: if the drafts
+ *       moved, nothing is written and the answer is 409 { view, kept, invalid }
+ *   { book, action: "part-decline", number, reason, part }
+ *       a part left over from a proposal accepted in part, declined: the reason and the
+ *       part, as a comment on it
+ *   { book, action: "part-keep", number }
+ *       a proposal accepted in part, opened again for its other parts
  *   { book, action: "comment-add", number, text }
  *       a comment by the member on a declined item (2–1000 characters, public)
  *   { book, action: "comment-delete", number, id }
@@ -37,17 +50,18 @@
  * (one send path), which replies and closes after the commit.
  */
 import { lintAt, lintWords } from '../lib/lint-job.mjs';
+import { ACCEPTED_IN_PART, ACCEPTED_IN_PART_LABEL, acceptance, applyTicks, gather, rebase, viewOf } from '../lib/review.mjs';
 import { NEEDS_LOOK, markNeedsLook, readPull, reapply, startRefresh } from '../lib/reapply.mjs';
 import { platform } from '../lib/platform.mjs';
 import {
-  GitHubError, SHA_RE, Refusal, appCredentials, authorise, bookFor, budget, byline, fail, gh, ghJson, limits, wrap,
+  GitHubError, SHA_RE, Refusal, appCredentials, authorise, bookFor, budget, byline, fail, gh, ghJson, graphqlRepo, isAuthorPath, limits, wrap,
 } from '../lib/author.mjs';
 import { isJsonContentType, parseBody, send, withLabels } from '../lib/common.mjs';
 import { cacheKeys, forget } from '../lib/kv-cache.mjs';
 import { COMMENT_MIN, cleanText, commentOf, declineComment, isDeclined, kindOf, memberComment } from '../lib/declined.mjs';
 import {
   ACCEPTED, ACCEPTED_LABEL, NEEDS_TRIAGE, PUBLISH_STATE_WORDS, PUBLISH_TITLE, PUBLISHED_STEPS, checkReply, declined,
-  CHOICES, describeChange, describePublish, publishRequestBody, takenOn, thanksWithChange,
+  CHOICES, describeChange, describePublish, pageName, publishRequestBody, takenOn, thanksWithChange,
 } from '../lib/author-console.mjs';
 import {
   acceptedAt, changesSince, compareDrafts, liveServes, mergeability, openPublishRequest, publishChecks, suggestion,
@@ -415,6 +429,165 @@ async function changeDecline(book, body, ctx) {
   return { done: true, steps: ['The draft change was closed, with your reason and a note thanking them.', 'It shows as Declined in the book\'s history.'] };
 }
 
+// --- Review all in chapter (lib/review.mjs) ------------------------------------------------
+
+const MAX_TICKS = 500;
+const quoted = (t) => t.trim().replace(/@/g, '@​').split('\n').map((l) => `> ${l}`.trimEnd()).join('\n');
+const itemWords = (a) => `#${a.item.number} ${a.item.kind === 'edit' ? `proposed edit “${String(a.item.title).replace(/\s+/g, ' ').slice(0, 120)}”` : 'suggestion'} by ${a.item.who}`
+  + (a.all ? '' : ` (${a.ticked.length} of ${a.item.hunks.length} changes)`);
+
+/** `fn` over `list`, `n` at a time: a few dozen comments and closes, without GitHub's abuse limits. */
+async function inTurn(list, n, fn) {
+  for (let i = 0; i < list.length; i += n) await Promise.all(list.slice(i, i + n).map(fn));
+}
+
+/** The drafts moved, or what was ticked no longer holds: nothing written, the view as it is now. */
+async function rebuilt(book, path, ids, ctx, words) {
+  const g = await gather(book, path, ctx.token, ctx.left);
+  if (!g) throw new Refusal(409, 'page gone', 'That page isn’t in the drafts any more.');
+  const view = viewOf(g, path);
+  const { kept, invalid } = rebase(view, ids);
+  throw new Refusal(409, 'review moved', words, { view, kept, invalid });
+}
+
+/** Whether GitHub has marked these pull requests merged yet: { n: merged }. */
+async function mergedYet(book, numbers, ctx) {
+  const r = await graphqlRepo(book.content.repo, `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {
+    ${numbers.map((n) => `p${n}: pullRequest(number: ${Number(n)}) { merged }`).join(' ')} } }`, {}, ctx.token, ctx.left);
+  return Object.fromEntries(numbers.map((n) => [n, Boolean(r[`p${n}`]?.merged)]));
+}
+
+async function reviewAccept(book, body, ctx) {
+  const { token, left, identity, tag } = ctx;
+  const path = body.path;
+  if (!isAuthorPath(path)) throw new Refusal(400, 'validation: path', 'That page is outside what the author site works on.');
+  if (!SHA_RE.test(String(body.drafts ?? ''))) throw new Refusal(400, 'validation: drafts', 'Please reload the review and try again.');
+  const ids = body.hunks;
+  if (!Array.isArray(ids) || ids.length > MAX_TICKS || ids.some((x) => typeof x !== 'string' || x.length > 80)) {
+    throw new Refusal(400, 'validation: hunks', 'Please reload the review and try again.');
+  }
+  if (!ids.length) throw new Refusal(400, 'validation: none ticked', 'Tick at least one change to accept.');
+  if (platform.cpuCapped) {
+    // Merging every proposal again is far more than the Worker's 10 ms of CPU: answered
+    // 503 at once, before any of it, and the page sends it to the Actions fallback.
+    console.log(`review of ${path}: left to the fallback ${tag}`);
+    throw new Refusal(503, 'review in actions', 'Applying… this can take up to a minute.');
+  }
+  const g = await gather(book, path, token, left);
+  if (!g) throw new Refusal(409, 'page gone', 'That page isn’t in the drafts any more.');
+  const view = viewOf(g, path);
+  if (g.drafts !== body.drafts) {
+    const { kept, invalid } = rebase(view, ids);
+    throw new Refusal(409, 'review moved', 'The drafts changed while you were reviewing, so nothing was accepted. The review has been brought up to date.', { view, kept, invalid });
+  }
+  const done = applyTicks(view, ids);
+  if (done.error) {
+    const { kept, invalid } = rebase(view, ids);
+    throw new Refusal(409, 'review changed', 'Some of what you ticked can’t be accepted as it stands, so nothing was accepted.', { view, kept, invalid });
+  }
+  const accepted = [...acceptance(view, ids).values()];
+  const whole = accepted.filter((a) => a.item.kind === 'edit' && a.all);
+  const text = g.crlf ? done.text.replace(/\n/g, '\r\n') : done.text;
+  const repo = book.content.repo;
+  const t = await ghJson(`/repos/${repo}/git/trees`, token, left, { method: 'POST', body: { base_tree: g.tree, tree: [{ path, mode: '100644', type: 'blob', content: text }] } });
+  const n = accepted.length;
+  const message = [`Accept ${n} reader ${n === 1 ? 'suggestion' : 'suggestions'} on ${pageName(path)}`, '', ...accepted.map((a) => `- ${itemWords(a)}`), '', `Accepted ${byline(identity)}.`].join('\n');
+  // The drafts first, then each proposal accepted whole: GitHub marks those merged (14 Oct, checked on the test book).
+  const c = await ghJson(`/repos/${repo}/git/commits`, token, left, { method: 'POST', body: { message, tree: t.sha, parents: [g.drafts, ...whole.map((a) => g.heads.get(a.item.number))] } });
+  try {
+    await ghJson(`/repos/${repo}/git/refs/heads/${encodeURIComponent(book.content.drafts_branch)}`, token, left, { method: 'PATCH', body: { sha: c.sha, force: false } });
+  } catch (err) {
+    // Not a fast-forward: someone saved meanwhile. The commit is left unreferenced.
+    if (err instanceof GitHubError && err.status === 422) return rebuilt(book, path, ids, ctx, 'The drafts changed just as you accepted, so nothing was accepted. The review has been brought up to date.');
+    throw err;
+  }
+  const url = `https://github.com/${repo}/commit/${c.sha}`;
+  console.log(`review of ${path}: ${done.hunks.length} change(s) from ${n} item(s) in ${c.sha.slice(0, 7)} ${byline(identity)} ${tag}`);
+  const warnings = [];
+  const others = n - 1;
+  // Accepted whole: thanked; GitHub marks it merged once it sees the commit (seconds).
+  let merged = {};
+  for (let i = 0; whole.length && i < 8; i++) {
+    merged = await mergedYet(book, whole.map((a) => a.item.number), ctx).catch(() => merged);
+    if (whole.every((a) => merged[a.item.number])) break;
+    await sleep(2500);
+  }
+  const notMerged = whole.filter((a) => !merged[a.item.number]).map((a) => `#${a.item.number}`);
+  if (notMerged.length) warnings.push(`GitHub hasn't yet marked ${notMerged.join(', ')} as merged. The change is in the drafts either way.`);
+  await inTurn(accepted, 4, async (a) => {
+    const n = a.item.number;
+    try {
+      if (a.item.kind === 'edit' && a.all) {
+        await comment(book, token, left, n, `Accepted ${byline(identity)}${others ? `, together with ${others} other reader ${others === 1 ? 'suggestion' : 'suggestions'} on this page,` : ''} into the drafts in one change: ${url}\n\nIt reaches readers the next time the book goes live. Thank you for proposing it.`);
+        await markNeedsLook(book, n, false, token, left, tag);
+      } else if (a.item.kind === 'edit') {
+        await comment(book, token, left, n, [`Thank you for this. Part of it was accepted ${byline(identity)} and is now in the drafts: ${url}`, '',
+          `The ${a.ticked.length === 1 ? 'part' : 'parts'} accepted:`, '', a.ticked.map((x) => quoted(x.to)).join('\n\n'), '',
+          'The rest wasn\'t taken this time, so this proposal is closed. You are credited for what was accepted, and it reaches readers the next time the book goes live.'].join('\n'));
+        await withLabels(repo, token, ACCEPTED_IN_PART_LABEL, () => gh(`/repos/${repo}/issues/${n}/labels`, token, left, { method: 'POST', body: { labels: [ACCEPTED_IN_PART] }, allow: [404, 422] }), 2500);
+        await ghJson(`/repos/${repo}/pulls/${n}`, token, left, { method: 'PATCH', body: { state: 'closed' } });
+      } else {
+        const reply = thanksWithChange(url, identity);
+        checkReply(reply, url);
+        await comment(book, token, left, n, reply);
+        await dropLabel(book, token, left, n, NEEDS_TRIAGE, tag);
+        await dropLabel(book, token, left, n, ACCEPTED, tag);
+        await ghJson(`/repos/${repo}/issues/${n}`, token, left, { method: 'PATCH', body: { state: 'closed', state_reason: 'completed' } });
+      }
+    } catch (err) {
+      console.error(`review: #${n} not answered — ${err.message} ${tag}`);
+      warnings.push(`#${n} is in the drafts, but the reader couldn't be answered on it just now.`);
+    }
+  });
+  await forget(cacheKeys.source(repo, book.content.drafts_branch, path));
+  try {
+    await startRefresh(book.slug, path, left, tag);
+  } catch (err) {
+    console.warn(`after review: other proposals not refreshed — ${err.message} ${tag}`);
+  }
+  let publish = null;
+  try {
+    publish = await openOrRefresh(book, token, left, identity, tag);
+  } catch (err) {
+    console.error(`publish request: ${err.message} ${tag}`);
+    warnings.push('It could not be put in line for the live book. Press “Put it in line” under Drafts.');
+  }
+  return {
+    done: true, sha: c.sha, url,
+    accepted: accepted.map((a) => ({ key: a.item.key, number: a.item.number, all: a.all, hunks: a.ticked.map((x) => x.id) })),
+    steps: [`${done.hunks.length === 1 ? 'One change' : `${done.hunks.length} changes`} from ${n === 1 ? 'one reader item' : `${n} reader items`} went into the drafts as one change.`,
+      'Nothing has reached readers yet. Publishing is a separate press, under “Going live”.'],
+    publish, ...(warnings.length ? { warning: warnings.join(' ') } : {}),
+  };
+}
+
+/** A proposal accepted in part (closed, labelled), or a Refusal. */
+async function partly(book, n, ctx) {
+  const pr = await readPull(book.content.repo, n, ctx.token, ctx.left);
+  if (!pr || pr.merged || !pr.labels.some((l) => l.name === ACCEPTED_IN_PART)) throw new Refusal(409, 'not accepted in part', 'That isn’t a proposal accepted in part.');
+  return pr;
+}
+
+async function partDecline(book, body, ctx) {
+  const { token, left, identity, tag } = ctx;
+  const reason = reasonOf(body);
+  const part = String(body.part ?? '').replace(/<!--|-->/g, '').slice(0, 5000);
+  const pr = await partly(book, number(body), ctx);
+  await comment(book, token, left, pr.number, `${declineComment(reason, identity)}${part.trim() ? `\n\nThe part declined:\n\n${quoted(part)}` : ''}`);
+  console.log(`#${pr.number}: a part declined ${byline(identity)} ${tag}`);
+  return { done: true, steps: ['Your reason was posted on the proposal, with the part it is about.'] };
+}
+
+async function partKeep(book, body, ctx) {
+  const { token, left, identity, tag } = ctx;
+  const pr = await partly(book, number(body), ctx);
+  if (pr.state !== 'open') await ghJson(`/repos/${book.content.repo}/pulls/${pr.number}`, token, left, { method: 'PATCH', body: { state: 'open' } });
+  const path = describeChange(pr).path;
+  if (path) await startRefresh(book.slug, path, left, tag).catch((err) => console.warn(`#${pr.number}: not refreshed — ${err.message} ${tag}`));
+  console.log(`#${pr.number}: open again for its other parts ${byline(identity)} ${tag}`);
+  return { done: true, steps: ['The proposal is open again: its other parts wait in the review.'] };
+}
+
 async function publishPrepare(book, body, ctx) {
   const publish = await openOrRefresh(book, ctx.token, ctx.left, ctx.identity, ctx.tag);
   return { done: true, steps: [publish ? 'The drafts are in line for the live book.' : 'The live book already has everything in the drafts area.'], publish };
@@ -466,6 +639,9 @@ const ACTIONS = {
   'suggestion-made': suggestionMade,
   'change-accept': changeAccept,
   'change-decline': changeDecline,
+  'review-accept': reviewAccept,
+  'part-decline': partDecline,
+  'part-keep': partKeep,
   'comment-add': commentAdd,
   'comment-delete': commentDelete,
   'publish-prepare': publishPrepare,
@@ -506,7 +682,8 @@ export default wrap(async (req, res) => {
   let credential;
   try {
     credential = await appToken(book, tag);
-    const out = await act(book, body, { token: credential.token, left: budget(22_000), identity: auth.identity, tag });
+    // A review's batch runs in Actions (no CPU cap), answering up to a few dozen items.
+    const out = await act(book, body, { token: credential.token, left: budget(body.action === 'review-accept' ? 150_000 : 22_000), identity: auth.identity, tag });
     // Declined, answered, commented: the History lists change.
     await forget(...cacheKeys.lists(book.slug));
     send(res, 200, out);
