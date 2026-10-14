@@ -33,9 +33,10 @@ test('a page note is as before; a half-given or unsafe paragraph is a page note'
 });
 
 test('the quote is capped and kept to one line inside its fence', async () => {
-  const r = await call({ body: { ...NOTE, quote: 'a\n# heading\n' + 'q'.repeat(1000) } });
+  const r = await call({ body: { ...NOTE, quote: 'a\n# heading\n' + 'q'.repeat(6000) } });
   const quote = r.issue.body.split('```text\n')[1].split('\n')[0];
-  assert.equal(quote.length, 300);
+  assert.equal(quote.length, 5000);
+  assert.ok(quote.endsWith('q…'));
   assert.ok(quote.startsWith('a # heading '));
 });
 

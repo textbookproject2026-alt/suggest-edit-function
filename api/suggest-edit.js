@@ -148,7 +148,9 @@ function validate(body) {
   if (Number.isSafeInteger(paragraph) && paragraph > 0 && page && PAGE_RE.test(page) && !page.includes('..')) {
     data.paragraph = paragraph;
     data.page = page;
-    data.quote = asString(body.quote).replace(/\s+/g, ' ').slice(0, MAX_QUOTE);
+    const quote = asString(body.quote).replace(/\s+/g, ' ');
+    // Cut with "…", so the author site knows it isn't the whole text.
+    data.quote = quote.length > MAX_QUOTE ? `${quote.slice(0, MAX_QUOTE - 1)}…` : quote;
   }
   return { ok: true, data };
 }
