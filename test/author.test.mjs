@@ -1327,6 +1327,13 @@ test('review: the author\'s paragraph edit and two ticked edits land as one draf
   assert.match(gh.repo(REPO).commits.get(head).message, /one paragraph edited by the author/);
   assert.equal(gh.repo(REPO).pulls.get(a).merged, true, 'a ticked edit inside the edited paragraph is accepted, with credit');
   assert.equal(gh.repo(REPO).pulls.get(c).state, 'open', 'the unticked one stays to decide');
+  // Published on its own, the chapter names the review's commit (it holds the author's
+  // words) and both proposals' as going live.
+  const pub = await call(act, { body: { book: BOOK.slug, action: 'publish-chapter', path: CH3_PATH } });
+  assert.equal(pub.statusCode, 200, JSON.stringify(pub.payload));
+  const named = [...gh.state.autoMerge.at(-1).b.matchAll(/^Publishes-commit: ([0-9a-f]{40})$/gm)].map((m) => m[1]);
+  assert.ok(named.includes(head), 'the review commit');
+  for (const p of gh.repo(REPO).commits.get(head).parents.slice(1)) assert.ok(named.includes(p), 'each proposal');
 });
 
 test('review: the drafts moved under a paragraph the author edited — refused, the edit named, nothing written over', async () => {
