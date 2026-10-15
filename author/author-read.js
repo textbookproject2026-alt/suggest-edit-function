@@ -41,7 +41,7 @@ import {
 import { jsonWithBase64, send } from '../lib/common.mjs';
 import { SUGGESTED, describeChange, isProposal, parseSuggestion, readableChange } from '../lib/author-console.mjs';
 import { acceptedAt, changesSince, draftsDiff, publishState, suggestion } from '../lib/author-console-reads.mjs';
-import { declinedChange, declinedItems } from '../lib/declined.mjs';
+import { declinedChange, declinedItems, proposerOf } from '../lib/declined.mjs';
 import { lintAt } from '../lib/lint-job.mjs';
 import { gather, viewOf } from '../lib/review.mjs';
 import { chapterState } from '../lib/publish-chapter.mjs';
@@ -128,7 +128,9 @@ async function changes(book, token, left) {
     pullRequests(states: OPEN, baseRefName: ${JSON.stringify(book.content.drafts_branch)}, first: 50, orderBy: { field: CREATED_AT, direction: DESC }) { nodes { number title body createdAt url headRefName author { __typename login } labels(first: 10) { nodes { name } } } }
   } }`, {}, token, left);
   // Readers' proposals only: the platform's own pull requests aren't the author's to answer.
-  return { changes: (r.pullRequests?.nodes ?? []).map((n) => ({ ...restOf(n), head: { ref: n.headRefName } })).filter(isProposal).map(describeChange) };
+  // Who: the reader who proposed it (the body says), as the review names them; never the App that opened it.
+  return { changes: (r.pullRequests?.nodes ?? []).map((n) => ({ ...restOf(n), head: { ref: n.headRefName } })).filter(isProposal)
+    .map((pr) => ({ ...describeChange(pr), who: proposerOf(String(pr.body ?? ''))?.name ?? (/\[bot\]$/.test(pr.user?.login ?? '') ? 'a reader' : pr.user?.login ?? 'a reader') })) };
 }
 
 async function change(book, token, left, params) {
