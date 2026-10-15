@@ -108,3 +108,18 @@ test('a review\'s one commit lists each item it accepted, one by one', async () 
     { number: 20, kind: 'suggestion', title: '', who: 'Sam', part: null },
   ]);
 });
+
+test('a drafts commit a chapter publish took live shows as live, the others still waiting', async () => {
+  const before = (await get({ path: CH })).payload.commits.find((c) => c.sha === edit);
+  assert.equal(before.live, false);
+  // "Publish this chapter": a commit on the live branch naming the drafts commit it carries.
+  const liveHead = r.refs.get(LIVE);
+  gh.commitFiles(REPO, LIVE, { [CH]: '# Chapter 3\n\nNew line.\n' }, { message: `Published “Chapter 3” (#9)\n\nPublished by @BrandonAndCaroline via the author site: this chapter only.\n\nPublishes-commit: ${edit}` });
+  try {
+    const list = (await get({})).payload.commits;
+    assert.equal(list.find((c) => c.sha === edit)?.live ?? (await get({ path: CH })).payload.commits.find((c) => c.sha === edit).live, true);
+    assert.ok(list.filter((c) => c.message.startsWith('glossary')).every((c) => !c.live), 'the rest still waiting');
+  } finally {
+    r.refs.set(LIVE, liveHead);
+  }
+});

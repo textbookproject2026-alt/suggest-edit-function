@@ -1252,7 +1252,7 @@ test('review: an empty batch is refused; on the Worker the batch goes to Actions
   const from = gh.repo(REPO).refs.get(DRAFTS);
   const empty = await call(act, { body: { book: BOOK.slug, action: 'review-accept', path: CH3_PATH, drafts: from, hunks: [] } });
   assert.equal(empty.statusCode, 400);
-  assert.equal(empty.payload.userMessage, 'Tick at least one change to accept.');
+  assert.equal(empty.payload.userMessage, 'Tick at least one change, or edit a paragraph, to save.');
   const { platform } = await import('../lib/platform.mjs');
   platform.cpuCapped = true;
   try {
@@ -1303,4 +1303,122 @@ test('review: a stale edit ticked with clean ones lands in the same one commit, 
   assert.equal(gh.textAt(REPO, gh.repo(REPO).refs.get(DRAFTS), CH3_PATH), page2('The cat sat on the mat.', 'Dogs bark at midnight.'));
   assert.equal(gh.repo(REPO).pulls.get(a).merged, true);
   assert.equal(gh.repo(REPO).pulls.get(b).merged, true);
+});
+
+test('review: the author\'s paragraph edit and two ticked edits land as one drafts commit; an unticked one in the edited paragraph stays open', async () => {
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: page2(Q1, Q2) });
+  const from = gh.repo(REPO).refs.get(DRAFTS);
+  const a = proposal('ea', from, page2('The cat sat on the mat.', Q2));
+  const b = proposal('eb', from, page2(Q1, 'Dogs bark at midnight.'));
+  const c = proposal('ec', from, page2('A cat sat on mat.', Q2)); // overlaps a, left unticked
+  const view = await reviewOf();
+  const P = view.paragraphs;
+  const k = P.findIndex((p) => p.startsWith('The cat'));
+  // The editor started from paragraph 1 with tick a in it; the author rewrote it.
+  const r = await call(act, { body: { book: BOOK.slug, action: 'review-accept', path: CH3_PATH, drafts: view.drafts, hunks: [...hunksOf(view, a), ...hunksOf(view, b)],
+    edits: [{ at: k, end: k + 1, orig: P[k], text: 'The cat sat on the old mat, purring.' }] } });
+  assert.equal(r.statusCode, 200, JSON.stringify(r.payload));
+  assert.equal(r.payload.edited, 1);
+  assert.match(r.payload.steps[0], /^2 changes from 2 reader items and one paragraph you edited went into the drafts as one change\.$/);
+  const head = gh.repo(REPO).refs.get(DRAFTS);
+  assert.equal(gh.textAt(REPO, head, CH3_PATH), page2('The cat sat on the old mat, purring.', 'Dogs bark at midnight.'));
+  assert.equal(gh.repo(REPO).commits.get(head).parents.length, 3, 'one commit: the drafts and both proposals, accepted whole');
+  assert.match(gh.repo(REPO).commits.get(head).message, /one paragraph edited by the author/);
+  assert.equal(gh.repo(REPO).pulls.get(a).merged, true, 'a ticked edit inside the edited paragraph is accepted, with credit');
+  assert.equal(gh.repo(REPO).pulls.get(c).state, 'open', 'the unticked one stays to decide');
+});
+
+test('review: the drafts moved under a paragraph the author edited — refused, the edit named, nothing written over', async () => {
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: page2(Q1, Q2) });
+  const view = await reviewOf();
+  const P = view.paragraphs;
+  const k = P.findIndex((p) => p.startsWith('The cat'));
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: page2('The cat sat on a rug.', Q2) }); // another tab
+  const moved = gh.repo(REPO).refs.get(DRAFTS);
+  // Built on the moved drafts (no sha mismatch), the paragraph check still catches it.
+  const r = await call(act, { body: { book: BOOK.slug, action: 'review-accept', path: CH3_PATH, drafts: moved, hunks: [], edits: [{ at: k, end: k + 1, orig: P[k], text: 'Mine.' }] } });
+  assert.equal(r.statusCode, 409);
+  assert.match(r.payload.userMessage, /changed a paragraph you edited/);
+  assert.deepEqual(r.payload.edits, [{ edit: 0, why: 'its paragraph changed in the drafts since you edited it' }]);
+  assert.equal(gh.repo(REPO).refs.get(DRAFTS), moved);
+  assert.equal(gh.textAt(REPO, moved, CH3_PATH), page2('The cat sat on a rug.', Q2));
+});
+
+// --- Publish this chapter (lib/publish-chapter.mjs) -----------------------------------------
+
+const LIVE_INDEX = '# Book\n\n## Contents\n\n- **[[chapters/chapter-03|Chapter 3]]**\n';
+const filesOf = (sha) => [...gh.repo(REPO).trees.get(gh.repo(REPO).commits.get(sha).tree).keys()];
+const openPublish = () => [...gh.repo(REPO).pulls.values()].filter((p) => p.state === 'open' && p.head.ref.startsWith('publish-chapter/')).at(-1);
+const publishOne = (path, extra = {}) => call(act, { body: { book: BOOK.slug, action: 'publish-chapter', path, ...extra } });
+
+test('publish one chapter: only its text goes to the live branch, three ways; the other chapter, settings and the rest of index.md wait', async () => {
+  resetBook();
+  gh.commitFiles(REPO, LIVE, { 'chapters/chapter-04.md': '# Chapter 4\n\nRocks.\n', 'index.md': `${LIVE_INDEX}- [[chapters/chapter-04|Chapter 4]]\n` });
+  gh.repo(REPO).refs.set(DRAFTS, gh.repo(REPO).refs.get(LIVE));
+  // Drafts: both chapters edited, the front page's introduction and the book's type changed.
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: CH3.replace('Second paragraph.', 'Second paragraph, edited.'), 'chapters/chapter-04.md': '# Chapter 4\n\nHard rocks.\n',
+    'index.md': `---\nresource_type: Paper\n---\n# Book\n\nAn introduction.\n\n## Contents\n\n- **[[chapters/chapter-03|Chapter 3]]**\n- [[chapters/chapter-04|Chapter 4]]\n` }, { message: 'Edit chapters 3 and 4' });
+  // Meanwhile a fix on the live book, in chapter 3's first paragraph.
+  gh.commitFiles(REPO, LIVE, { [CH3_PATH]: CH3.replace('The the domains', 'The domains') });
+  const liveBefore = gh.repo(REPO).refs.get(LIVE);
+  const r = await publishOne(CH3_PATH);
+  assert.equal(r.statusCode, 200, JSON.stringify(r.payload));
+  const pr = openPublish();
+  assert.equal(pr.base.ref, LIVE);
+  assert.equal(pr.title, 'Publish “Chapter 3”');
+  const head = gh.repo(REPO).refs.get(pr.head.ref);
+  assert.deepEqual(gh.repo(REPO).commits.get(head).parents, [liveBefore], 'one commit on the live branch');
+  // Only chapter 3 changed: the live fix and the drafts edit both in it.
+  assert.equal(gh.textAt(REPO, head, CH3_PATH), CH3.replace('The the domains', 'The domains').replace('Second paragraph.', 'Second paragraph, edited.'));
+  assert.equal(gh.textAt(REPO, head, 'chapters/chapter-04.md'), '# Chapter 4\n\nRocks.\n');
+  assert.equal(gh.textAt(REPO, head, 'index.md'), `${LIVE_INDEX}- [[chapters/chapter-04|Chapter 4]]\n`);
+  // It merges itself (squash) once the checks pass, saying what it publishes.
+  const auto = gh.state.autoMerge.at(-1);
+  assert.equal(auto.h, 'Published “Chapter 3”');
+  assert.match(auto.b, /^Published by @brandonandcaroline via the author site: this chapter only\. The rest of the drafts waits for Publish all\.\n\nPublishes-commit: [0-9a-f]{40}$/);
+});
+
+test('publish a new chapter: the chapter and only its Contents line in index.md', async () => {
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, { 'chapters/chapter-05.md': '# Chapter 5\n\nNew things.\n',
+    'index.md': '# Book\n\nA new introduction.\n\n## Contents\n\n- **[[chapters/chapter-03|Chapter 3]]**\n- [[chapters/chapter-05|Chapter 5]]\n' });
+  const r = await publishOne('chapters/chapter-05.md');
+  assert.equal(r.statusCode, 200, JSON.stringify(r.payload));
+  const head = gh.repo(REPO).refs.get(openPublish().head.ref);
+  assert.equal(gh.textAt(REPO, head, 'chapters/chapter-05.md'), '# Chapter 5\n\nNew things.\n');
+  assert.equal(gh.textAt(REPO, head, 'index.md'), '# Book\n\n## Contents\n\n- **[[chapters/chapter-03|Chapter 3]]**\n- [[chapters/chapter-05|Chapter 5]]\n', 'the introduction stays in the drafts');
+});
+
+test('publish a chapter linking to a concept page only in the drafts: asked first; with it, or without it (said plainly)', async () => {
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: `${CH3}\nSee [[chapters/Definitions/Realism|realism]].\n`, 'chapters/Definitions/Realism.md': '# Realism\n\nThe view that…\n' });
+  const ask = await publishOne(CH3_PATH);
+  assert.equal(ask.statusCode, 409);
+  assert.deepEqual(ask.payload.linked, [{ path: 'chapters/Definitions/Realism.md', title: 'Realism', why: 'only in the drafts' }]);
+  assert.equal(openPublish(), undefined, 'nothing opened yet');
+  const without = await publishOne(CH3_PATH, { linked: 'without' });
+  assert.equal(without.statusCode, 200, JSON.stringify(without.payload));
+  assert.deepEqual(without.payload.linkedLeft.map((l) => l.path), ['chapters/Definitions/Realism.md']);
+  assert.ok(!filesOf(gh.repo(REPO).refs.get(openPublish().head.ref)).includes('chapters/Definitions/Realism.md'));
+  const first = openPublish();
+  const withIt = await publishOne(CH3_PATH, { linked: 'with' });
+  assert.equal(first.state, 'closed', 'the earlier publish of the chapter is replaced');
+  assert.equal(withIt.statusCode, 200, JSON.stringify(withIt.payload));
+  assert.equal(gh.textAt(REPO, gh.repo(REPO).refs.get(openPublish().head.ref), 'chapters/Definitions/Realism.md'), '# Realism\n\nThe view that…\n');
+});
+
+test('publish a chapter already live as the drafts have it: refused, nothing opened; on the Worker, to Actions at once', async () => {
+  resetBook();
+  const r = await publishOne(CH3_PATH);
+  assert.equal(r.statusCode, 409);
+  assert.match(r.payload.userMessage, /already on the live book/);
+  const { platform } = await import('../lib/platform.mjs');
+  platform.cpuCapped = true;
+  try {
+    assert.equal((await publishOne(CH3_PATH)).statusCode, 503);
+  } finally {
+    platform.cpuCapped = false;
+  }
 });

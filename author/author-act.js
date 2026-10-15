@@ -40,6 +40,12 @@
  *       deletes one of the member's own comments on a declined item
  *   { book, action: "publish-prepare" }
  *       opens or refreshes the publish request; publishes nothing
+ *   { book, action: "publish-chapter", path, linked?: "with" | "without" }
+ *       publishes that one chapter (lib/publish-chapter.mjs): a pull request into the live
+ *       branch with only its text (three-way against live), pictures and Contents line,
+ *       merging itself once the book's checks pass. Pages it links to that exist only in
+ *       the drafts: 409 { linked } until `linked` says whether they go too
+ *     -> { done, number, url, title, steps }
  *   { book, action: "publish", number, confirm: true }
  *       merges the publish request, only if it is the one the author was shown and
  *       GitHub says it can merge cleanly
@@ -50,7 +56,8 @@
  * (one send path), which replies and closes after the commit.
  */
 import { lintAt, lintWords } from '../lib/lint-job.mjs';
-import { ACCEPTED_IN_PART, ACCEPTED_IN_PART_LABEL, acceptance, applyTicks, gather, rebase, viewOf } from '../lib/review.mjs';
+import { ACCEPTED_IN_PART, ACCEPTED_IN_PART_LABEL, acceptance, applyEdits, gather, rebase, viewOf } from '../lib/review.mjs';
+import { planChapter, publishChapter as openChapterPublish } from '../lib/publish-chapter.mjs';
 import { NEEDS_LOOK, markNeedsLook, readPull, reapply, startRefresh } from '../lib/reapply.mjs';
 import { platform } from '../lib/platform.mjs';
 import {
@@ -432,6 +439,7 @@ async function changeDecline(book, body, ctx) {
 // --- Review all in chapter (lib/review.mjs) ------------------------------------------------
 
 const MAX_TICKS = 500;
+const MAX_EDITS = 200;
 const quoted = (t) => t.trim().replace(/@/g, '@​').split('\n').map((l) => `> ${l}`.trimEnd()).join('\n');
 const itemWords = (a) => `#${a.item.number} ${a.item.kind === 'edit' ? `proposed edit “${String(a.item.title).replace(/\s+/g, ' ').slice(0, 120)}”` : 'suggestion'} by ${a.item.who}`
   + (a.all ? '' : ` (${a.ticked.length} of ${a.item.hunks.length} changes)`);
@@ -466,7 +474,12 @@ async function reviewAccept(book, body, ctx) {
   if (!Array.isArray(ids) || ids.length > MAX_TICKS || ids.some((x) => typeof x !== 'string' || x.length > 80)) {
     throw new Refusal(400, 'validation: hunks', 'Please reload the review and try again.');
   }
-  if (!ids.length) throw new Refusal(400, 'validation: none ticked', 'Tick at least one change to accept.');
+  // The author's own paragraph edits ("Edit this paragraph"), saved in the same commit.
+  const edits = body.edits ?? [];
+  if (!Array.isArray(edits) || edits.length > MAX_EDITS || edits.some((e) => !e || typeof e.text !== 'string' || e.text.length > 20_000 || typeof e.orig !== 'string' || e.orig.length > 100_000)) {
+    throw new Refusal(400, 'validation: edits', 'Please reload the review and try again.');
+  }
+  if (!ids.length && !edits.length) throw new Refusal(400, 'validation: none ticked', 'Tick at least one change, or edit a paragraph, to save.');
   if (platform.cpuCapped) {
     // Merging every proposal again is far more than the Worker's 10 ms of CPU: answered
     // 503 at once, before any of it, and the page sends it to the Actions fallback.
@@ -480,10 +493,13 @@ async function reviewAccept(book, body, ctx) {
     const { kept, invalid } = rebase(view, ids);
     throw new Refusal(409, 'review moved', 'The drafts changed while you were reviewing, so nothing was accepted. The review has been brought up to date.', { view, kept, invalid });
   }
-  const done = applyTicks(view, ids);
+  const done = applyEdits(view, ids, edits);
   if (done.error) {
     const { kept, invalid } = rebase(view, ids);
-    throw new Refusal(409, 'review changed', 'Some of what you ticked can’t be accepted as it stands, so nothing was accepted.', { view, kept, invalid });
+    // Edits are never lost and never written over newer text: the page keeps them and says which.
+    const editsBad = (done.bad ?? []).filter((b) => b.edit !== undefined);
+    if (done.error === 'moved') throw new Refusal(409, 'review moved', 'The drafts changed a paragraph you edited, so nothing was saved. Your edit is kept: look at it against the text as it is now.', { view, kept, invalid, edits: editsBad });
+    throw new Refusal(409, 'review changed', 'Some of what you ticked or edited can’t be saved as it stands, so nothing was saved.', { view, kept, invalid: [...invalid, ...(done.bad ?? []).filter((b) => b.id && !invalid.some((i) => i.id === b.id))], edits: editsBad });
   }
   const accepted = [...acceptance(view, ids).values()];
   const whole = accepted.filter((a) => a.item.kind === 'edit' && a.all);
@@ -491,7 +507,10 @@ async function reviewAccept(book, body, ctx) {
   const repo = book.content.repo;
   const t = await ghJson(`/repos/${repo}/git/trees`, token, left, { method: 'POST', body: { base_tree: g.tree, tree: [{ path, mode: '100644', type: 'blob', content: text }] } });
   const n = accepted.length;
-  const message = [`Accept ${n} reader ${n === 1 ? 'suggestion' : 'suggestions'} on ${pageName(path)}`, '', ...accepted.map((a) => `- ${itemWords(a)}`), '', `Accepted ${byline(identity)}.`].join('\n');
+  const head = n ? `Accept ${n} reader ${n === 1 ? 'suggestion' : 'suggestions'} on ${pageName(path)}` : `Edit ${pageName(path)} in the review`;
+  const message = [head, '', ...accepted.map((a) => `- ${itemWords(a)}`),
+    ...(done.edits ? [`- ${done.edits === 1 ? 'one paragraph' : `${done.edits} paragraphs`} edited by the author`] : []),
+    '', `${n ? 'Accepted' : 'Edited'} ${byline(identity)}.`].join('\n');
   // The drafts first, then each proposal accepted whole: GitHub marks those merged (14 Oct, checked on the test book).
   const c = await ghJson(`/repos/${repo}/git/commits`, token, left, { method: 'POST', body: { message, tree: t.sha, parents: [g.drafts, ...whole.map((a) => g.heads.get(a.item.number))] } });
   try {
@@ -555,7 +574,9 @@ async function reviewAccept(book, body, ctx) {
   return {
     done: true, sha: c.sha, url,
     accepted: accepted.map((a) => ({ key: a.item.key, number: a.item.number, all: a.all, hunks: a.ticked.map((x) => x.id) })),
-    steps: [`${done.hunks.length === 1 ? 'One change' : `${done.hunks.length} changes`} from ${n === 1 ? 'one reader item' : `${n} reader items`} went into the drafts as one change.`,
+    edited: done.edits,
+    steps: [[n ? `${done.hunks.length === 1 ? 'One change' : `${done.hunks.length} changes`} from ${n === 1 ? 'one reader item' : `${n} reader items`}` : '',
+      done.edits ? `${done.edits === 1 ? 'one paragraph' : `${done.edits} paragraphs`} you edited` : ''].filter(Boolean).join(' and ').replace(/^./, (c) => c.toUpperCase()) + ' went into the drafts as one change.',
       'Nothing has reached readers yet. Publishing is a separate press, under “Going live”.'],
     publish, ...(warnings.length ? { warning: warnings.join(' ') } : {}),
   };
@@ -586,6 +607,29 @@ async function partKeep(book, body, ctx) {
   if (path) await startRefresh(book.slug, path, left, tag).catch((err) => console.warn(`#${pr.number}: not refreshed — ${err.message} ${tag}`));
   console.log(`#${pr.number}: open again for its other parts ${byline(identity)} ${tag}`);
   return { done: true, steps: ['The proposal is open again: its other parts wait in the review.'] };
+}
+
+async function publishChapter(book, body, ctx) {
+  const { token, left, identity, tag } = ctx;
+  const path = body.path;
+  if (!isAuthorPath(path) || !/\.md$/i.test(path)) throw new Refusal(400, 'validation: path', "That isn't one of the book's pages.");
+  if (body.linked !== undefined && !['with', 'without'].includes(body.linked)) throw new Refusal(400, 'validation: linked', 'Please choose again.');
+  if (platform.cpuCapped) {
+    // Three trees, a three-way merge and the commit: more than the Worker's CPU. To Actions at once.
+    throw new Refusal(503, 'publish chapter in actions', 'Publishing… this can take up to a minute.');
+  }
+  const plan = await planChapter(book, path, token, left, { withLinked: body.linked === 'with' });
+  if (plan.linked.length && !body.linked) {
+    throw new Refusal(409, 'linked pages', 'This chapter links to pages the live book hasn\'t got yet.', { linked: plan.linked });
+  }
+  if (!plan.files.length) throw new Refusal(409, 'already live', 'This chapter is already on the live book as the drafts have it.');
+  const pr = await openChapterPublish(book, plan, byline(identity), token, left, tag);
+  console.log(`publish chapter ${path}: #${pr.number} (${plan.files.length} file(s), ${plan.commits.length} drafts commit(s)) ${byline(identity)} ${tag}`);
+  return {
+    done: true, number: pr.number, url: pr.url, title: pr.title, autoMerge: pr.autoMerge, linkedLeft: body.linked === 'without' ? plan.linked : [],
+    steps: [`“${pr.title}” is on its way to the live book: it goes live once the book's checks pass (about a minute), then the site rebuilds.`,
+      'The rest of the drafts stays in the drafts until you publish it.'],
+  };
 }
 
 async function publishPrepare(book, body, ctx) {
@@ -645,6 +689,7 @@ const ACTIONS = {
   'comment-add': commentAdd,
   'comment-delete': commentDelete,
   'publish-prepare': publishPrepare,
+  'publish-chapter': publishChapter,
   publish,
 };
 
@@ -683,7 +728,7 @@ export default wrap(async (req, res) => {
   try {
     credential = await appToken(book, tag);
     // A review's batch runs in Actions (no CPU cap), answering up to a few dozen items.
-    const out = await act(book, body, { token: credential.token, left: budget(body.action === 'review-accept' ? 150_000 : 22_000), identity: auth.identity, tag });
+    const out = await act(book, body, { token: credential.token, left: budget(['review-accept', 'publish-chapter'].includes(body.action) ? 150_000 : 22_000), identity: auth.identity, tag });
     // Declined, answered, commented: the History lists change.
     await forget(...cacheKeys.lists(book.slug));
     send(res, 200, out);
