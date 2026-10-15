@@ -87,7 +87,7 @@ test('notes sit beside their paragraph; a suggestion no longer word for word in 
     { number: 4, who: 'B', suggestion: 'Fish swim.', original: 'Fish float.', url: '' },
     { number: 5, who: 'C', suggestion: 'Rewrite the whole page.', original: '', url: '' },
   ] });
-  assert.deepEqual(v.notes.map((n) => [n.item, n.at]), [['i3', 2], ['i5', -1]]);
+  assert.deepEqual(v.notes.map((n) => [n.item, n.at, n.quote]), [['i3', 2, 'Dogs bark at'], ['i5', -1, '']]);
   assert.ok(hunk(v, 'i4-old').lost, 'no paragraph like it: nothing to put it in');
   // Like a paragraph still there: ticked, the suggestion replaces that paragraph.
   const w = buildReview(BASE, { issues: [{ number: 6, who: 'D', suggestion: 'Dogs howl at night.', original: 'Dogs bark loudly at night.', url: '' }] });
