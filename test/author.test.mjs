@@ -1287,3 +1287,20 @@ test('review on the Worker: read in parts (the page, then each proposal), the sa
     platform.cpuCapped = false;
   }
 });
+
+test('review: a stale edit ticked with clean ones lands in the same one commit, the suggestion\'s words in place', async () => {
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: page2(Q1, Q2) });
+  const from = gh.repo(REPO).refs.get(DRAFTS);
+  const a = proposal('sa', from, page2('The cat sat on the mat.', Q2));
+  const b = proposal('sb', from, page2(Q1, 'Dogs bark at midnight.'));
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: page2('The cat sat on a mat.', Q2) }); // the same words, changed since
+  const view = await reviewOf();
+  const [stale] = hunksOf(view, a);
+  assert.ok(stale.endsWith('-old'));
+  const r = await call(act, { body: { book: BOOK.slug, action: 'review-accept', path: CH3_PATH, drafts: view.drafts, hunks: [stale, ...hunksOf(view, b)] } });
+  assert.equal(r.statusCode, 200, JSON.stringify(r.payload));
+  assert.equal(gh.textAt(REPO, gh.repo(REPO).refs.get(DRAFTS), CH3_PATH), page2('The cat sat on the mat.', 'Dogs bark at midnight.'));
+  assert.equal(gh.repo(REPO).pulls.get(a).merged, true);
+  assert.equal(gh.repo(REPO).pulls.get(b).merged, true);
+});
