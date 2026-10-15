@@ -96,7 +96,7 @@ export function createFakeGitHub() {
   }
   const commitJson = (r, id) => {
     const c = r.commits.get(id);
-    return { sha: id, html_url: `https://github.com/${r.full}/commit/${id}`, commit: { message: c.message, author: c.author }, author: c.author?.login ? { login: c.author.login } : null };
+    return { sha: id, html_url: `https://github.com/${r.full}/commit/${id}`, commit: { message: c.message, author: c.author }, author: c.author?.login ? { login: c.author.login } : null, parents: c.parents.map((sha) => ({ sha })) };
   };
 
   function addIssue(full, issue) {
