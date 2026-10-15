@@ -1393,10 +1393,10 @@ test('publish a new chapter: the chapter and only its Contents line in index.md'
 
 test('publish a chapter linking to a concept page only in the drafts: asked first; with it, or without it (said plainly)', async () => {
   resetBook();
-  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: `${CH3}\nSee [[chapters/Definitions/Realism|realism]].\n`, 'chapters/Definitions/Realism.md': '# Realism\n\nThe view that…\n' });
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: `${CH3}\nSee [[chapters/Definitions/Realism|realism]].\n`, 'chapters/Definitions/Realism.md': '# Realism (a concept)\n\nThe view that…\n' });
   const ask = await publishOne(CH3_PATH);
   assert.equal(ask.statusCode, 409);
-  assert.deepEqual(ask.payload.linked, [{ path: 'chapters/Definitions/Realism.md', title: 'Realism', why: 'only in the drafts' }]);
+  assert.deepEqual(ask.payload.linked, [{ path: 'chapters/Definitions/Realism.md', title: 'Realism (a concept)', why: 'only in the drafts' }]);
   assert.equal(openPublish(), undefined, 'nothing opened yet');
   const without = await publishOne(CH3_PATH, { linked: 'without' });
   assert.equal(without.statusCode, 200, JSON.stringify(without.payload));
@@ -1406,7 +1406,7 @@ test('publish a chapter linking to a concept page only in the drafts: asked firs
   const withIt = await publishOne(CH3_PATH, { linked: 'with' });
   assert.equal(first.state, 'closed', 'the earlier publish of the chapter is replaced');
   assert.equal(withIt.statusCode, 200, JSON.stringify(withIt.payload));
-  assert.equal(gh.textAt(REPO, gh.repo(REPO).refs.get(openPublish().head.ref), 'chapters/Definitions/Realism.md'), '# Realism\n\nThe view that…\n');
+  assert.equal(gh.textAt(REPO, gh.repo(REPO).refs.get(openPublish().head.ref), 'chapters/Definitions/Realism.md'), '# Realism (a concept)\n\nThe view that…\n');
 });
 
 test('publish a chapter already live as the drafts have it: refused, nothing opened; on the Worker, to Actions at once', async () => {
