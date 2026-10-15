@@ -1402,8 +1402,9 @@ test('publish a chapter linking to a concept page only in the drafts: asked firs
   assert.equal(without.statusCode, 200, JSON.stringify(without.payload));
   assert.deepEqual(without.payload.linkedLeft.map((l) => l.path), ['chapters/Definitions/Realism.md']);
   assert.ok(!filesOf(gh.repo(REPO).refs.get(openPublish().head.ref)).includes('chapters/Definitions/Realism.md'));
-  openPublish().state = 'closed';
+  const first = openPublish();
   const withIt = await publishOne(CH3_PATH, { linked: 'with' });
+  assert.equal(first.state, 'closed', 'the earlier publish of the chapter is replaced');
   assert.equal(withIt.statusCode, 200, JSON.stringify(withIt.payload));
   assert.equal(gh.textAt(REPO, gh.repo(REPO).refs.get(openPublish().head.ref), 'chapters/Definitions/Realism.md'), '# Realism\n\nThe view that…\n');
 });
