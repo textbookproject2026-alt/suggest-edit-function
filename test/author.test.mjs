@@ -1429,3 +1429,95 @@ test('publish a chapter already live as the drafts have it: refused, nothing ope
     platform.cpuCapped = false;
   }
 });
+
+// --- Publish the rest of the book, a removed chapter, who changed it --------------------------
+
+const publishRest = (extra = {}) => call(act, { body: { book: BOOK.slug, action: 'publish-rest', ...extra } });
+
+test('publish the rest of the book: pages other than chapters, the front page and settings; chapters and a new chapter\'s Contents line wait', async () => {
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, {
+    [CH3_PATH]: CH3.replace('Second paragraph.', 'Second paragraph, edited.'),
+    'chapters/chapter-05.md': '# Chapter 5\n\nNew.\n',
+    'chapters/Definitions/Realism.md': '# Realism\n\nThe view that…\n',
+    'glossary.md': '# Glossary\n\nRealism: a view.\n',
+    'index.md': '---\nresource_type: Paper\n---\n# Book\n\nAn introduction.\n\n## Contents\n\n- **[[chapters/chapter-03|Chapter 3]]**\n- [[chapters/chapter-05|Chapter 5]]\n',
+  }, { message: 'Drafts work' });
+  // Meanwhile a fix on the live book's front page, elsewhere in it.
+  gh.commitFiles(REPO, LIVE, { 'index.md': '# Book\n\n## Contents\n\n- **[[chapters/chapter-03|Chapter 3]]**\n\nFooter.\n' });
+  const r = await publishRest();
+  assert.equal(r.statusCode, 200, JSON.stringify(r.payload));
+  assert.equal(r.payload.title, 'The rest of the book');
+  const pr = openPublish();
+  assert.equal(pr.title, 'Publish the rest of the book');
+  const head = gh.repo(REPO).refs.get(pr.head.ref);
+  assert.equal(gh.textAt(REPO, head, 'chapters/Definitions/Realism.md'), '# Realism\n\nThe view that…\n');
+  assert.equal(gh.textAt(REPO, head, 'glossary.md'), '# Glossary\n\nRealism: a view.\n');
+  assert.equal(gh.textAt(REPO, head, CH3_PATH), CH3, 'a chapter waits for its own Publish');
+  assert.ok(!filesOf(head).includes('chapters/chapter-05.md'));
+  assert.equal(gh.textAt(REPO, head, 'index.md'), '---\nresource_type: Paper\n---\n# Book\n\nAn introduction.\n\n## Contents\n\n- **[[chapters/chapter-03|Chapter 3]]**\n\nFooter.\n',
+    'the front page three ways (the live fix kept), without the new chapter\'s line');
+  const auto = gh.state.autoMerge.at(-1);
+  assert.equal(auto.h, 'Published the rest of the book');
+  assert.match(auto.b, /^Published by @brandonandcaroline via the author site: the rest of the book: .*\n\nPublishes-commit: [0-9a-f]{40}$/);
+  // Nothing left: refused.
+  gh.repo(REPO).refs.set(LIVE, head);
+  gh.repo(REPO).refs.set(DRAFTS, gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: CH3 }));
+  gh.commitFiles(REPO, DRAFTS, { 'chapters/chapter-05.md': null, 'index.md': gh.textAt(REPO, head, 'index.md'), 'glossary.md': gh.textAt(REPO, head, 'glossary.md'), 'chapters/Definitions/Realism.md': gh.textAt(REPO, head, 'chapters/Definitions/Realism.md') });
+  const again = await publishRest();
+  assert.equal(again.statusCode, 409);
+  assert.match(again.payload.userMessage, /already on the live book/);
+});
+
+test('publish the rest of the book linking to a chapter only in the drafts: asked first; with it, the chapter and its Contents line go too', async () => {
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, {
+    'chapters/chapter-05.md': '# Chapter 5\n\nNew.\n',
+    'glossary.md': '# Glossary\n\nSee [[chapters/chapter-05|chapter 5]].\n',
+    'index.md': '# Book\n\n## Contents\n\n- **[[chapters/chapter-03|Chapter 3]]**\n- [[chapters/chapter-05|Chapter 5]]\n',
+  });
+  const ask = await publishRest();
+  assert.equal(ask.statusCode, 409);
+  assert.deepEqual(ask.payload.linked, [{ path: 'chapters/chapter-05.md', title: 'Chapter 5', why: 'only in the drafts' }]);
+  const withIt = await publishRest({ linked: 'with' });
+  assert.equal(withIt.statusCode, 200, JSON.stringify(withIt.payload));
+  const head = gh.repo(REPO).refs.get(openPublish().head.ref);
+  assert.equal(gh.textAt(REPO, head, 'chapters/chapter-05.md'), '# Chapter 5\n\nNew.\n');
+  assert.match(gh.textAt(REPO, head, 'index.md'), /- \[\[chapters\/chapter-05\|Chapter 5\]\]\n$/);
+});
+
+test('publish a chapter removed in the drafts: gone from the live book with its Contents line, nothing else', async () => {
+  resetBook();
+  gh.commitFiles(REPO, LIVE, { 'chapters/chapter-04.md': '# Chapter 4\n\nRocks.\n', 'index.md': `${LIVE_INDEX}- [[chapters/chapter-04|Chapter 4]]\n` });
+  gh.repo(REPO).refs.set(DRAFTS, gh.repo(REPO).refs.get(LIVE));
+  gh.commitFiles(REPO, DRAFTS, { 'chapters/chapter-04.md': null, 'index.md': `# Book\n\nIntro.\n\n## Contents\n\n- **[[chapters/chapter-03|Chapter 3]]**\n`, [CH3_PATH]: `${CH3}More.\n` });
+  const r = await publishOne('chapters/chapter-04.md');
+  assert.equal(r.statusCode, 200, JSON.stringify(r.payload));
+  const head = gh.repo(REPO).refs.get(openPublish().head.ref);
+  assert.ok(!filesOf(head).includes('chapters/chapter-04.md'));
+  assert.equal(gh.textAt(REPO, head, 'index.md'), LIVE_INDEX, 'only its line goes; the intro waits');
+  assert.equal(gh.textAt(REPO, head, CH3_PATH), CH3);
+  assert.equal(gh.state.autoMerge.at(-1).h, 'Published “Chapter 4”');
+});
+
+test('drafts: who changed each page is a person, never a bot or (when the author site knows the name) an account', async () => {
+  const { personOf } = await import('../lib/author-console-reads.mjs');
+  const bot = (message) => ({ author: { login: 'textbook-suggest-edit[bot]' }, commit: { message, author: { name: 'textbook-suggest-edit[bot]' } } });
+  assert.deepEqual(personOf(bot('Edit ch in the review\n\nEdited by Alec Gordon (member m-ab738d332e) via the author site.')), { who: 'Alec Gordon' });
+  assert.deepEqual(personOf(bot('Accept 2\n\nAccepted by @someone-1 via the author site.')), { who: null, login: 'someone-1' });
+  assert.deepEqual(personOf(bot('Accept 1 reader suggestion on ch\n\n- #168 proposed edit “Rain” by Mara Quinn')), { who: 'Mara Quinn' });
+  assert.deepEqual(personOf(bot('Sync contributors')), { who: null });
+  assert.deepEqual(personOf({ author: { login: 'jo-author' }, commit: { message: 'Edit', author: { name: 'jo-author' } } }), { who: null, login: 'jo-author' });
+  assert.deepEqual(personOf({ author: null, commit: { message: 'Edit', author: { name: 'Platform Test Reader' } } }), { who: 'Platform Test Reader' });
+});
+
+test('review: an accepted written suggestion is done, so the review doesn\'t list it', async () => {
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: page2(Q1, Q2) });
+  const open = written(0, 'Dogs bark', 'Hounds bark');
+  const accepted = written(0, 'The cat', 'A cat');
+  const it = gh.repo(REPO).issues.get(accepted);
+  it.labels = [...it.labels, { name: 'accepted' }];
+  const view = await reviewOf();
+  assert.deepEqual(view.items.map((i) => i.number), [open]);
+});

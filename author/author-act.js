@@ -41,6 +41,7 @@
  *   { book, action: "publish-prepare" }
  *       opens or refreshes the publish request; publishes nothing
  *   { book, action: "publish-chapter", path, linked?: "with" | "without" }
+ *   { book, action: "publish-rest", linked?: "with" | "without" }     everything but chapters
  *       publishes that one chapter (lib/publish-chapter.mjs): a pull request into the live
  *       branch with only its text (three-way against live), pictures and Contents line,
  *       merging itself once the book's checks pass. Pages it links to that exist only in
@@ -57,7 +58,7 @@
  */
 import { lintAt, lintWords } from '../lib/lint-job.mjs';
 import { ACCEPTED_IN_PART, ACCEPTED_IN_PART_LABEL, acceptance, applyEdits, gather, rebase, viewOf } from '../lib/review.mjs';
-import { planChapter, publishChapter as openChapterPublish } from '../lib/publish-chapter.mjs';
+import { planChapter, planRest, publishChapter as openChapterPublish } from '../lib/publish-chapter.mjs';
 import { NEEDS_LOOK, markNeedsLook, readPull, reapply, startRefresh } from '../lib/reapply.mjs';
 import { platform } from '../lib/platform.mjs';
 import {
@@ -632,6 +633,24 @@ async function publishChapter(book, body, ctx) {
   };
 }
 
+/** The rest of the book (everything but chapters) to the live book, as publishChapter does one chapter. */
+async function publishRest(book, body, ctx) {
+  const { token, left, identity, tag } = ctx;
+  if (body.linked !== undefined && !['with', 'without'].includes(body.linked)) throw new Refusal(400, 'validation: linked', 'Please choose again.');
+  if (platform.cpuCapped) throw new Refusal(503, 'publish rest in actions', 'Publishing… this can take up to a minute.');
+  const plan = await planRest(book, token, left, { withLinked: body.linked === 'with' });
+  if (plan.linked.length && !body.linked) {
+    throw new Refusal(409, 'linked pages', 'These pages link to chapters the live book hasn\'t got yet.', { linked: plan.linked });
+  }
+  const pr = await openChapterPublish(book, plan, byline(identity), token, left, tag);
+  console.log(`publish rest: #${pr.number} (${plan.files.length} file(s), ${plan.commits.length} drafts commit(s)) ${byline(identity)} ${tag}`);
+  return {
+    done: true, number: pr.number, url: pr.url, title: pr.title, autoMerge: pr.autoMerge, linkedLeft: body.linked === 'without' ? plan.linked : [],
+    steps: ['The rest of the book is on its way to the live book: it goes live once the book\'s checks pass (about a minute), then the site rebuilds.',
+      'Chapters stay in the drafts until you publish them.'],
+  };
+}
+
 async function publishPrepare(book, body, ctx) {
   const publish = await openOrRefresh(book, ctx.token, ctx.left, ctx.identity, ctx.tag);
   return { done: true, steps: [publish ? 'The drafts are in line for the live book.' : 'The live book already has everything in the drafts area.'], publish };
@@ -690,6 +709,7 @@ const ACTIONS = {
   'comment-delete': commentDelete,
   'publish-prepare': publishPrepare,
   'publish-chapter': publishChapter,
+  'publish-rest': publishRest,
   publish,
 };
 
@@ -728,7 +748,7 @@ export default wrap(async (req, res) => {
   try {
     credential = await appToken(book, tag);
     // A review's batch runs in Actions (no CPU cap), answering up to a few dozen items.
-    const out = await act(book, body, { token: credential.token, left: budget(['review-accept', 'publish-chapter'].includes(body.action) ? 150_000 : 22_000), identity: auth.identity, tag });
+    const out = await act(book, body, { token: credential.token, left: budget(['review-accept', 'publish-chapter', 'publish-rest'].includes(body.action) ? 150_000 : 22_000), identity: auth.identity, tag });
     // Declined, answered, commented: the History lists change.
     await forget(...cacheKeys.lists(book.slug));
     send(res, 200, out);
