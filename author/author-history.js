@@ -17,7 +17,7 @@
  * isn't one (400).
  */
 import {
-  SHA_RE, appCredentials, authorise, blobBytes, bookFor, budget, encodePath, fail, ghJson,
+  SHA_RE, appCredentials, authorise, blobBytes, bookFor, budget, encodePath, fail, ghJson, graphqlRepo,
   isAuthorPath, isTextPath, limits, query, treeAt, wrap, Refusal,
 } from '../lib/author.mjs';
 import { send } from '../lib/common.mjs';
@@ -45,8 +45,25 @@ export const acceptedIn = (message) => [...String(message).matchAll(/^- #(\d+) (
 // ponytail: compare lists at most 250 commits, so drafts more than 250 ahead of live
 // would show the oldest extras as live. Page the compare if a book ever gets there.
 async function waitingInDrafts(book, token, left) {
-  const c = await compareDrafts(book, token, left);
-  return new Set((c?.commits ?? []).map((x) => x.sha));
+  const [c, published] = await Promise.all([compareDrafts(book, token, left), publishedAlone(book, token, left)]);
+  // A drafts commit a chapter's own publish carried is live, though not yet on the live branch itself.
+  return new Set((c?.commits ?? []).map((x) => x.sha).filter((sha) => !published.has(sha)));
+}
+
+/**
+ * The drafts commits "Publish this chapter" took to the live book (lib/publish-chapter.mjs
+ * names each in its squash commit: "Publishes-commit: <sha>"), from the live branch's
+ * recent commits. ponytail: the last 50 only; Publish all brings older ones over anyway.
+ */
+export async function publishedAlone(book, token, left) {
+  try {
+    const r = await graphqlRepo(book.content.repo, `query($owner: String!, $name: String!, $ref: String!) { repository(owner: $owner, name: $name) {
+      ref(qualifiedName: $ref) { target { ... on Commit { history(first: 50) { nodes { message } } } } } } }`, { ref: `refs/heads/${book.content.live_branch}` }, token, left);
+    return new Set((r.ref?.target?.history?.nodes ?? []).flatMap((n) => [...String(n.message).matchAll(/^Publishes-commit: ([0-9a-f]{40})$/gm)].map((m) => m[1])));
+  } catch (err) {
+    console.warn(`history: chapter publishes not read — ${err.message}`);
+    return new Set();
+  }
 }
 
 function checkPath(path) {

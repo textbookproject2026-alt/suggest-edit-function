@@ -93,3 +93,28 @@ test('notes sit beside their paragraph; a suggestion no longer word for word in 
   const w = buildReview(BASE, { issues: [{ number: 6, who: 'D', suggestion: 'Dogs howl at night.', original: 'Dogs bark loudly at night.', url: '' }] });
   assert.equal(applyTicks(w, ['i6-old']).text, BASE.replace('Dogs bark at night.', 'Dogs howl at night.'));
 });
+
+test('the author\'s paragraph edits with the ticks, in one text; ticks inside an edit are accepted, never twice', async () => {
+  const { applyEdits } = await import('../lib/review.mjs');
+  const v = buildReview(BASE, { edits: [
+    edit(1, page('The cat sat on the mat.', 'Dogs bark at night.', 'Birds sing in the morning.')),
+    edit(2, page('The cat sat on mat.', 'Dogs bark at night.', 'Birds sing at dawn.')),
+  ] });
+  const [a] = ids(v, 'p1');
+  const [b] = ids(v, 'p2');
+  const P = v.paragraphs;
+  // The author rewrites paragraph 1 (its text already holds tick a), ticks b, and adds a paragraph after "Dogs".
+  const r = applyEdits(v, [a, b], [
+    { at: 1, end: 2, orig: P[1], text: 'The cat sat on the old mat.' },
+    { at: 3, end: 3, orig: '', text: 'Wolves howl.' },
+  ]);
+  assert.equal(r.text, '# Chapter\n\nThe cat sat on the old mat.\n\nDogs bark at night.\n\nWolves howl.\n\nBirds sing at dawn.\n');
+  assert.deepEqual(r.hunks.map((x) => x.id).sort(), [a, b].sort(), 'a counts as accepted though the author\'s words won');
+  assert.equal(acceptance(v, [a, b]).get('p1').all, true);
+  // The drafts changed the paragraph since: refused, never written over.
+  assert.equal(applyEdits(v, [], [{ at: 1, end: 2, orig: 'The cat sat on a rug.\n\n', text: 'x' }]).error, 'moved');
+  // Nothing at all: refused.
+  assert.equal(applyEdits(v, [], []).error, 'none');
+  // Only edits: fine.
+  assert.equal(applyEdits(v, [], [{ at: 3, end: 4, orig: P[3], text: 'Birds sing.' }]).text, BASE.replace('Birds sing in the morning.', 'Birds sing.'));
+});

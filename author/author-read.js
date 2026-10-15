@@ -23,6 +23,8 @@
  *     -> { number, files: [{ path, before, after }] }   (through the author site's proxy, not the public endpoint)
  *   ?what=review&book=<slug>&path=<path>               Review all in chapter: the drafts' text with
  *     -> { path, drafts, paragraphs, items, hunks, notes } every pending proposal merged in (lib/review.mjs)
+ *   ?what=publish-chapter&book=<slug>&number=<n>      a chapter being published: its checks
+ *     -> { state: checking | merged | failed | closed, checks, sha }
  *   ?what=publish&book=<slug>                         what stands between drafts and live
  *     -> { publish: null | {...} }                    (with `lint` whenever it could be run)
  *   ?what=drafts&book=<slug>                          drafts vs live, file by file, readers'
@@ -42,6 +44,7 @@ import { acceptedAt, changesSince, draftsDiff, publishState, suggestion } from '
 import { declinedChange, declinedItems } from '../lib/declined.mjs';
 import { lintAt } from '../lib/lint-job.mjs';
 import { gather, viewOf } from '../lib/review.mjs';
+import { chapterState } from '../lib/publish-chapter.mjs';
 import { platform } from '../lib/platform.mjs';
 
 const appToken = appCredentials({ contents: 'read', pull_requests: 'read', issues: 'read' });
@@ -146,7 +149,9 @@ async function review(book, token, left, params) {
   return viewOf(g, path);
 }
 
-const READS = { tree, file, review, drafts: draftsDiff, suggestions, 'suggestion-changes': suggestionChanges, changes, change, declined: async (book, token, left) => ({ items: await declinedItems(book, token, left) }),
+const READS = { tree, file, review,
+  // A chapter being published ("Publish this chapter"): its checks, and whether it has gone live.
+  'publish-chapter': (book, token, left, params) => chapterState(book, Number(params.get('number')), token, left), drafts: draftsDiff, suggestions, 'suggestion-changes': suggestionChanges, changes, change, declined: async (book, token, left) => ({ items: await declinedItems(book, token, left) }),
   'declined-change': async (book, token, left, params) => {
     const d = await declinedChange(book, Number(params.get('number')), token, left);
     if (!d) throw new Refusal(404, 'not declined', "That isn't a declined proposal of this book.");

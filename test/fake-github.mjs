@@ -268,6 +268,13 @@ export function createFakeGitHub() {
       }
       return json(200, { data: { repository } });
     }
+    if (u.pathname === '/graphql' && method === 'POST' && body.query.includes('history(first: 50) { nodes { message }')) {
+      // A branch's last 50 commit messages (author-history: chapter publishes).
+      const r = repos.get(`${body.variables.owner}/${body.variables.name}`.toLowerCase());
+      const head = r?.refs.get(body.variables.ref.replace(/^refs\/heads\//, ''));
+      const nodes = head ? ancestors(r, head).slice(0, 50).map((id) => ({ message: r.commits.get(id).message })) : [];
+      return json(200, { data: { repository: { ref: head ? { target: { history: { nodes } } } : null } } });
+    }
     if (u.pathname === '/graphql' && method === 'POST' && body.query.includes('ref(qualifiedName: $ref)')) {
       // A branch's head, its tree, and files or folders in it (headAndPaths, readImport).
       const r = repos.get(`${body.variables.owner}/${body.variables.name}`.toLowerCase());
