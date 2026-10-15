@@ -608,10 +608,12 @@ test('an issue that isn\'t a suggestion can\'t be answered or closed from here',
 function draftChange() {
   gh.repo(REPO).refs.set('proposed-edits/x', BASE);
   gh.commitFiles(REPO, 'proposed-edits/x', { 'chapters/chapter-03.md': NEW3 }, { message: 'Fix typo', author: { name: 'Reader', email: '5+reader@users.noreply.github.com' } });
-  return gh.addPull(REPO, { head: 'proposed-edits/x', base: DRAFTS, title: 'Fix typo', commits: [
+  const n = gh.addPull(REPO, { head: 'proposed-edits/x', base: DRAFTS, title: 'Fix typo', commits: [
     { commit: { author: { name: 'Reader', email: '5+reader@users.noreply.github.com' } }, author: { login: 'reader', type: 'User' } },
     { commit: { author: { name: 'textbook-suggest-edit[bot]', email: 'x@bot' } }, author: { login: 'textbook-suggest-edit[bot]', type: 'Bot' } },
   ] });
+  gh.repo(REPO).pulls.get(n).body = '**Proposed by:** `Reader` (`r***@example.org`)';
+  return n;
 }
 
 test('accepting a draft change: squash-merged with the byline and the proposer\'s credit, then put in line', async () => {
@@ -619,8 +621,8 @@ test('accepting a draft change: squash-merged with the byline and the proposer\'
   const n = draftChange();
   const list = await get('changes', { book: BOOK.slug });
   assert.equal(list.payload.changes[0].number, n);
-  // From GraphQL (the CPU budget), shown as REST showed it: an App's login keeps [bot].
-  assert.equal(list.payload.changes[0].who, gh.repo(REPO).pulls.get(n).user.login);
+  // The reader the body names, never the App that opened it.
+  assert.equal(list.payload.changes[0].who, 'Reader');
   const detail = await get('change', { book: BOOK.slug, number: String(n) });
   assert.equal(detail.payload.readable, true);
   assert.deepEqual(detail.payload.pages[0].lines.find((l) => l.kind === 'after'), { kind: 'after', text: 'The three domains of reality.' });
