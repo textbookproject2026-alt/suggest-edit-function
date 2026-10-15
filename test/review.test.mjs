@@ -35,15 +35,19 @@ test('two proposals on one paragraph overlap: each names the other, and both tog
   assert.equal(applyTicks(v, [b]).text, page('A cat sat on mat.', 'Dogs bark at night.', 'Birds sing in the morning.'));
 });
 
-test('a hunk whose words the drafts changed since is stale: shown three ways, never ticked', () => {
+test('a hunk whose words the drafts changed since is stale: shown three ways; ticked, the suggestion\'s words replace the drafts\'', () => {
   const now = page('The cat sat upon mat.', 'Dogs bark at night.', 'Birds sing in the morning.');
   const v = buildReview(now, { edits: [edit(1, page('The cat sat over mat.', 'Dogs bark at night.', 'Birds sing at dawn.'))] });
   const [first, second] = ids(v, 'p1').map((id) => hunk(v, id));
   assert.ok(first.stale?.length);
   assert.equal(first.stale[0].current, 'The cat sat upon mat.');
+  assert.ok(first.id.endsWith('-old'));
   assert.ok(!second.stale);
-  assert.deepEqual(applyTicks(v, [first.id]).bad, [{ id: first.id, why: 'its paragraph changed in the drafts since' }]);
-  // A whole-page proposal with a stale part can only be accepted in part.
+  assert.equal(applyTicks(v, [first.id]).text, page('The cat sat over mat.', 'Dogs bark at night.', 'Birds sing in the morning.'));
+  // One batch: the stale part and the clean one together.
+  assert.equal(applyTicks(v, [first.id, second.id]).text, page('The cat sat over mat.', 'Dogs bark at night.', 'Birds sing at dawn.'));
+  assert.equal(acceptance(v, [first.id, second.id]).get('p1').all, true);
+  // Untouched, it is accepted only in part.
   assert.equal(acceptance(v, [second.id]).get('p1').all, false);
 });
 
@@ -64,7 +68,8 @@ test('the drafts moved: ticks still good are kept, the rest named', () => {
   const [h1, h2] = ids(before, 'p1');
   // A second tab saved: the first paragraph's same words changed, the third not.
   const moved = buildReview(page('The cat sat on a mat.', 'Dogs bark at night.', 'Birds sing in the morning.'), { edits: [sug] });
-  assert.deepEqual(ids(moved, 'p1'), [h1, h2], 'ids survive the move');
+  // The clean one keeps its id; the one the drafts changed under is a different, stale choice now.
+  assert.deepEqual(ids(moved, 'p1'), [`${h1}-old`, h2]);
   assert.deepEqual(rebase(moved, [h1, h2, 'p7-gone']), {
     kept: [h2],
     invalid: [{ id: h1, why: 'its paragraph changed in the drafts since' }, { id: 'p7-gone', why: 'it is no longer there to accept' }],
@@ -83,5 +88,8 @@ test('notes sit beside their paragraph; a suggestion no longer word for word in 
     { number: 5, who: 'C', suggestion: 'Rewrite the whole page.', original: '', url: '' },
   ] });
   assert.deepEqual(v.notes.map((n) => [n.item, n.at]), [['i3', 2], ['i5', -1]]);
-  assert.ok(hunk(v, 'i4').stale);
+  assert.ok(hunk(v, 'i4-old').lost, 'no paragraph like it: nothing to put it in');
+  // Like a paragraph still there: ticked, the suggestion replaces that paragraph.
+  const w = buildReview(BASE, { issues: [{ number: 6, who: 'D', suggestion: 'Dogs howl at night.', original: 'Dogs bark loudly at night.', url: '' }] });
+  assert.equal(applyTicks(w, ['i6-old']).text, BASE.replace('Dogs bark at night.', 'Dogs howl at night.'));
 });
