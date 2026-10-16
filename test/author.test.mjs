@@ -1523,3 +1523,29 @@ test('review: an accepted written suggestion is done, so the review doesn\'t lis
   const view = await reviewOf();
   assert.deepEqual(view.items.map((i) => i.number), [open]);
 });
+
+test('a numbered Contents stays counted: a chapter taken out of the middle, or one put in, leaves no gap or repeat', async () => {
+  const { withContentsLines, withoutContentsLines, renumbered } = await import('../lib/publish-chapter.mjs');
+  const N = (items) => `# Book\n\n## Contents\n\n${items.map(([n, p, t]) => `${n}. [[chapters/${p}|${t}]]`).join('\n')}\n\nAfter.\n`;
+  const live = N([[1, 'a', 'A'], [2, 'b', 'B'], [3, 'c', 'C']]);
+  // Taken out of the middle (platform-test-book #179: 5, 7 failed MD029).
+  assert.equal(withoutContentsLines(live, ['chapters/b.md']), N([[1, 'a', 'A'], [2, 'c', 'C']]));
+  // Put in, numbered as the drafts had it (4.), lands counted.
+  const drafts = N([[1, 'a', 'A'], [2, 'b', 'B'], [4, 'n', 'New'], [3, 'c', 'C']]);
+  assert.equal(withContentsLines(live, drafts, ['chapters/n.md']), N([[1, 'a', 'A'], [2, 'b', 'B'], [3, 'n', 'New'], [4, 'c', 'C']]));
+  // Bullets, and a Contents nothing changed, are left as they are.
+  assert.equal(renumbered('# B\n\n## Contents\n\n- [[a|A]]\n- [[b|B]]\n'), '# B\n\n## Contents\n\n- [[a|A]]\n- [[b|B]]\n');
+  assert.equal(withContentsLines(live, live, ['chapters/a.md']), null);
+});
+
+test('publish a chapter removed from the middle of a numbered Contents: the rest counted again', async () => {
+  resetBook();
+  const N = (items) => `# Book\n\n## Contents\n\n${items.map(([n, p, t]) => `${n}. [[chapters/${p}|${t}]]`).join('\n')}\n`;
+  gh.commitFiles(REPO, LIVE, { 'chapters/chapter-04.md': '# Chapter 4\n\nRocks.\n', 'chapters/chapter-05.md': '# Chapter 5\n\nSand.\n',
+    'index.md': N([[1, 'chapter-03', 'Chapter 3'], [2, 'chapter-04', 'Chapter 4'], [3, 'chapter-05', 'Chapter 5']]) });
+  gh.repo(REPO).refs.set(DRAFTS, gh.repo(REPO).refs.get(LIVE));
+  gh.commitFiles(REPO, DRAFTS, { 'chapters/chapter-04.md': null, 'index.md': N([[1, 'chapter-03', 'Chapter 3'], [2, 'chapter-05', 'Chapter 5']]) });
+  const r = await publishOne('chapters/chapter-04.md');
+  assert.equal(r.statusCode, 200, JSON.stringify(r.payload));
+  assert.equal(gh.textAt(REPO, gh.repo(REPO).refs.get(openPublish().head.ref), 'index.md'), N([[1, 'chapter-03', 'Chapter 3'], [2, 'chapter-05', 'Chapter 5']]));
+});
