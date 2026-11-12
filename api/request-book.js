@@ -120,7 +120,11 @@ function safeName(name) {
  * are checked where they are (checkParts) and committed unjoined: book-requests'
  * join-parts workflow joins them. Either way checkAll runs the content checks.
  */
-export function checkFiles(raw) {
+// Word files, checked by their first bytes: .docx and .odt are zips, .doc is OLE.
+const MAGIC = { docx: 'PK\x03\x04', odt: 'PK\x03\x04', doc: '\xd0\xcf\x11\xe0' };
+
+/** `office`: also .doc and .odt (test books: provision converts them with LibreOffice). */
+export function checkFiles(raw, { office = false } = {}) {
   if (raw === undefined || raw === null) return { ok: true, files: [] };
   if (!Array.isArray(raw)) return { ok: false, why: 'files not an array' };
   if (raw.length > MAX_FILES) return { ok: false, why: 'too many files', user: `Please send at most ${MAX_FILES} files.` };
@@ -129,8 +133,8 @@ export function checkFiles(raw) {
   for (const f of raw) {
     const name = safeName(asString(f?.name));
     const ext = (name.match(/\.([a-z]+)$/i)?.[1] ?? '').toLowerCase();
-    if (!name || !['docx', 'md', 'markdown'].includes(ext)) {
-      return { ok: false, why: 'file type', user: 'Only Word (.docx) and Markdown (.md) files can be attached.' };
+    if (!name || !['docx', 'md', 'markdown', ...(office ? ['doc', 'odt'] : [])].includes(ext)) {
+      return { ok: false, why: 'file type', user: office ? 'Only Word (.docx, .doc), OpenDocument (.odt) and Markdown (.md) files can be attached.' : 'Only Word (.docx) and Markdown (.md) files can be attached.' };
     }
     if (Array.isArray(f?.parts)) {
       // A SHA can only name a blob already in the private requests repo, and the
@@ -144,7 +148,7 @@ export function checkFiles(raw) {
     const data = typeof f?.data === 'string' ? f.data : '';
     if (!isBase64(data)) return { ok: false, why: 'file not base64' };
     const bytes = Buffer.from(data, 'base64');
-    files.push({ name, ext, data, size: bytes.length, start: bytes.subarray(0, 4), text: ext === 'docx' || isUtf8(bytes) });
+    files.push({ name, ext, data, size: bytes.length, start: bytes.subarray(0, 4), text: Object.hasOwn(MAGIC, ext) || isUtf8(bytes) });
   }
   const whole = files.filter((f) => f.data !== undefined);
   if (whole.length === files.length) return checkAll(files);
@@ -162,7 +166,7 @@ function checkAll(checked) {
   const seen = new Set();
   for (const { name, ext, data, parts, size, start, text } of checked) {
     if (size === 0) return { ok: false, why: 'empty file', user: `${name} is empty.` };
-    if (ext === 'docx' && start.toString('binary') !== 'PK\x03\x04') {
+    if (Object.hasOwn(MAGIC, ext) && start.toString('binary') !== MAGIC[ext]) {
       return { ok: false, why: 'docx not a zip', user: `${name} does not look like a Word document.` };
     }
     if (!text) return { ok: false, why: 'md not utf-8', user: `${name} is not a text file.` };
@@ -263,7 +267,7 @@ async function checkParts(token, files) {
   return Promise.all(files.map(async (f) => {
     if (!f.parts) return f;
     const size = f.parts.reduce((n, sha) => n + sizes.get(sha), 0);
-    if (f.ext === 'docx') {
+    if (Object.hasOwn(MAGIC, f.ext)) {
       const res = await raw(f.parts[0], token);
       if (!res.ok) throw Object.assign(new Error(`github blob ${f.parts[0]} returned ${res.status}`), { status: res.status });
       const reader = res.body.getReader();

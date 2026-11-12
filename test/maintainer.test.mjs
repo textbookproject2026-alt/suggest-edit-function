@@ -207,3 +207,17 @@ test('the public form can never make a sandbox book: a sandbox field is dropped'
   assert.equal(b.sandbox, false);
   assert.equal('requested_by_member' in b, false);
 });
+
+test('test books also take .doc and .odt (checked by their first bytes); the public form still does not', async () => {
+  const { checkFiles } = await import('../api/request-book.js');
+  const b64 = (s) => Buffer.from(s, 'binary').toString('base64');
+  const doc = { name: 'Old.doc', data: b64('\xd0\xcf\x11\xe0rest') };
+  const odt = { name: 'Open.odt', data: b64('PK\x03\x04rest') };
+  assert.equal(checkFiles([doc]).ok, false, 'public form: .doc refused');
+  assert.equal(checkFiles([odt]).ok, false, 'public form: .odt refused');
+  const ok = checkFiles([doc, odt], { office: true });
+  assert.equal(ok.ok, true);
+  assert.deepEqual(ok.files.map((f) => f.name), ['Old.doc', 'Open.odt']);
+  assert.equal(checkFiles([{ name: 'Fake.doc', data: b64('PK\x03\x04') }], { office: true }).ok, false, 'a .doc that is not OLE');
+  assert.equal(checkFiles([{ name: 'Fake.odt', data: b64('hello') }], { office: true }).ok, false, 'an .odt that is not a zip');
+});

@@ -100,7 +100,7 @@ async function create(body, auth, res) {
     send(res, 400, { error: 'validation: slug', userMessage: 'That address can only use lower-case letters, digits and single hyphens.' });
     return;
   }
-  const files = checkFiles(body.files);
+  const files = checkFiles(body.files, { office: true });
   if (!files.ok) {
     send(res, 400, { error: `validation: ${files.why}`, userMessage: files.user ?? 'One of the files could not be read.' });
     return;

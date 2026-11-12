@@ -406,7 +406,9 @@ only a member whose id is in `MAINTAINER_MEMBER_IDS` (wrangler.toml `[vars]`, id
   `test-` + the title's (always `test-`, at most 40 characters), refused if any registry
   entry or open test-book issue has it. Filed by request-book's `fileRequest`, as the
   form's requests are, with `sandbox: true` and the `maintainer` and `approved` labels in
-  the same call, so book-requests' provision runs at once.
+  the same call, so book-requests' provision runs at once. Files may also be .doc or
+  .odt here (not on the public form): provision converts them with LibreOffice, as
+  import-chapter does.
 - `POST /api/maintainer/test-books/<slug>/remove` → `202`: refused unless the registry
   has the slug with `sandbox: true`; puts `remove` on its request issue.
 
