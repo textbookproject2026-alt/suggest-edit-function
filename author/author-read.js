@@ -184,6 +184,8 @@ export default wrap(async (req, res) => {
         slug: b.slug, title: b.title, status: b.status, repo: b.content.repo,
         drafts_branch: b.content.drafts_branch, live_branch: b.content.live_branch,
         domain: b.site.domain, zip: zipUrl(b),
+        // A test book (registry sandbox: true): badged "Test" in the author site.
+        ...(b.sandbox === true ? { sandbox: true } : {}),
       })),
     });
     return;

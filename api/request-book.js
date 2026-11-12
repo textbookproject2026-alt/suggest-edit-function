@@ -56,6 +56,9 @@ const LABELS = ['book-request', 'needs-review'];
 const LABEL_DEFAULTS = {
   'book-request': { color: '6a57e0', description: 'A request to host a textbook, from the portal form' },
   'needs-review': { color: 'fbca04', description: 'Not yet approved or declined' },
+  // A test book the platform maintainer made on the author site (api/maintainer.js).
+  maintainer: { color: '5319e7', description: 'A test book from the platform maintainer (author site)' },
+  approved: { color: '0e8a16', description: 'Approved: provisioning runs' },
 };
 
 const LIMITS = { title: 200, authors: 300, email: 254, summary: 300, topic: 60, link: 500, notes: 3000 };
@@ -83,7 +86,7 @@ const isPartRateLimited = createRateLimiter(3 * MAX_PARTS + 6, 60 * 60 * 1000, '
 // Validation
 // ---------------------------------------------------------------------------
 
-const slugify = (s) =>
+export const slugify = (s) =>
   s.toLowerCase().normalize('NFKD').replace(/\p{M}/gu, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 36).replace(/-+$/, '');
 
 /** The label of each platform page directly under book_parent ("author" for the author site). */
@@ -117,7 +120,7 @@ function safeName(name) {
  * are checked where they are (checkParts) and committed unjoined: book-requests'
  * join-parts workflow joins them. Either way checkAll runs the content checks.
  */
-function checkFiles(raw) {
+export function checkFiles(raw) {
   if (raw === undefined || raw === null) return { ok: true, files: [] };
   if (!Array.isArray(raw)) return { ok: false, why: 'files not an array' };
   if (raw.length > MAX_FILES) return { ok: false, why: 'too many files', user: `Please send at most ${MAX_FILES} files.` };
@@ -309,7 +312,10 @@ async function commitFiles(token, reference, files) {
   return commit.sha;
 }
 
-export function buildIssueBody(reference, d, { slug, committed, fileError }) {
+export function buildIssueBody(reference, d, { slug, committed, fileError, maintainer = null }) {
+  // The public form can never ask for a sandbox book: only the maintainer's endpoint
+  // (api/maintainer.js) passes `maintainer`, and book-requests' provision refuses
+  // `sandbox: true` on an issue without the `maintainer` label it alone adds.
   const request = {
     reference,
     slug,
@@ -324,7 +330,8 @@ export function buildIssueBody(reference, d, { slug, committed, fileError }) {
     manuscript: committed ? d.files.map((f) => `requests/${reference}/${f.name}`) : [],
     manuscript_link: d.link || null,
     status: 'live',
-    sandbox: false,
+    sandbox: !!maintainer,
+    ...(maintainer ? { requested_by_member: `m-${maintainer.id}` } : {}),
   };
   const json = JSON.stringify(request, null, 2);
   const jf = fence(json);
@@ -334,8 +341,12 @@ export function buildIssueBody(reference, d, { slug, committed, fileError }) {
     '',
     `> ${inlineCode(d.summary)}`,
     '',
-    `- **Email:** ${inlineCode(d.email)}`,
-    `- **GitHub:** ${d.github ? inlineCode(d.github) : 'none given'}`,
+    ...(maintainer
+      ? [`- **A test book** from the platform maintainer, ${inlineCode(maintainer.name)} (member \`m-${maintainer.id}\`), on the author site: approved as it was filed, removed from its Settings there.`]
+      : [
+        `- **Email:** ${inlineCode(d.email)}`,
+        `- **GitHub:** ${d.github ? inlineCode(d.github) : 'none given'}`,
+      ]),
     `- **Subject:** ${d.topic ? inlineCode(d.topic) : 'not given'}`,
     `- **Proposed address:** \`${slug}.${REGISTRY.platform?.portal?.book_parent ?? 'confused4now.org'}\``,
     '',
@@ -382,22 +393,24 @@ async function handlePart(part, ip, res) {
     send(res, 429, { error: 'rate limit exceeded', userMessage: "You've sent a lot of files already. Please try again in an hour." });
     return;
   }
-  if (!part || part.length > Math.ceil(PART_BYTES / 3) * 4 || !isBase64(part)) {
-    send(res, 400, { error: 'validation: part', userMessage: 'One of the files could not be read.' });
-    return;
+  const [status, payload] = await storePart(part);
+  send(res, status, payload);
+}
+
+/** One part of a file, as an unreferenced blob in the requests repo: [status, payload]. */
+export async function storePart(part) {
+  if (typeof part !== 'string' || !part || part.length > Math.ceil(PART_BYTES / 3) * 4 || !isBase64(part)) {
+    return [400, { error: 'validation: part', userMessage: 'One of the files could not be read.' }];
   }
   const credential = await CREDENTIALS.acquire(REQUESTS_BOOK, 'request-book');
-  if (!credential.ok) {
-    send(res, credential.status, { error: credential.error, userMessage: TRY_AGAIN });
-    return;
-  }
+  if (!credential.ok) return [credential.status, { error: credential.error, userMessage: TRY_AGAIN }];
   try {
     const blob = await gh('/git/blobs', credential.token, { method: 'POST', body: blobJson(part), timeoutMs: blobTimeout(part.length) });
-    send(res, 201, { sha: blob.sha });
+    return [201, { sha: blob.sha }];
   } catch (err) {
     if (err.status === 401) CREDENTIALS.refused(REQUESTS_BOOK, credential);
     console.error(`request-book part: ${err.message}`);
-    send(res, 502, { error: `github: ${err.message}`, userMessage: 'A file could not be uploaded. Please try again.' });
+    return [502, { error: `github: ${err.message}`, userMessage: 'A file could not be uploaded. Please try again.' }];
   }
 }
 
@@ -465,11 +478,21 @@ async function handle(req, res) {
   }
   const d = v.data;
 
+  const [status, payload] = await fileRequest(d, { slug: proposeSlug(d.title) });
+  send(res, status, payload);
+}
+
+/**
+ * Files a validated request (`d`, as validate() returns it) as an issue in the requests
+ * repo: the files first (parts checked where they are), then the issue with its
+ * machine-readable block. The portal's form and the maintainer's test books
+ * (api/maintainer.js: `maintainer`, extra `labels`) both come through here, so a test
+ * book is provisioned exactly as an approved request is.
+ * -> [status, payload], payload.issue = { number, html_url } when filed.
+ */
+export async function fileRequest(d, { slug, labels = [], maintainer = null }) {
   const credential = await CREDENTIALS.acquire(REQUESTS_BOOK, 'request-book');
-  if (!credential.ok) {
-    send(res, credential.status, { error: credential.error, userMessage: TRY_AGAIN });
-    return;
-  }
+  if (!credential.ok) return [credential.status, { error: credential.error, userMessage: TRY_AGAIN }];
 
   let partsError = null;
   if (d.files.some((f) => f.parts)) {
@@ -477,8 +500,7 @@ async function handle(req, res) {
       const checked = checkAll(await checkParts(credential.token, d.files));
       if (!checked.ok) {
         console.warn(`validation: ${checked.why}`);
-        send(res, 400, { error: `validation: ${checked.why}`, userMessage: checked.user ?? 'One of the files could not be read.' });
-        return;
+        return [400, { error: `validation: ${checked.why}`, userMessage: checked.user ?? 'One of the files could not be read.' }];
       }
       d.files = checked.files;
     } catch (err) {
@@ -489,7 +511,6 @@ async function handle(req, res) {
   }
 
   const reference = `${new Date().toISOString().slice(0, 10)}-${Math.random().toString(36).slice(2, 8)}`;
-  const slug = proposeSlug(d.title);
 
   // Files first, so the issue can link them. A failed upload still files the
   // request: losing the request is worse than asking for the files again.
@@ -509,22 +530,23 @@ async function handle(req, res) {
     const made = await withLabels(REQUESTS_REPO, credential.token, LABEL_DEFAULTS, () => githubFetch(`/repos/${REQUESTS_REPO}/issues`, {
       token: credential.token,
       method: 'POST',
-      body: { title: `Book request: ${d.title.slice(0, 180)}`, body: buildIssueBody(reference, d, { slug, committed, fileError }), labels: LABELS },
+      body: { title: `${maintainer ? 'Test book' : 'Book request'}: ${d.title.slice(0, 180)}`, body: buildIssueBody(reference, d, { slug, committed, fileError, maintainer }), labels: [...LABELS, ...labels] },
     }));
     if (!made.ok) {
       console.error(`request-book: POST /issues returned ${made.status} — ${await detailOf(made)}`);
       throw Object.assign(new Error(`github POST /issues failed (status ${made.status})`), { status: made.status });
     }
-    const issue = await fieldsOf(made, ['html_url']);
-    console.log(`book request ${reference} filed as ${issue.html_url} (files: ${committed ? d.files.length : fileError ? 'FAILED' : 0}, credential=${credential.kind})`);
-    send(res, 201, {
+    const issue = await fieldsOf(made, ['html_url', 'number']);
+    console.log(`book request ${reference} filed as ${issue.html_url} (files: ${committed ? d.files.length : fileError ? 'FAILED' : 0}, credential=${credential.kind}${maintainer ? ', maintainer test book' : ''})`);
+    return [201, {
       reference,
-      ...(fileError ? { userMessage: "Your request arrived, but the files didn't. We'll email you to ask for them." } : {}),
-    });
+      ...(maintainer ? { issue } : {}),
+      ...(fileError ? { userMessage: maintainer ? "The book was filed, but the files didn't arrive: it starts from the template." : "Your request arrived, but the files didn't. We'll email you to ask for them." } : {}),
+    }];
   } catch (err) {
     if (err.status === 401) CREDENTIALS.refused(REQUESTS_BOOK, credential);
     console.error(`request-book: ${err.message}`);
-    send(res, 502, { error: `github: ${err.message}`, userMessage: TRY_AGAIN });
+    return [502, { error: `github: ${err.message}`, userMessage: TRY_AGAIN }];
   }
 }
 

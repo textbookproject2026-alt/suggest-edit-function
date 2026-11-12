@@ -43,3 +43,8 @@ migrations_dir = "migrations"
 [vars]
 GITHUB_APP_ID = "4951384"
 GITHUB_OAUTH_CLIENT_ID = "Ov23li2HSqm1hbY1ui7r"
+# The platform maintainers: author-site member ids (no "m-"), comma-separated. Only they
+# may make and remove test books (api/maintainer.js). Not secret: an id gives nothing
+# without that member's sign-in. To add one, add the id here; merging deploys it
+# (worker.yml), never a dashboard edit (a deploy would undo that).
+MAINTAINER_MEMBER_IDS = "ab738d332e"

@@ -15,6 +15,7 @@ api/suggest-edit.js            suggest an edit: reader text -> issue
 api/propose-edit.js            the in-site editor: reader edit -> PR into drafts
 api/github-auth.js             "Sign in with GitHub" popup for the editor and the author site
 api/request-book.js            the portal's "Publish your textbook here" form
+api/maintainer.js              the platform maintainer's test books (author site only)
 api/author.js                  every /api/author-* URL, one function (vercel.json rewrites)
 author/author-read.js          author site: books, drafts tree and files, the console's lists
 author/author-send.js          author site: the one send path, a commit on drafts
@@ -391,6 +392,26 @@ below).
   `textbookproject2026-alt/book-requests`.
 - The App must be installed on that repo. Tokens are downscoped to it, with
   `issues` + `contents` write.
+
+## Test books (`/api/maintainer/test-books`)
+
+The platform maintainer makes and removes test books from the author site
+(`api/maintainer.js`). Only through the author site's proxy, as a member it asserts, and
+only a member whose id is in `MAINTAINER_MEMBER_IDS` (wrangler.toml `[vars]`, ids without
+`m-`, comma-separated); anyone else, signed in or not, gets `403 { error: "forbidden" }`.
+
+- `GET` → `{ is_maintainer: true }`: the author site's `/api/me` asks this.
+- `POST { part }` → `{ sha }`: one file part, exactly as request-book's.
+- `POST { title, slug?, content_type?, files? }` → `201 { slug, issue }`. The slug is
+  `test-` + the title's (always `test-`, at most 40 characters), refused if any registry
+  entry or open test-book issue has it. Filed by request-book's `fileRequest`, as the
+  form's requests are, with `sandbox: true` and the `maintainer` and `approved` labels in
+  the same call, so book-requests' provision runs at once.
+- `POST /api/maintainer/test-books/<slug>/remove` → `202`: refused unless the registry
+  has the slug with `sandbox: true`; puts `remove` on its request issue.
+
+A second maintainer: add their member id to `MAINTAINER_MEMBER_IDS` in a pull request;
+merging deploys it (`worker.yml`). Never a dashboard edit: the next deploy would undo it.
 
 ## The author site (`/api/author-*`)
 
