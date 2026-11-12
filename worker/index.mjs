@@ -21,6 +21,7 @@ import { EVERY_FIVE, backstop, health, isWrite, refreshIfStale, sweep, write, wr
 // request instead put 2-8 ms of evaluation into that request.
 import author from '../api/author.js';
 import githubAuth from '../api/github-auth.js';
+import maintainer from '../api/maintainer.js';
 import pageRevision from '../api/page-revision.js';
 import proposeEdit from '../api/propose-edit.js';
 import requestBook from '../api/request-book.js';
@@ -95,6 +96,8 @@ export function route(url) {
     url.pathname = '/api/page-revision';
     url.searchParams.set('mode', 'open');
   }
+  // The maintainer's test books (api/maintainer.js): /api/maintainer/test-books[/<slug>/remove].
+  if (url.pathname.startsWith('/api/maintainer/')) return maintainer;
   const name = url.pathname.match(/^\/api\/author-([a-z-]+)$/)?.[1];
   if (name) {
     url.pathname = '/api/author';

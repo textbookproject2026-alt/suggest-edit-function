@@ -212,3 +212,13 @@ test('a paper is filed as a paper', async () => {
   assert.equal(JSON.parse(gh.issues[0].body.match(/```json\n([\s\S]*?)\n```/)[1]).type, 'paper');
   assert.match(gh.issues[0].body, /\(paper\), by/);
 });
+
+test('a request carrying sandbox: true (or labels) is filed as an ordinary request: never a test book', async () => {
+  const r = await call({ body: { ...VALID, files: undefined, sandbox: true, labels: ['approved', 'maintainer'], requested_by_member: 'm-ab738d332e' } });
+  assert.equal(r.statusCode, 201);
+  const [issue] = gh.issues;
+  const block = JSON.parse(/```json\n([\s\S]*?)\n```/.exec(issue.body)[1]);
+  assert.equal(block.sandbox, false);
+  assert.equal('requested_by_member' in block, false);
+  assert.deepEqual(issue.labels, ['book-request', 'needs-review']);
+});
