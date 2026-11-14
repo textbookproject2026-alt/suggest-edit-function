@@ -15,6 +15,12 @@
  *                 note, the whole text the box started from for a suggestion
  *     page        the page's path on the book's site ("/chapters/chapter-03"), for
  *                 the #p<n> permalink on the book's own domain
+ *     anchor      optional (pages built from 15 Nov 2026): where in the text the note
+ *                 points, for the author site's margin. { start, end } the ¶ numbers
+ *                 it starts and ends in (start = paragraph), exact (the words,
+ *                 <= 2000), prefix and suffix (<= 64 each, ~32 either side), text
+ *                 (the starting paragraph's whole text, <= 5000), commit (the
+ *                 book commit the page was built from, hex, or ""). Malformed: dropped.
  *   and gets the label `section-note`. A body without them is a note on the page,
  *   as before. Any note may carry `identity` (the in-site editor's GitHub sign-in,
  *   /api/github-auth): if it is genuine and for this book, the issue names the
@@ -151,9 +157,46 @@ function validate(body) {
     const quote = asString(body.quote).replace(/\s+/g, ' ');
     // Cut with "…", so the author site knows it isn't the whole text.
     data.quote = quote.length > MAX_QUOTE ? `${quote.slice(0, MAX_QUOTE - 1)}…` : quote;
+    const anchor = readAnchor(body.anchor, paragraph);
+    if (anchor) data.anchor = anchor;
   }
   return { ok: true, data };
 }
+
+// Not asString: the spaces at a prefix's or suffix's edge are part of it.
+const flat = (v) => (typeof v === 'string' ? v : '').replace(/\s+/g, ' ');
+
+/** The note's anchor, checked field by field; anything malformed drops the whole anchor. */
+export function readAnchor(a, paragraph) {
+  if (!a || typeof a !== 'object') return null;
+  const { start, end } = a;
+  const exact = flat(a.exact).trim();
+  const prefix = flat(a.prefix);
+  const suffix = flat(a.suffix);
+  const text = flat(a.text).trim();
+  const commit = asString(a.commit);
+  const ok = Number.isSafeInteger(start) && start === paragraph && Number.isSafeInteger(end) && end >= start && end - start <= 50
+    && exact && exact.length <= 2000 && prefix.length <= 64 && suffix.length <= 64 && text.length <= MAX_QUOTE
+    && /^(?:[0-9a-f]{7,40})?$/.test(commit);
+  return ok ? { start, end, exact, prefix, suffix, text, commit } : null;
+}
+
+/** Markdown-inert text for a blockquote: no markup, no links, no @mentions. */
+const inert = (t) => t.replace(/[\\`*_{}[\]()#+\-.!|<>~&]/g, (c) => `&#${c.charCodeAt(0)};`).replace(/@/g, '@&#8203;');
+
+/** The paragraph as a blockquote, the selected words in bold (or listed after, if they aren't in it). */
+export function anchoredQuote({ exact, prefix, text }) {
+  let at = text.indexOf(prefix + exact);
+  if (at >= 0) at += prefix.length;
+  else at = text.indexOf(exact);
+  const lines = at >= 0 && text
+    ? [`> ${inert(text.slice(0, at))}**${inert(exact)}**${inert(text.slice(at + exact.length))}`]
+    : [...(text ? [`> ${inert(text)}`, ''] : []), `**Selected:** ${inert(exact)}`];
+  return lines;
+}
+
+/** The machine-readable anchor, safe inside an HTML comment. */
+export const anchorComment = (anchor) => `<!-- c4n-anchor ${JSON.stringify(anchor).replace(/--/g, '-\\u002d')} -->`;
 
 // ---------------------------------------------------------------------------
 // Issue body
@@ -162,12 +205,14 @@ function validate(body) {
 /** The paragraph's permalink on the book's own domain: the page's path, then #p<n>. */
 export const paragraphUrl = (book, page, n) => `https://${book.site.domain}${page}#p${n}`;
 
-function buildIssueBody(book, { name, suggestion, reasoning, path, paragraph, page, quote, identity }) {
+function buildIssueBody(book, { name, suggestion, reasoning, path, paragraph, page, quote, anchor, identity }) {
   const f = fence(suggestion);
   const parts = [`**File:** [\`${path}\`](${fileUrl(book, path)})`];
   if (paragraph) {
-    parts.push(`**Where:** [¶${paragraph}](${paragraphUrl(book, page, paragraph)})`);
-    if (quote) {
+    const span = anchor && anchor.end > anchor.start ? `¶${paragraph}–${anchor.end}` : `¶${paragraph}`;
+    parts.push(`**Where:** [${span}](${paragraphUrl(book, page, paragraph)})`);
+    if (anchor) parts.push('', ...anchoredQuote(anchor));
+    else if (quote) {
       const qf = fence(quote);
       parts.push('', `${qf}text`, quote, qf);
     }
@@ -197,6 +242,7 @@ function buildIssueBody(book, { name, suggestion, reasoning, path, paragraph, pa
     '',
     '_submitted via the suggest-an-edit form_',
   );
+  if (anchor) parts.push('', anchorComment(anchor));
 
   return parts.join('\n');
 }
