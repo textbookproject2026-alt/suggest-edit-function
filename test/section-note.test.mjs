@@ -52,3 +52,44 @@ test('signed in: the note names @login so GitHub tells them when it closes; a ba
     assert.ok(!b.issue.body.includes('@ada-l'));
   }
 });
+
+const ANCHOR = {
+  start: 4, end: 4, exact: 'a situation', prefix: 'Consider ', suffix: ' that will be familiar',
+  text: 'Consider a situation that will be familiar to @everyone [here](x).', commit: 'abc1234def',
+};
+
+test('an anchored note: the paragraph quoted with the words in bold, inert, and the anchor in a comment', async () => {
+  const r = await call({ body: { ...NOTE, anchor: ANCHOR } });
+  assert.equal(r.status, 201);
+  assert.deepEqual(r.issue.labels, ['suggested-edit', 'needs-triage', 'section-note']);
+  const body = r.issue.body;
+  assert.ok(body.includes(`**Where:** [¶4](https://${DEFAULT_BOOK.site.domain}/chapters/chapter-03#p4)`), body);
+  assert.ok(body.includes('> Consider **a situation** that will be familiar to @&#8203;everyone &#91;here&#93;&#40;x&#41;&#46;'), body);
+  assert.ok(!body.includes('```text\nConsider'), 'the anchor replaces the fenced quote');
+  const json = JSON.parse(body.match(/<!-- c4n-anchor (.*) -->/)[1]);
+  assert.deepEqual(json, ANCHOR);
+});
+
+test('an anchor across paragraphs says ¶4–6; words not in the paragraph are listed after it', async () => {
+  const r = await call({ body: { ...NOTE, anchor: { ...ANCHOR, end: 6, exact: 'familiar to everyone. Next one', prefix: 'will be ' } } });
+  assert.ok(r.issue.body.includes('[¶4–6]('), r.issue.body);
+  assert.ok(r.issue.body.includes('**Selected:** familiar to everyone&#46; Next one'), r.issue.body);
+});
+
+test('a malformed anchor is dropped and the note is as before; old clients without one still work', async () => {
+  for (const bad of [{ ...ANCHOR, start: 3 }, { ...ANCHOR, end: 2 }, { ...ANCHOR, exact: '' }, { ...ANCHOR, commit: 'zz' }, { ...ANCHOR, prefix: 'p'.repeat(65) }, 'x']) {
+    const r = await call({ body: { ...NOTE, anchor: bad } });
+    assert.equal(r.status, 201);
+    assert.ok(!r.issue.body.includes('c4n-anchor'), JSON.stringify(bad));
+    assert.ok(r.issue.body.includes('```text\nConsider a situation'), JSON.stringify(bad));
+  }
+  const page = await call({ body: { ...VALID, anchor: ANCHOR } });
+  assert.ok(!page.issue.body.includes('c4n-anchor'), 'no paragraph, no anchor');
+});
+
+test('an anchor cannot close its HTML comment early', async () => {
+  const r = await call({ body: { ...NOTE, anchor: { ...ANCHOR, exact: 'a situation --> <b>x</b>', text: 'Consider a situation --> <b>x</b>' } } });
+  const tail = r.issue.body.slice(r.issue.body.indexOf('<!-- c4n-anchor'));
+  assert.equal(tail.indexOf('-->'), tail.length - 3);
+  assert.equal(JSON.parse(tail.match(/<!-- c4n-anchor (.*) -->/)[1]).exact, 'a situation --> <b>x</b>');
+});
