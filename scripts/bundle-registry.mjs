@@ -70,11 +70,10 @@ try {
   fail(err.message);
 }
 
-// This repo's own commit: VERCEL_GIT_COMMIT_SHA on every Vercel build, FUNCTION_SHA
-// from the Worker's deploy workflow. X-Registry-Version can't tell a stale function
+// This repo's own commit: FUNCTION_SHA from the Worker's deploy workflow. X-Registry-Version can't tell a stale function
 // from a current one, since a merge here leaves the registry unchanged;
 // X-Function-Version can.
-const commit = process.env.VERCEL_GIT_COMMIT_SHA || process.env.FUNCTION_SHA || '';
+const commit = process.env.FUNCTION_SHA || '';
 const functionSha = /^[0-9a-f]{40}$/.test(commit) ? commit : 'local';
 const bundle = { sha, function_sha: functionSha, source: `https://github.com/${REGISTRY_REPO}/blob/${sha}/registry.json`, registry };
 writeFileSync(

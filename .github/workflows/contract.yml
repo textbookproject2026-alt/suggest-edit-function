@@ -7,8 +7,8 @@ on:
   workflow_dispatch:
     inputs:
       a:
-        description: Host A
-        default: https://suggest-edit-function.vercel.app
+        description: Host A (a second deployment to compare with, e.g. a preview)
+        required: true
       b:
         description: Host B
         default: https://api.confused4now.org

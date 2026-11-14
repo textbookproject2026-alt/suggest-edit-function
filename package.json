@@ -8,7 +8,6 @@
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "registry:bundle": "node scripts/bundle-registry.mjs",
-    "vercel-build": "node scripts/bundle-registry.mjs && npm test",
     "test:worker": "node --import ./test/via-worker.mjs --test test/*.test.mjs"
   }
 }

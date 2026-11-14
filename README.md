@@ -16,7 +16,7 @@ api/propose-edit.js            the in-site editor: reader edit -> PR into drafts
 api/github-auth.js             "Sign in with GitHub" popup for the editor and the author site
 api/request-book.js            the portal's "Publish your textbook here" form
 api/maintainer.js              the platform maintainer's test books (author site only)
-api/author.js                  every /api/author-* URL, one function (vercel.json rewrites)
+api/author.js                  every /api/author-* URL, one function (worker/index.mjs routes them)
 author/author-read.js          author site: books, drafts tree and files, the console's lists
 author/author-send.js          author site: the one send path, a commit on drafts
 author/author-import.js        author site: Word upload parts, start, status (private staging)
@@ -35,7 +35,7 @@ lib/author-people.mjs          author site: authors changed by registry pull req
 lib/author-console.mjs         author site: the console's wording (from the desktop app)
 lib/author-console-reads.mjs   author site: suggestion and publish reads shared by two endpoints
 registry/bundled.mjs           GENERATED registry snapshot, pinned to a registry commit
-scripts/bundle-registry.mjs    writes registry/bundled.mjs (the Vercel build step, and worker.yml's)
+scripts/bundle-registry.mjs    writes registry/bundled.mjs (worker.yml's build step)
 scripts/contract.mjs           the same read-only requests to two hosts, compared
 test/assertions.test.mjs       abuse-test assertion suite
 test/registry.test.mjs         book resolution
@@ -46,7 +46,7 @@ test/request-book.test.mjs     request-book against an in-memory GitHub
 test/author.test.mjs           the author endpoints against test/fake-github.mjs
 test/fake-github.mjs           an in-memory GitHub with real git object ids
 worker/main.mjs                the Worker's main module: index.mjs, and the Jobs entrypoint build-nudge's cron calls
-worker/index.mjs               the Cloudflare Worker: routes (vercel.json's rewrites), the five-minute jobs, the daily D1 cleanup
+worker/index.mjs               the Cloudflare Worker: routes (two rewrites), the five-minute jobs, the daily D1 cleanup
 worker/adapter.mjs             a Fetch Request to the handlers' Node-style req/res, and back
 worker/writes.mjs              writes: a key per write in D1, the fallback queue, /api/write-status, /api/health
 scripts/fallback.mjs           the write fallback (write-fallback.yml): queued writes, same handlers, in Node
@@ -56,18 +56,13 @@ test/fake-d1.mjs               D1 for the tests (node:sqlite)
 wrangler.toml                  the Worker: api.confused4now.org, KV TOKENS, D1 DB, vars
 migrations/                    D1 schema (rate-limit windows, write keys and events)
 test/via-worker.mjs            `npm run test:worker`: the whole suite through worker/adapter.mjs
-vercel.json                    the Vercel rollback (unused, until 27 Oct 2026): maxDuration and the two rewrites
 package.json                   pins Node 22 via engines; test and build scripts
 ```
 
 Run the suite with `npm test` (Node's built-in runner, no dependencies). It never
 contacts GitHub. `TESTING.md` records the abuse-test pass the original assertions came from.
 
-The Node version comes from `engines.node` in `package.json` (plus the project's
-Node setting in the Vercel dashboard). Do **not** add a `runtime` key to
-`vercel.json` — that field is only for versioned community-runtime packages
-(`now-php@1.0.0`), and setting it on a first-party Node function fails the build
-with "Function Runtimes must have a valid version".
+The Node version for tests comes from `engines.node` in `package.json`.
 
 ---
 
@@ -76,12 +71,11 @@ with "Function Runtimes must have a valid version".
 **Production: the Cloudflare Worker `c4n-api` at `https://api.confused4now.org`** (since
 batch 2d, October 2026). `registry.json`'s `platform.suggest_edit_endpoint` is what every
 book, the portal and the author site's proxy use. The same handlers (`api/`, `author/`)
-run on both hosts; `worker/` only adapts a Fetch Request to them and does vercel.json's
+run on the Worker; `worker/` adapts a Fetch Request to them and does the two
 rewrites.
 
 **Everything runs on the Worker (13 Oct 2026).** Reads, sign-in and every write,
-including the ones that commit to GitHub. Vercel's Hobby plan doesn't allow commercial
-use, so nothing is forwarded to Vercel any more.
+including the ones that commit to GitHub.
 
 **Writes: a key, and a fallback** (`worker/writes.mjs`). The Worker is on Cloudflare's
 free plan, 10 ms of CPU a request, and a commit can take more (measured 12 Oct: an
@@ -116,14 +110,7 @@ ponytail: a write the CPU limit stopped after one of its GitHub calls went throu
 run again from the start by the fallback, so that step can happen twice (an extra
 branch, say). Keeping each step's result per key is the upgrade if that shows up.
 
-**Vercel: unused, kept until 27 Oct 2026 as the rollback.** The Vercel project
-`suggest-edit-function` still deploys from `main` and serves every route, but nothing
-points at it. **Roll back** by setting `platform.suggest_edit_endpoint` in
-textbook-registry's `registry.json` to
-`https://suggest-edit-function.vercel.app/api/suggest-edit` and merging (the books pick it
-up on their next build), and pointing the author site's proxy (`functions/_lib/core.js`
-`UPSTREAM`, `site/index.html` `tb-api`) back too. Vercel holds the same
-`IDENTITY_SECRET`, so sign-ins stay valid. After 27 Oct the project can be retired.
+**Vercel: retired 14 Nov 2026.** The function ran on Vercel until the Worker took over (13 Oct); it was kept as a rollback until 27 Oct, and its repo side (vercel.json, the Vercel watch in deployed.yml, the registry's deploy hook) was removed on 14 Nov. The Vercel project itself is deleted by hand in the Vercel dashboard. Nothing points at it.
 
 **How it deploys: only from CI.** `.github/workflows/worker.yml` runs on every push to
 `main`, by hand, and from textbook-registry's `deploy.yml` after every registry change
@@ -170,7 +157,7 @@ with `minutes` it also tails the Worker and reports CPU time and subrequests per
 | --- | --- | --- |
 | `GITHUB_APP_PRIVATE_KEY` | `SUGGEST_EDIT_APP_PRIVATE_KEY` (the raw `.pem`) | base64-encoded by the workflow |
 | `GITHUB_OAUTH_CLIENT_SECRET` | `SIGNIN_OAUTH_CLIENT_SECRET` | the OAuth App "Textbook sign-in (api.confused4now.org)", callback `https://api.confused4now.org/api/github-auth` |
-| `IDENTITY_SECRET` | `IDENTITY_SECRET` | signs GitHub sign-ins; the same value as Vercel's (the rollback) and the fallback's. Without the repository secret, generated by the workflow as before |
+| `IDENTITY_SECRET` | `IDENTITY_SECRET` | signs GitHub sign-ins; the same value as the fallback's. Without the repository secret, generated by the workflow as before |
 
 `write-fallback.yml` reads the same repository secrets, and `CLOUDFLARE_WORKERS_TOKEN` for
 D1 and KV. `FORWARD_SECRET` (the reader's address on writes forwarded to Vercel, 12–13
@@ -269,13 +256,9 @@ Fixed by the live front-end. Do not change either side alone.
 
 Every response carries `X-Registry-Version: <registry commit SHA>`, the registry
 snapshot this deployment was built with. It also carries `X-Function-Version: <this repo's commit SHA>`
-(`VERCEL_GIT_COMMIT_SHA` at build time, `local` elsewhere). A merge here changes only the second.
-`.github/workflows/deployed.yml` runs on every push to `main` and waits up to ten minutes
-for production to send this commit (or a later one) in `X-Function-Version`. It goes red on the
-merge commit if production doesn't. Vercel builds `main` on push by itself. If production is still
-behind after four minutes and the optional secret `SUGGEST_EDIT_DEPLOY_HOOK` is set here, the
-job fires the hook once. The registry's `deploy.yml` still polls `X-Registry-Version` for
-registry changes.
+(`FUNCTION_SHA`, set by worker.yml at build time; `local` elsewhere). A merge here changes only the second.
+worker.yml deploys every push to `main` and waits for api.confused4now.org to serve it. The
+registry's `deploy.yml` starts worker.yml after a registry change.
 
 **A note on one paragraph.** The ¶ margin's "Note to the authors about ¶n" sends the same
 POST with `paragraph` (its number), `quote` (the start of its text) and `page` (its path on
@@ -624,7 +607,7 @@ repository" }`, and the log names the repo:
 `credential: app token unavailable for <repo> — the app isn't installed on <repo>`.
 
 **The private key must be base64-encoded.** GitHub gives you a multi-line `.pem` file,
-and Vercel env vars mangle the newlines in a raw PEM. Encode the whole file on one line:
+and env vars mangle the newlines in a raw PEM. Encode the whole file on one line:
 
 ```bash
 base64 -i textbook-suggestions.2026-09-15.private-key.pem | tr -d '\n' | pbcopy   # macOS
@@ -649,7 +632,7 @@ installed on that repo, the key was revoked, GitHub is down), the function falls
 `BOT_TOKEN` when it is set, logging the reason. Without `BOT_TOKEN` it returns 502 and
 files nothing: `github: the app isn't installed on that repository` when that is the
 cause, `github: credential unavailable` otherwise. **To prove the App is live, look
-for `credential=app` and no `credential=bot_token` in `vercel logs`.**
+for `credential=app` and no `credential=bot_token` in `wrangler tail c4n-api`.**
 
 **Caching.** Installation tokens last an hour. Each warm instance caches the
 installation ID and the token per repository, and reuses the token until it has less
@@ -657,16 +640,8 @@ than 5 minutes left. A 401 from GitHub drops both, and so does a failed exchange
 App may have been reinstalled under a new ID). "Not installed" is never cached, so
 installing the App works from the next request. A cold start begins empty.
 
-Set them in Vercel (production; a preview deployment should get a separate test App
-installed only on a scratch repo):
-
-```bash
-vercel env add GITHUB_APP_ID production
-vercel env add GITHUB_APP_PRIVATE_KEY production
-```
-
-Mark `GITHUB_APP_PRIVATE_KEY` as **Sensitive** in the Vercel dashboard (Settings →
-Environment Variables).
+Set them as this repository's Actions secrets; `worker-secrets.yml` copies them to the
+Worker (see the secrets table above).
 
 Locally, put them in `.env` (git-ignored — `.env*` never gets committed).
 
@@ -680,20 +655,14 @@ Rotate the key by generating a new one in the App settings, replacing
 `registry/bundled.mjs` is a snapshot of `registry.json` from
 `textbookproject2026-alt/textbook-registry`, pinned to a commit SHA. The function never
 fetches the registry at runtime, so a cold start costs nothing extra and cannot fail on
-it. The build step (`vercel-build`) resolves the registry's `main` to a SHA, fetches
-`registry.json` at that SHA, validates it, rewrites the snapshot, and then runs
-`npm test`. If any step fails, the deploy fails and the previous deployment stays live.
-Vercel instant rollback restores code and registry together.
+it. worker.yml's build step (`npm run registry:bundle`) resolves the registry's `main` to
+a SHA, fetches `registry.json` at that SHA, validates it, rewrites the snapshot, and then
+runs `npm test`. If any step fails, nothing deploys and the previous version stays live.
 
-- **A registry change takes effect on the next deploy** of this project. The registry's
-  `deploy.yml` calls this project's Vercel deploy hook after every merge to its `main`,
-  then polls `X-Registry-Version` and fails the registry's run if production hasn't
-  caught up within ten minutes. It also checks every six hours. The hook lives in the
-  registry repo's `SUGGEST_EDIT_DEPLOY_HOOK` secret (see its README, "Delivery to
-  services").
-- **Pin a registry commit** by setting `REGISTRY_REF=<40-char sha>` (or a branch name) as
-  a build env var. While a pin is set, registry merges still trigger rebuilds but can't
-  change what is served, so the registry's deploy check goes red until the pin is removed.
+- **A registry change takes effect on the next deploy.** The registry's `deploy.yml`
+  starts worker.yml after every merge to its `main`, then polls `X-Registry-Version`.
+- **Pin a registry commit** by setting `REGISTRY_REF=<40-char sha>` (or a branch name) for
+  the build. While a pin is set, registry merges can't change what is served.
 - **Refresh the committed snapshot** locally with `npm run registry:bundle`. The
   committed copy is what `npm test` runs against. Production always rebuilds it.
 - The handler validates the snapshot again at load and refuses to start on anything
@@ -704,24 +673,8 @@ Vercel instant rollback restores code and registry together.
 
 ## Deploy
 
-```bash
-npm i -g vercel     # once
-vercel login
-vercel link         # once, to bind this directory to the project
-
-vercel              # preview deploy
-vercel --prod       # production
-```
-
-Pushing to `main` on a Vercel-connected repo deploys production automatically; other
-branches get preview deploys. The build step is `npm run vercel-build` (bundle the
-registry, then run the tests). There is nothing to install.
-
-Run it locally:
-
-```bash
-vercel dev          # http://localhost:3000/api/suggest-edit
-```
+Only from CI: `.github/workflows/worker.yml` deploys `c4n-api` on every push to `main`
+(see "How it deploys" above). Run the tests locally with `npm test`.
 
 ---
 
@@ -770,6 +723,6 @@ curl -i -X OPTIONS "$URL" -H 'Origin: https://www.ontology-for-social-research-a
 curl -sI -X OPTIONS "$URL" -H 'Origin: https://ontology-for-social-research-a-criti.confused4now.org' | grep -i x-registry-version
 ```
 
-Watch the logs with `vercel logs <deployment-url>` — validation rejections, honeypot
+Watch the logs with `wrangler tail c4n-api` — validation rejections, honeypot
 hits, rate-limit trips, the credential path (`credential=app` / `credential=bot_token`),
 and GitHub failures all land there with the detail the response withholds.
