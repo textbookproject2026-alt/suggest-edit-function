@@ -9,6 +9,9 @@
  *   { book, action: "suggestion-decline", number, reason }
  *       the reason (10–1000 characters, public) under the member's name, the polite
  *       reply, then closed as not planned and locked (a written suggestion or a note)
+ *   { book, action: "note-resolve", number }
+ *       a note to the authors acted on (the author site's margin): a thank-you, then
+ *       closed as completed, which credits the reader as an accepted suggestion does
  *   { book, action: "suggestion-made", number, sha }
  *       closes an accepted suggestion with a link to `sha`, which must be the newest
  *       commit on drafts to have changed its page since it was accepted
@@ -69,7 +72,7 @@ import { cacheKeys, forget } from '../lib/kv-cache.mjs';
 import { COMMENT_MIN, cleanText, commentOf, declineComment, isDeclined, kindOf, memberComment } from '../lib/declined.mjs';
 import {
   ACCEPTED, ACCEPTED_LABEL, NEEDS_TRIAGE, PUBLISH_STATE_WORDS, PUBLISH_TITLE, PUBLISHED_STEPS, checkReply, declined,
-  CHOICES, describeChange, describePublish, pageName, publishRequestBody, takenOn, thanksWithChange,
+  CHOICES, describeChange, describePublish, noteResolved, pageName, publishRequestBody, takenOn, thanksWithChange,
 } from '../lib/author-console.mjs';
 import {
   acceptedAt, changesSince, compareDrafts, liveServes, mergeability, openPublishRequest, publishChecks, suggestion,
@@ -206,6 +209,24 @@ async function suggestionDecline(book, body, ctx) {
   await lock(book, token, left, s.number, tag);
   console.log(`suggestion #${s.number} declined ${byline(identity)} ${tag}`);
   return { done: true, steps: ['Your reason was posted, with a polite reply.', 'The suggestion was closed. It shows as Declined in the book\'s history.'] };
+}
+
+async function noteResolve(book, body, ctx) {
+  const { token, left, identity, tag } = ctx;
+  const s = await suggestion(book, number(body), token, left);
+  if (!s.open) throw new Refusal(409, 'closed', 'That note has already been dealt with.');
+  const reply = noteResolved(identity);
+  checkReply(reply);
+  await comment(book, token, left, s.number, reply);
+  await dropLabel(book, token, left, s.number, NEEDS_TRIAGE, tag);
+  try {
+    await ghJson(`/repos/${book.content.repo}/issues/${s.number}`, token, left, { method: 'PATCH', body: { state: 'closed', state_reason: 'completed' } });
+  } catch (err) {
+    console.error(`note #${s.number}: close failed — ${err.message} ${tag}`);
+    return { done: true, steps: ['A thank-you was sent.'], warning: 'The thank-you was sent, but the note could not be marked as resolved. It is still open.' };
+  }
+  console.log(`note #${s.number} resolved ${byline(identity)} ${tag}`);
+  return { done: true, steps: ['A thank-you was sent.', 'The note was marked as resolved, and the reader is credited.'] };
 }
 
 async function suggestionMade(book, body, ctx) {
@@ -700,6 +721,7 @@ const ACTIONS = {
   'suggestion-accept': suggestionAccept,
   'suggestion-decline': suggestionDecline,
   'suggestion-made': suggestionMade,
+  'note-resolve': noteResolve,
   'change-accept': changeAccept,
   'change-decline': changeDecline,
   'review-accept': reviewAccept,

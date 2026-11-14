@@ -1549,3 +1549,18 @@ test('publish a chapter removed from the middle of a numbered Contents: the rest
   assert.equal(r.statusCode, 200, JSON.stringify(r.payload));
   assert.equal(gh.textAt(REPO, gh.repo(REPO).refs.get(openPublish().head.ref), 'index.md'), N([[1, 'chapter-03', 'Chapter 3'], [2, 'chapter-05', 'Chapter 5']]));
 });
+
+test('a note resolved from the margin: thanked, closed as completed (credited); twice is refused', async () => {
+  resetBook();
+  const n = suggestionIssue('Which cat?', ['section-note']);
+  const r = await call(act, { body: { book: BOOK.slug, action: 'note-resolve', number: n } });
+  assert.equal(r.statusCode, 200, JSON.stringify(r.payload));
+  const issue = gh.repo(REPO).issues.get(n);
+  assert.equal(issue.state, 'closed');
+  assert.equal(issue.state_reason, 'completed');
+  assert.match(issue.comments[0], /acted on it[\s\S]*by @brandonandcaroline via the author site/);
+  assert.ok(!issue.labels.some((l) => l.name === 'needs-triage'));
+  assert.equal((await call(act, { body: { book: BOOK.slug, action: 'note-resolve', number: n } })).statusCode, 409);
+  const bug = gh.addIssue(REPO, { title: 'Build broke', labels: [{ name: 'bug' }] });
+  assert.equal((await call(act, { body: { book: BOOK.slug, action: 'note-resolve', number: bug } })).statusCode, 404);
+});
