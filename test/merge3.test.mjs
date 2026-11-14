@@ -74,3 +74,17 @@ test('partial: the reader\'s other words go in, the drafts\' words kept where bo
   assert.equal(strict.overlaps[0].merged, 'The cat sat on rug and looked at the dog.');
   assert.deepEqual(merge3(BASE, now, sug, { partial: true }), { text: doc('The cat sat on rug and looked at the dog.'), overlaps: strict.overlaps });
 });
+
+test('a batch of three on one paragraph, accepted oldest first, each merged on the one before', () => {
+  const sugs = [
+    doc('The cat sat on the mat and looked at dog.'),
+    doc('The cat sat on mat and looked at the dog.'),
+    doc('The black cat sat on mat and looked at dog.'),
+  ];
+  const drafts = sugs.reduce((now, sug) => {
+    const r = merge3(BASE, now, sug);
+    assert.deepEqual(r.overlaps, []);
+    return r.text;
+  }, BASE);
+  assert.equal(drafts, doc('The black cat sat on the mat and looked at the dog.'));
+});
