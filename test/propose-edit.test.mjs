@@ -77,12 +77,13 @@ globalThis.fetch = async (url, opts = {}) => {
   if (method === 'POST' && rest === '/issues/7/labels') { gh.labelled.push(body); return json(200, []); }
   if (method === 'DELETE' && rest.startsWith('/git/refs/heads/')) { gh.deleted.push(rest); return { ok: true, status: 204 }; }
   if (rest.startsWith('/labels/')) return json(200, {});
+  if (method === 'GET' && rest.startsWith('/pulls?state=open')) return json(200, gh.open ?? []);
   throw new Error(`unexpected ${method} ${url}`);
 };
 
 const { default: handler } = await import('../api/propose-edit.js');
 const { default: auth } = await import('../api/github-auth.js');
-const { applyEdit, lineDiff } = await import('../api/propose-edit.js');
+const { applyEdit, lineDiff, readProposalBlock, textKey } = await import('../api/propose-edit.js');
 const { issueIdentity, readIdentity, sign } = await import('../lib/identity.mjs');
 
 function mockRes() {
@@ -497,4 +498,29 @@ test('labels: added directly; a 422 for a missing label makes them once and trie
   } finally {
     globalThis.fetch = saved;
   }
+});
+
+test('the PR records its base (the drafts commit the edit was made on) and the replaced text\'s key, hidden', async () => {
+  resetGitHub();
+  const r = await call({ body: para() });
+  assert.equal(r.statusCode, 201);
+  const block = readProposalBlock(gh.pulls[0].body);
+  assert.deepEqual(block, { base: COMMIT, path: PATH, paragraph: 2, original: textKey('Second paragraph, recieve.') });
+  assert.match(gh.pulls[0].body, /\n<!-- c4n-proposal \{.*\} -->$/);
+});
+
+test('GET ?pending=1: open proposals on this page, by the replaced text\'s key or (older ones) ¶ number; cached a minute', async () => {
+  resetGitHub();
+  const block = (o) => `x\n\n<!-- c4n-proposal ${JSON.stringify(o)} -->`;
+  gh.open = [
+    { labels: [{ name: 'proposed-edit' }], html_url: 'u1', body: block({ base: COMMIT, path: PATH, paragraph: 2, original: 'abc' }) },
+    { labels: [{ name: 'proposed-edit' }], html_url: 'u2', body: '**File:** [`chapters/chapter-03.md`](x)\n**Where:** ¶3' },
+    { labels: [{ name: 'proposed-edit' }], html_url: 'u3', body: block({ base: COMMIT, path: 'chapters/other.md', paragraph: 2, original: 'abc' }) },
+    { labels: [{ name: 'publish' }], html_url: 'u4', body: block({ base: COMMIT, path: PATH }) },
+  ];
+  const r = await call({ method: 'GET', url: `/api/propose-edit?path=${encodeURIComponent(PATH)}&pending=1` });
+  delete gh.open;
+  assert.equal(r.statusCode, 200);
+  assert.deepEqual(r.payload.pending, [{ paragraph: 2, original: 'abc', url: 'u1' }, { paragraph: 3, original: null, url: 'u2' }]);
+  assert.match(r.headers['cache-control'], /s-maxage=60/);
 });

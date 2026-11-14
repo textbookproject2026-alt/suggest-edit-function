@@ -291,7 +291,31 @@ export function commitMessage(data) {
   ].filter(Boolean).join('\n\n');
 }
 
-function prBody(book, branch, data) {
+/** The text a paragraph proposal replaced, as a short hash both ends can compute (sha-256 of the LF text, 16 hex). */
+export const textKey = (text) => createHash('sha256').update(toLf(String(text)).trim()).digest('hex').slice(0, 16);
+
+/**
+ * The proposal's machine-readable block (an HTML comment, so it doesn't show): the
+ * drafts commit the reader's edit was made on (the base the author site merges word
+ * by word against), the page, and for one paragraph its number and the key of the
+ * text it replaced (so the reader's editor can say a paragraph has pending changes).
+ */
+export function proposalBlock(base, data) {
+  const block = { base, path: data.path, ...(data.mode === 'paragraph' ? { paragraph: data.paragraph ?? null, original: textKey(data.original) } : {}) };
+  return `<!-- c4n-proposal ${JSON.stringify(block).replace(/--/g, '-\\u002d')} -->`;
+}
+
+/** The block back from a PR body, or null (proposals before 14 Nov 2026 have none). */
+export function readProposalBlock(body) {
+  const m = /<!-- c4n-proposal (\{.*?\}) -->/.exec(String(body ?? ''));
+  try {
+    return m ? JSON.parse(m[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function prBody(book, branch, data, base) {
   const parts = [
     '### Summary',
     '',
@@ -310,6 +334,7 @@ function prBody(book, branch, data) {
     '',
     `_proposed with the in-site editor. Review **Files changed**, then merge into \`${branch}\` or close._`,
   );
+  if (base) parts.push('', proposalBlock(base, data));
   return parts.join('\n');
 }
 
@@ -441,7 +466,7 @@ async function openPullRequest(book, token, left, current, newText, data, tag) {
 
     const pr = await gh(`/repos/${repo}/pulls`, token, left, {
       method: 'POST',
-      body: { title: prTitle(data), head: branch, base: current.branch, body: prBody(book, current.branch, data) },
+      body: { title: prTitle(data), head: branch, base: current.branch, body: prBody(book, current.branch, data, current.commit) },
     });
     if (!pr.ok) throw await fail('open pull request', pr);
     const opened = await fieldsOf(pr, ['html_url', 'number']);
@@ -502,6 +527,39 @@ async function fileFallbackIssue(book, token, left, current, data) {
 // Handler
 // ---------------------------------------------------------------------------
 
+/**
+ * GET ?path=…&pending=1: the open proposals on this page, for the reader's editor
+ * ("1 pending change on this paragraph"). Each is { paragraph, original, url }:
+ * `original` the key of the text it replaced (textKey), or null for a proposal made
+ * before the block existed (then only its ¶ number, from **Where:**). Cached at the
+ * edge for a minute: one GitHub call per page a minute at most.
+ */
+async function pending(res, book, path, tag) {
+  const credential = await CREDENTIALS.acquire(book, tag);
+  if (!credential.ok) {
+    send(res, 200, { pending: [] });
+    return;
+  }
+  try {
+    const list = await gh(`/repos/${book.content.repo}/pulls?state=open&base=${encodePath(baseBranch(book))}&per_page=100`, credential.token, budget(8_000));
+    if (!list.ok) throw new Error(`pulls ${list.status}`);
+    const out = [];
+    for (const pr of await list.json()) {
+      if (!(pr.labels ?? []).some((l) => l.name === 'proposed-edit')) continue;
+      const block = readProposalBlock(pr.body);
+      const file = block?.path ?? /^\*\*File:\*\* \[`([^`\n]+)`\]/m.exec(String(pr.body ?? ''))?.[1];
+      if (file !== path) continue;
+      const where = /^\*\*Where:\*\* ¶(\d+)/m.exec(String(pr.body ?? ''))?.[1];
+      out.push({ paragraph: block ? block.paragraph ?? null : where ? Number(where) : null, original: block?.original ?? null, url: pr.html_url });
+    }
+    res.setHeader('Cache-Control', 'public, s-maxage=60');
+    send(res, 200, { pending: out });
+  } catch (err) {
+    console.warn(`pending: ${err.message} ${tag}`);
+    send(res, 200, { pending: [] }); // only a notice: never in the reader's way
+  }
+}
+
 async function handleGet(req, res, book, tag) {
   const params = new URL(req.url ?? '/', 'https://local.invalid').searchParams;
   const path = asString(params.get('path'));
@@ -509,6 +567,7 @@ async function handleGet(req, res, book, tag) {
     send(res, 400, { error: 'validation: path rejected', userMessage: 'We could not tell which page this is.' });
     return;
   }
+  if (params.get('pending') === '1') return pending(res, book, path, tag);
   // Kept ahead (scripts/refresh.mjs; a send to drafts forgets the pages it changed).
   const kept = await ahead(cacheKeys.source(book.content.repo, baseBranch(book), path), 0, null);
   if (kept) {
