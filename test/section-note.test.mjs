@@ -59,7 +59,7 @@ const ANCHOR = {
 };
 
 test('an anchored note: the paragraph quoted with the words in bold, inert, and the anchor in a comment', async () => {
-  const r = await call({ body: { ...NOTE, anchor: ANCHOR } });
+  const r = await call({ body: { ...NOTE, note: true, anchor: ANCHOR } });
   assert.equal(r.status, 201);
   assert.deepEqual(r.issue.labels, ['suggested-edit', 'needs-triage', 'section-note']);
   const body = r.issue.body;
@@ -92,4 +92,15 @@ test('an anchor cannot close its HTML comment early', async () => {
   const tail = r.issue.body.slice(r.issue.body.indexOf('<!-- c4n-anchor'));
   assert.equal(tail.indexOf('-->'), tail.length - 3);
   assert.equal(JSON.parse(tail.match(/<!-- c4n-anchor (.*) -->/)[1]).exact, 'a situation --> <b>x</b>');
+});
+
+test('an anchored suggestion keeps the text it started from in its fence (the review replaces it), then the quoted paragraph', async () => {
+  const r = await call({ body: { ...NOTE, quote: 'a situation', suggestion: 'a case', anchor: ANCHOR } });
+  const body = r.issue.body;
+  assert.ok(body.indexOf('```text\na situation\n```') < body.indexOf('> Consider **a situation**'), body);
+  const { parseSuggestion } = await import('../lib/author-console.mjs');
+  const s = parseSuggestion({ ...r.issue, number: 1, state: 'open', labels: r.issue.labels.map((name) => ({ name })) });
+  assert.equal(s.original, 'a situation');
+  const n = await call({ body: { ...NOTE, note: true, anchor: ANCHOR } });
+  assert.equal(parseSuggestion({ ...n.issue, number: 2, state: 'open', labels: n.issue.labels.map((name) => ({ name })) }).original, '');
 });

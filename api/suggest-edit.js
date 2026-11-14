@@ -21,6 +21,8 @@
  *                 <= 2000), prefix and suffix (<= 64 each, ~32 either side), text
  *                 (the starting paragraph's whole text, <= 5000), commit (the
  *                 book commit the page was built from, hex, or ""). Malformed: dropped.
+ *     note        true when it's a comment, not a change to the words: the quote then
+ *                 isn't written as the text the suggestion started from.
  *   and gets the label `section-note`. A body without them is a note on the page,
  *   as before. Any note may carry `identity` (the in-site editor's GitHub sign-in,
  *   /api/github-auth): if it is genuine and for this book, the issue names the
@@ -159,6 +161,7 @@ function validate(body) {
     data.quote = quote.length > MAX_QUOTE ? `${quote.slice(0, MAX_QUOTE - 1)}…` : quote;
     const anchor = readAnchor(body.anchor, paragraph);
     if (anchor) data.anchor = anchor;
+    if (body.note === true) data.note = true;
   }
   return { ok: true, data };
 }
@@ -205,17 +208,19 @@ export const anchorComment = (anchor) => `<!-- c4n-anchor ${JSON.stringify(ancho
 /** The paragraph's permalink on the book's own domain: the page's path, then #p<n>. */
 export const paragraphUrl = (book, page, n) => `https://${book.site.domain}${page}#p${n}`;
 
-function buildIssueBody(book, { name, suggestion, reasoning, path, paragraph, page, quote, anchor, identity }) {
+function buildIssueBody(book, { name, suggestion, reasoning, path, paragraph, page, quote, anchor, note, identity }) {
   const f = fence(suggestion);
   const parts = [`**File:** [\`${path}\`](${fileUrl(book, path)})`];
   if (paragraph) {
     const span = anchor && anchor.end > anchor.start ? `¶${paragraph}–${anchor.end}` : `¶${paragraph}`;
     parts.push(`**Where:** [${span}](${paragraphUrl(book, page, paragraph)})`);
-    if (anchor) parts.push('', ...anchoredQuote(anchor));
-    else if (quote) {
+    // The fence is the text a suggestion started from (lib/author-console originalOf):
+    // an anchored note has the paragraph quoted instead, and no fence.
+    if (quote && !(anchor && note)) {
       const qf = fence(quote);
       parts.push('', `${qf}text`, quote, qf);
     }
+    if (anchor) parts.push('', ...anchoredQuote(anchor));
   }
   parts.push(
     '',

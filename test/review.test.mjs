@@ -118,3 +118,27 @@ test('the author\'s paragraph edits with the ticks, in one text; ticks inside an
   // Only edits: fine.
   assert.equal(applyEdits(v, [], [{ at: 3, end: 4, orig: P[3], text: 'Birds sing.' }]).text, BASE.replace('Birds sing in the morning.', 'Birds sing.'));
 });
+
+test('an anchored note sits on its words; repeated words are told apart by the words around them', async () => {
+  const { reanchor, anchorOf } = await import('../lib/review.mjs');
+  const text = 'The cat sat on the mat, and the cat sat still.';
+  const P = ['# T\n\n', 'Dogs bark at night.\n\n', `${text}\n\n`, 'Birds *sing* at dawn.\n'];
+  const note = (a) => ({ number: 9, who: 'A', note: true, quote: '', suggestion: 'Which cat?', original: '', url: '', anchor: { start: 2, end: 2, text, ...a } });
+  const v = buildReview(P.join(''), { issues: [note({ exact: 'the cat sat', prefix: 'on the mat, and ', suffix: ' still.' })] });
+  assert.deepEqual(v.notes[0], { item: 'i9', at: 2, nth: 1, text: 'Which cat?', quote: 'the cat sat', anchored: true });
+  // Once in the paragraph: no context needed. Markdown inside doesn't matter.
+  assert.deepEqual(reanchor(P, { exact: 'sing at', prefix: 'Birds ', suffix: ' dawn.', text: 'Birds sing at dawn.' }), { at: 3, nth: 0 });
+  // Moved to another paragraph, still with its context: found on the page.
+  const moved = ['Intro.\n\n', 'Elsewhere: on the mat, and the cat sat still.\n'];
+  assert.deepEqual(reanchor(moved, { exact: 'the cat sat', prefix: 'on the mat, and ', suffix: ' still.', text: 'Something else entirely here.' }), { at: 1, nth: 0 });
+  // Repeated, with the context gone: not put on either.
+  const vague = buildReview('The cat sat. Then the cat sat again.\n', { issues: [note({ exact: 'the cat sat', prefix: 'mat, and ', suffix: ' still.' })] });
+  assert.equal(vague.notes[0].at, -1);
+  // The words are gone: changed, with the snapshot.
+  const gone = buildReview('Dogs bark at night.\n', { issues: [note({ exact: 'the cat sat', prefix: 'on the mat, and ', suffix: ' still.' })] });
+  assert.deepEqual(gone.notes[0], { item: 'i9', at: -1, text: 'Which cat?', quote: 'the cat sat', changed: { text, exact: 'the cat sat', prefix: 'on the mat, and ' } });
+  // Parsed from the issue body; anything else is no anchor.
+  assert.deepEqual(anchorOf('x\n<!-- c4n-anchor {"start":2,"end":2,"exact":"a -\\u002d b","prefix":"p","suffix":"s","text":"t","commit":""} -->'),
+    { exact: 'a -- b', prefix: 'p', suffix: 's', text: 't', start: 2, end: 2 });
+  for (const bad of ['', '<!-- c4n-anchor {bad} -->', '<!-- c4n-anchor {"exact":""} -->']) assert.equal(anchorOf(bad), null);
+});
