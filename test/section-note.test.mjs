@@ -61,8 +61,17 @@ const ANCHOR = {
 test('an anchored note: the paragraph quoted with the words in bold, inert, and the anchor in a comment', async () => {
   const r = await call({ body: { ...NOTE, note: true, anchor: ANCHOR } });
   assert.equal(r.status, 201);
-  assert.deepEqual(r.issue.labels, ['suggested-edit', 'needs-triage', 'section-note']);
+  // A note, not a suggested edit: labelled, titled, headed and signed as one.
+  assert.deepEqual(r.issue.labels, ['needs-triage', 'section-note']);
+  assert.equal(r.issue.title, 'Note on ¶4: chapters/chapter-03.md');
   const body = r.issue.body;
+  assert.ok(body.includes('### Comment\n') && !body.includes('### Suggested edit'), body);
+  assert.ok(body.includes('_sent with the note-to-the-authors form_') && !body.includes('suggest-an-edit form'), body);
+  // The author site still reads it, as a note with its comment.
+  const { parseSuggestion } = await import('../lib/author-console.mjs');
+  const s = parseSuggestion({ number: 1, title: r.issue.title, body, labels: r.issue.labels.map((name) => ({ name })), state: 'open' });
+  assert.equal(s.suggestion, NOTE.suggestion);
+  assert.equal(s.original, '');
   assert.ok(body.includes(`**Where:** [¶4](https://${DEFAULT_BOOK.site.domain}/chapters/chapter-03#p4)`), body);
   assert.ok(body.includes('> Consider **a situation** that will be familiar to @&#8203;everyone &#91;here&#93;&#40;x&#41;&#46;'), body);
   assert.ok(!body.includes('```text\nConsider'), 'the anchor replaces the fenced quote');

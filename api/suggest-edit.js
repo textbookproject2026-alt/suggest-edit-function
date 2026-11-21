@@ -210,6 +210,8 @@ export const paragraphUrl = (book, page, n) => `https://${book.site.domain}${pag
 
 function buildIssueBody(book, { name, suggestion, reasoning, path, paragraph, page, quote, anchor, note, identity }) {
   const f = fence(suggestion);
+  // A note (note: true) is a comment on the words, not a change: its text goes under
+  // "### Comment", and it is labelled and signed as a note (lib/author-console reads both).
   const parts = [`**File:** [\`${path}\`](${fileUrl(book, path)})`];
   if (paragraph) {
     const span = anchor && anchor.end > anchor.start ? `¶${paragraph}–${anchor.end}` : `¶${paragraph}`;
@@ -224,7 +226,7 @@ function buildIssueBody(book, { name, suggestion, reasoning, path, paragraph, pa
   }
   parts.push(
     '',
-    '### Suggested edit',
+    note ? '### Comment' : '### Suggested edit',
     '',
     `${f}text`,
     suggestion,
@@ -245,7 +247,7 @@ function buildIssueBody(book, { name, suggestion, reasoning, path, paragraph, pa
     // decision workflow can @mention them). Otherwise the name, in a code span.
     `**Submitted by:** ${identity ? `@${identity.login} (signed in with GitHub)` : inlineCode(name)}`,
     '',
-    '_submitted via the suggest-an-edit form_',
+    note ? '_sent with the note-to-the-authors form_' : '_submitted via the suggest-an-edit form_',
   );
   if (anchor) parts.push('', anchorComment(anchor));
 
@@ -258,7 +260,8 @@ function buildIssueBody(book, { name, suggestion, reasoning, path, paragraph, pa
 
 /** @returns {Promise<string>} the html_url of the new issue. */
 async function createIssue(book, token, data) {
-  const labels = data.paragraph ? [...LABELS, 'section-note'] : LABELS;
+  // A note is a note, not a suggested edit: needs-triage and section-note only.
+  const labels = data.note ? ['needs-triage', 'section-note'] : data.paragraph ? [...LABELS, 'section-note'] : LABELS;
   const res = await withLabels(book.content.repo, token, LABEL_DEFAULTS, () => githubFetch(`/repos/${book.content.repo}/issues`, {
     token,
     method: 'POST',
