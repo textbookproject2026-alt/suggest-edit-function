@@ -509,7 +509,7 @@ test('the PR records its base (the drafts commit the edit was made on) and the r
   assert.match(gh.pulls[0].body, /\n<!-- c4n-proposal \{.*\} -->$/);
 });
 
-test('GET ?pending=1: open proposals on this page, by the replaced text\'s key or (older ones) ¶ number; cached a minute', async () => {
+test('GET ?pending=1: open proposals on this page, by the replaced text\'s key or (older ones) ¶ number; never cached', async () => {
   resetGitHub();
   const block = (o) => `x\n\n<!-- c4n-proposal ${JSON.stringify(o)} -->`;
   gh.open = [
@@ -522,5 +522,5 @@ test('GET ?pending=1: open proposals on this page, by the replaced text\'s key o
   delete gh.open;
   assert.equal(r.statusCode, 200);
   assert.deepEqual(r.payload.pending, [{ paragraph: 2, original: 'abc', url: 'u1' }, { paragraph: 3, original: null, url: 'u2' }]);
-  assert.match(r.headers['cache-control'], /s-maxage=60/);
+  assert.equal(r.headers['cache-control'], 'no-store');
 });

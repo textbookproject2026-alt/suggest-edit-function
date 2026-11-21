@@ -531,8 +531,9 @@ async function fileFallbackIssue(book, token, left, current, data) {
  * GET ?path=…&pending=1: the open proposals on this page, for the reader's editor
  * ("1 pending change on this paragraph"). Each is { paragraph, original, url }:
  * `original` the key of the text it replaced (textKey), or null for a proposal made
- * before the block existed (then only its ¶ number, from **Where:**). Cached at the
- * edge for a minute: one GitHub call per page a minute at most.
+ * before the block existed (then only its ¶ number, from **Where:**). Never cached:
+ * a reader who has just proposed reloads and opens the editor within the minute an
+ * edge copy would last, and must see their own proposal (one GitHub call per open).
  */
 async function pending(res, book, path, tag) {
   const credential = await CREDENTIALS.acquire(book, tag);
@@ -552,7 +553,7 @@ async function pending(res, book, path, tag) {
       const where = /^\*\*Where:\*\* ¶(\d+)/m.exec(String(pr.body ?? ''))?.[1];
       out.push({ paragraph: block ? block.paragraph ?? null : where ? Number(where) : null, original: block?.original ?? null, url: pr.html_url });
     }
-    res.setHeader('Cache-Control', 'public, s-maxage=60');
+    res.setHeader('Cache-Control', 'no-store');
     send(res, 200, { pending: out });
   } catch (err) {
     console.warn(`pending: ${err.message} ${tag}`);
