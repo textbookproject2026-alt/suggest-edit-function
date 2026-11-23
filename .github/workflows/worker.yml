@@ -76,7 +76,7 @@ jobs:
 
       # A pull request: against main, in this job on this runner. main is checked out
       # beside it and both are measured with this branch's bench (main's own fixtures),
-      # three times each, taking turns which goes first; per endpoint the median of the
+      # five times each, taking turns which goes first; per endpoint the median of the
       # runs. More than 15% slower than main fails (scripts/cpu-compare.mjs). The
       # absolute figures are printed from the first run, as warnings.
       - uses: actions/checkout@v6
@@ -86,7 +86,7 @@ jobs:
           path: base
           persist-credentials: false
 
-      - name: CPU against main (same runner, 3 runs each, more than 15% slower fails)
+      - name: CPU against main (same runner, 5 runs each, more than 15% slower fails)
         if: github.event_name == 'pull_request'
         run: |
           set -euo pipefail
@@ -98,11 +98,11 @@ jobs:
             BENCH_WARN_ONLY=1 BENCH_OUT="$RUNNER_TEMP/head$1.json" node scripts/cpu-bench.mjs "${CPU_BUDGET_MS:-7}" | grep -v '^config:' > "$out"
           }
           main() { (cd base && BENCH_WARN_ONLY=1 BENCH_OUT="$RUNNER_TEMP/base$1.json" node scripts/cpu-bench.mjs > /dev/null); }
-          for i in 1 2 3; do
+          for i in 1 2 3 4 5; do
             if [ $((i % 2)) = 1 ]; then pr $i; main $i; else main $i; pr $i; fi
           done
-          node scripts/cpu-compare.mjs "$RUNNER_TEMP/base1.json,$RUNNER_TEMP/base2.json,$RUNNER_TEMP/base3.json" \
-            "$RUNNER_TEMP/head1.json,$RUNNER_TEMP/head2.json,$RUNNER_TEMP/head3.json"
+          list() { printf "$RUNNER_TEMP/$1%s.json," 1 2 3 4 5 | sed 's/,$//'; }
+          node scripts/cpu-compare.mjs "$(list base)" "$(list head)"
 
       - name: Find the account, the KV namespace and the D1 database
         id: cf
