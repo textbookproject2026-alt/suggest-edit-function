@@ -413,5 +413,15 @@ if (mode === '--ref') {
     if (process.env.GITHUB_ACTIONS) console.log(`::warning title=CPU over ${BUDGET} ms (est. Cloudflare)::${list(warn)}`);
   }
   console.log(over.length ? `${over.length} over ${FAIL} ms (or failed): ${list(over)}` : `None over ${FAIL} ms.`);
-  process.exitCode = over.length ? 1 : 0;
+  // BENCH_OUT=<file>: every endpoint's figures, in Cloudflare ms, for scripts/cpu-compare.mjs.
+  if (process.env.BENCH_OUT) {
+    writeFileSync(process.env.BENCH_OUT, JSON.stringify(results.map((r) => ({ key: `${r.slug} ${r.name}`, first: cf(r.first), warm: cf(r.warm) }))));
+  }
+  // BENCH_WARN_ONLY=1 (registry deploys, pushes; a pull request is compared with main
+  // instead): over FAIL only warns. An endpoint that answered 5xx still fails.
+  const failed = over.filter((r) => r.status >= 500 && r.status !== r.expect);
+  if (process.env.BENCH_WARN_ONLY === '1' && over.length > failed.length) {
+    if (process.env.GITHUB_ACTIONS) console.log(`::warning title=CPU over ${FAIL} ms (est. Cloudflare, warning only)::${list(over)}`);
+    process.exitCode = failed.length ? 1 : 0;
+  } else process.exitCode = over.length ? 1 : 0;
 }

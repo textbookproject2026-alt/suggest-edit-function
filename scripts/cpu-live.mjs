@@ -126,6 +126,14 @@ async function main() {
     const POLL = /^(curl|node|undici|python|Wget|-)/i;
     table(Date.parse(process.env.SPLIT), `since ${process.env.SPLIT}, /api/health without polling`, (l, x) => l === '/api/health' && POLL.test(x[4] ?? '-'));
   }
+  // The alarm (cpu-live.yml, daily): any request Cloudflare stopped for CPU fails the run.
+  // No invocations at all means the query is broken (the crons alone run every 5 minutes).
+  const stopped = [...byLabel].flatMap(([l, xs]) => xs.filter((x) => x[2] === 'exceededCpu').map((x) => `${new Date(x[0]).toISOString()} ${l} cpu=${x[1]}`));
+  if (stopped.length || !n) {
+    const why = n ? `${stopped.length} request(s) stopped for CPU (error 1102): ${stopped.join('; ')}` : 'no invocations read from Cloudflare';
+    console.log(`::error title=c4n-api CPU alarm::${why}`);
+    process.exitCode = 1;
+  } else console.log(`== no request stopped for CPU (error 1102) in ${n} invocations`);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) await main();
