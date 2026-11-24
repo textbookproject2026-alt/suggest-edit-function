@@ -4,7 +4,8 @@
  * endpoint the median of the runs' first-request figures (est. Cloudflare ms, each run
  * scaled by its own reference workload, so a runner that drifts moves both alike).
  * Exits 1 if any endpoint is more than LIMIT (default 15%) slower than on main.
- * Endpoints main doesn't have are listed, not compared.
+ * Endpoints main doesn't have, or answers with another status (another code path:
+ * main's 503 hand-off against this branch's work, say), are listed, not compared.
  *
  *   node scripts/cpu-compare.mjs base1.json,base2.json,… head1.json,head2.json,…
  */
@@ -19,9 +20,11 @@ export function compare(baseRuns, headRuns, limit = LIMIT) {
     for (const run of runs) for (const r of run) m.set(r.key, [...(m.get(r.key) ?? []), r.first]);
     return new Map([...m].map(([k, xs]) => [k, median(xs)]));
   };
+  const status = (runs) => new Map(runs.flat().map((r) => [r.key, r.status]));
   const base = per(baseRuns);
+  const [baseStatus, headStatus] = [status(baseRuns), status(headRuns)];
   return [...per(headRuns)].map(([key, head]) => {
-    const was = base.get(key);
+    const was = baseStatus.get(key) === headStatus.get(key) ? base.get(key) : undefined;
     const change = was ? head / was - 1 : null;
     return { key, base: was ?? null, head, change, slower: change !== null && change > limit };
   });

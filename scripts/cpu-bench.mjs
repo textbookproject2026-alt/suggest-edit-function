@@ -177,9 +177,11 @@ async function cases(slug) {
     out.push({ name: 'author-act[suggestion-decline]', member: true, method: 'POST', url: '/api/author-act', body: JSON.stringify({ book: slug, action: 'suggestion-decline', number: meta.suggestion, reason: 'A measured decline, never sent.' }), write: true });
   }
   if (meta.proposal) {
-    // Accepting a reader's edit the drafts have moved under: on the Worker, handed to the
-    // Actions fallback (503) before any merging, which costs more CPU than it has.
-    out.push({ name: 'author-act[change-accept]', member: true, method: 'POST', url: '/api/author-act', body: JSON.stringify({ book: slug, action: 'change-accept', number: meta.proposal }), write: true, expect: 503 });
+    // Accepting a reader's edit the drafts have moved under: merged again word by word and
+    // merged, inline (until 24 Nov a 503 to the Actions fallback, name "[change-accept]").
+    // expect 503: a pull request's job runs this bench on main's code too, which may be
+    // older; cpu-compare doesn't compare an endpoint whose answer differs from main's.
+    out.push({ name: 'author-act[change-accept-merge]', member: true, method: 'POST', url: '/api/author-act', body: JSON.stringify({ book: slug, action: 'change-accept', number: meta.proposal }), write: true, expect: 503 });
   }
   if (meta.reviewProposal) {
     // The same review, one proposal of it read in full (the page asks for each on its own).
@@ -415,7 +417,7 @@ if (mode === '--ref') {
   console.log(over.length ? `${over.length} over ${FAIL} ms (or failed): ${list(over)}` : `None over ${FAIL} ms.`);
   // BENCH_OUT=<file>: every endpoint's figures, in Cloudflare ms, for scripts/cpu-compare.mjs.
   if (process.env.BENCH_OUT) {
-    writeFileSync(process.env.BENCH_OUT, JSON.stringify(results.map((r) => ({ key: `${r.slug} ${r.name}`, first: cf(r.first), warm: cf(r.warm) }))));
+    writeFileSync(process.env.BENCH_OUT, JSON.stringify(results.map((r) => ({ key: `${r.slug} ${r.name}`, status: r.status, first: cf(r.first), warm: cf(r.warm) }))));
   }
   // BENCH_WARN_ONLY=1 (registry deploys, pushes; a pull request is compared with main
   // instead): over FAIL only warns. An endpoint that answered 5xx still fails.

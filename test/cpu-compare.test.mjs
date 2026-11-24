@@ -15,3 +15,12 @@ test('cpu-compare: median of the runs per endpoint, more than 15% slower is flag
   assert.equal(rows.c.base, null); // new endpoint: listed, not compared
   assert.equal(rows.c.slower, false);
 });
+
+test('cpu-compare: an endpoint main answers with another status is listed, not compared', () => {
+  const base = [[{ key: 'accept', status: 503, first: 1, warm: 1 }, { key: 'read', status: 200, first: 5, warm: 1 }]];
+  const head = [[{ key: 'accept', status: 200, first: 12, warm: 2 }, { key: 'read', status: 200, first: 6, warm: 1 }]];
+  const rows = Object.fromEntries(compare(base, head).map((r) => [r.key, r]));
+  assert.equal(rows.accept.base, null);
+  assert.equal(rows.accept.slower, false);
+  assert.equal(rows.read.slower, true); // 5 -> 6, +20%, same answer: compared
+});
