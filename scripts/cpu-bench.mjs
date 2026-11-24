@@ -179,7 +179,8 @@ async function cases(slug) {
   if (meta.proposal) {
     // Accepting a reader's edit the drafts have moved under: merged again word by word and
     // merged, inline (until 24 Nov a 503 to the Actions fallback, name "[change-accept]").
-    // expect 503: a pull request's job runs this bench on main's code too, which may be older.
+    // expect 503: a pull request's job runs this bench on main's code too, which may be
+    // older; cpu-compare doesn't compare an endpoint whose answer differs from main's.
     out.push({ name: 'author-act[change-accept-merge]', member: true, method: 'POST', url: '/api/author-act', body: JSON.stringify({ book: slug, action: 'change-accept', number: meta.proposal }), write: true, expect: 503 });
   }
   if (meta.reviewProposal) {
@@ -416,7 +417,7 @@ if (mode === '--ref') {
   console.log(over.length ? `${over.length} over ${FAIL} ms (or failed): ${list(over)}` : `None over ${FAIL} ms.`);
   // BENCH_OUT=<file>: every endpoint's figures, in Cloudflare ms, for scripts/cpu-compare.mjs.
   if (process.env.BENCH_OUT) {
-    writeFileSync(process.env.BENCH_OUT, JSON.stringify(results.map((r) => ({ key: `${r.slug} ${r.name}`, first: cf(r.first), warm: cf(r.warm) }))));
+    writeFileSync(process.env.BENCH_OUT, JSON.stringify(results.map((r) => ({ key: `${r.slug} ${r.name}`, status: r.status, first: cf(r.first), warm: cf(r.warm) }))));
   }
   // BENCH_WARN_ONLY=1 (registry deploys, pushes; a pull request is compared with main
   // instead): over FAIL only warns. An endpoint that answered 5xx still fails.
