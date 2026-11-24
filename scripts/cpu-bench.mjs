@@ -179,7 +179,8 @@ async function cases(slug) {
   if (meta.proposal) {
     // Accepting a reader's edit the drafts have moved under: merged again word by word and
     // merged, inline (until 24 Nov a 503 to the Actions fallback, name "[change-accept]").
-    out.push({ name: 'author-act[change-accept-merge]', member: true, method: 'POST', url: '/api/author-act', body: JSON.stringify({ book: slug, action: 'change-accept', number: meta.proposal }), write: true });
+    // expect 503: a pull request's job runs this bench on main's code too, which may be older.
+    out.push({ name: 'author-act[change-accept-merge]', member: true, method: 'POST', url: '/api/author-act', body: JSON.stringify({ book: slug, action: 'change-accept', number: meta.proposal }), write: true, expect: 503 });
   }
   if (meta.reviewProposal) {
     // The same review, one proposal of it read in full (the page asks for each on its own).
