@@ -9,7 +9,7 @@
  *
  *   node scripts/cpu-compare.mjs base1.json,base2.json,… head1.json,head2.json,…
  */
-import { readFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 
 const LIMIT = Number(process.env.CPU_COMPARE_LIMIT ?? 0.15);
 
@@ -26,7 +26,9 @@ export function compare(baseRuns, headRuns, limit = LIMIT) {
   return [...per(headRuns)].map(([key, head]) => {
     const was = baseStatus.get(key) === headStatus.get(key) ? base.get(key) : undefined;
     const change = was ? head / was - 1 : null;
-    return { key, base: was ?? null, head, change, slower: change !== null && change > limit };
+    const skipped = !base.has(key) ? 'not on main'
+      : was === undefined ? `answer differs: main ${baseStatus.get(key)}, PR ${headStatus.get(key)}` : null;
+    return { key, base: was ?? null, head, change, slower: change !== null && change > limit, skipped };
   });
 }
 
@@ -42,5 +44,17 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const list = slower.map((r) => `${r.key} ${f(r.base)} -> ${f(r.head)} (+${(r.change * 100).toFixed(0)}%)`).join('; ');
   console.log(slower.length ? `${slower.length} more than ${LIMIT * 100}% slower than main: ${list}` : `None more than ${LIMIT * 100}% slower than main.`);
   if (slower.length && process.env.GITHUB_ACTIONS) console.log(`::error title=CPU more than ${LIMIT * 100}% slower than main::${list}`);
+  // The job summary, so a skipped endpoint (not compared at all) is seen without opening the log.
+  const skipped = rows.filter((r) => r.skipped);
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    appendFileSync(process.env.GITHUB_STEP_SUMMARY, [
+      '### CPU against main',
+      slower.length ? `**${slower.length} more than ${LIMIT * 100}% slower:** ${list}` : `None more than ${LIMIT * 100}% slower than main (${rows.length - skipped.length} compared).`,
+      '',
+      skipped.length ? `**Skipped, not compared (${skipped.length}):**\n\n| endpoint | why | PR ms |\n|---|---|---|\n${skipped.map((r) => `| \`${r.key}\` | ${r.skipped} | ${f(r.head)} |`).join('\n')}` : 'Skipped: none.',
+      '',
+    ].join('\n'));
+  }
+  if (skipped.length && process.env.GITHUB_ACTIONS) console.log(`::warning title=${skipped.length} endpoint(s) not compared with main::${skipped.map((r) => `${r.key} (${r.skipped})`).join('; ')}`);
   process.exitCode = slower.length ? 1 : 0;
 }

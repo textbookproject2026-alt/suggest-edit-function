@@ -32,6 +32,8 @@ export const isWrite = (method, path) => method === 'POST' && WRITES.has(path);
 export const KEY_RE = /^[A-Za-z0-9_-]{16,64}$/;
 /** The Worker's five-minute schedule, exactly as in wrangler.toml (test/writes.test.mjs checks). */
 export const EVERY_FIVE = '1-59/5 * * * *';
+/** cpu-live.yml's four slots, started by the Worker (GitHub drops most of this repo's schedules). As in wrangler.toml. */
+export const CPU_LIVE = '23 0,6,12,18 * * *';
 
 /** Where the write-fallback workflow lives; the App starts it with a repository_dispatch. */
 export const FALLBACK_REPO = process.env.FALLBACK_REPO || 'textbookproject2026-alt/suggest-edit-function';
@@ -195,6 +197,12 @@ export async function refreshIfStale(cache, start = (t, p) => testing.dispatchEv
   if (now - (Number(beat?.at) || 0) < 15 * 60_000) return false;
   await start('book-built', {}); // no slug: every book, and the heartbeat
   return true;
+}
+
+/** At CPU_LIVE: start cpu-live.yml (repository_dispatch c4n-cpu-live), as write-fallback is started. Its GitHub schedule stays as the backup. */
+export async function startCpuLive(start = (t, p) => testing.dispatchEvent(t, p)) {
+  await start('c4n-cpu-live', {});
+  return 'cpu-live started';
 }
 
 // As scripts/fallback.mjs: a claimed write whose run died is taken again after this.

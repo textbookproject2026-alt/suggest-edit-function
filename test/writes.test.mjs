@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fakeD1 } from './fake-d1.mjs';
 
-const { write, writeStatus, health, isWrite, testing, EVERY_FIVE } = await import('../worker/writes.mjs');
+const { write, writeStatus, health, isWrite, testing, EVERY_FIVE, CPU_LIVE } = await import('../worker/writes.mjs');
 const { runOne } = await import('../scripts/fallback.mjs');
 const { serve } = await import('../worker/adapter.mjs');
 const { platform } = await import('../lib/platform.mjs');
@@ -275,7 +275,24 @@ test('the five-minute cron starts the refresh only when its heartbeat is over 15
 test('the handler matches the schedules in wrangler.toml exactly', async () => {
   const { readFileSync } = await import('node:fs');
   const crons = JSON.parse(readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8').match(/^crons = (\[.*\])/m)[1]);
-  assert.deepEqual(crons, ['17 3 * * *', EVERY_FIVE]);
+  assert.deepEqual(crons, ['17 3 * * *', EVERY_FIVE, CPU_LIVE]);
+});
+
+test('at the cpu-live slots the Worker starts cpu-live.yml, recorded for /api/health', async () => {
+  const db = fakeD1();
+  const asked = [];
+  const was = testing.dispatchEvent;
+  testing.dispatchEvent = async (t, p) => { asked.push([t, p]); };
+  try {
+    assert.equal(await worker.scheduled({ cron: CPU_LIVE }, { DB: db }), 'cpu-live started');
+  } finally {
+    testing.dispatchEvent = was;
+  }
+  assert.deepEqual(asked, [['c4n-cpu-live', {}]]);
+  const { readFileSync } = await import('node:fs');
+  assert.match(readFileSync(new URL('../.github/workflows/cpu-live.yml', import.meta.url), 'utf8'), /repository_dispatch:\n\s+types: \[c4n-cpu-live\]/);
+  const { cron } = await (await health(db)).json();
+  assert.equal(cron[CPU_LIVE].detail, 'cpu-live started');
 });
 
 test('every cron run logs its start and end and is recorded for /api/health', async () => {

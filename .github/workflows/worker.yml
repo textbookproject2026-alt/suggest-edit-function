@@ -127,6 +127,8 @@ jobs:
           set -euo pipefail
           npx -y "$WRANGLER" d1 migrations apply c4n-api --remote
           npx -y "$WRANGLER" deploy
+          # The crons again on their own (wrangler.toml [triggers]), so a schedule change shows in the log.
+          npx -y "$WRANGLER" triggers deploy
 
       - name: Wait for api.confused4now.org to serve this commit
         if: steps.cf.outputs.ready
