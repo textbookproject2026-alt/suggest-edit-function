@@ -1,12 +1,13 @@
 # c4n-api's live CPU time per endpoint (scripts/cpu-live.mjs): P50/P95/P99/max from
 # Cloudflare, and the endpoints whose P99 is over 7 ms. Also the CPU alarm: it fails
 # (and GitHub emails the maintainer) when Cloudflare stopped any request for CPU
-# (error 1102). Daily, over the last two days, so a late-starting run leaves no gap.
+# (error 1102). Over the last two days, so a late-starting run leaves no gap. Four slots a
+# day because GitHub drops most of this repo's scheduled runs (refresh's */15 fires ~2x/day).
 name: cpu-live
 
 on:
   schedule:
-    - cron: '23 6 * * *'
+    - cron: '23 0,6,12,18 * * *'
   workflow_dispatch:
     inputs:
       days:
