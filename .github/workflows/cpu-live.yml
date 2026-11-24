@@ -2,12 +2,16 @@
 # Cloudflare, and the endpoints whose P99 is over 7 ms. Also the CPU alarm: it fails
 # (and GitHub emails the maintainer) when Cloudflare stopped any request for CPU
 # (error 1102). Over the last two days, so a late-starting run leaves no gap. Four slots a
-# day because GitHub drops most of this repo's scheduled runs (refresh's */15 fires ~2x/day).
+# day, started by the Worker's own cron (repository_dispatch c4n-cpu-live, worker/writes.mjs
+# startCpuLive), because GitHub drops most of this repo's scheduled runs (refresh's */15
+# fires ~2x/day). The GitHub schedule stays as the backup.
 name: cpu-live
 
 on:
   schedule:
     - cron: '23 0,6,12,18 * * *'
+  repository_dispatch:
+    types: [c4n-cpu-live]
   workflow_dispatch:
     inputs:
       days:
@@ -36,6 +40,6 @@ jobs:
       - run: node scripts/cpu-live.mjs 7
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_TOKEN }}
-          DAYS: ${{ inputs.days || (github.event_name == 'schedule' && '2') || '7' }}
+          DAYS: ${{ inputs.days || ((github.event_name == 'schedule' || github.event_name == 'repository_dispatch') && '2') || '7' }}
           # On a pull request: since fn #50's deploy (13 Oct), the CPU work.
           SPLIT: ${{ inputs.split || '2026-10-13T17:13:30Z' }}

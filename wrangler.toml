@@ -20,8 +20,9 @@ binding = "VERSION"
 [triggers]
 # Every five minutes, at :01, :06, …: "*/5 * * * *" was registered on 13 Oct but Cloudflare
 # never ran it (0 runs in 5½ hours; a dashboard delete and re-add kept the same schedule).
-# Change it together with EVERY_FIVE in worker/writes.mjs (test/writes.test.mjs checks).
-crons = ["17 3 * * *", "1-59/5 * * * *"] # daily sweep; the write fallback's backstop
+# Change it together with EVERY_FIVE and CPU_LIVE in worker/writes.mjs (test/writes.test.mjs checks).
+# Free plan: 5 cron triggers per account (build-nudge has one).
+crons = ["17 3 * * *", "1-59/5 * * * *", "23 0,6,12,18 * * *"] # daily sweep; the write fallback's backstop; cpu-live
 
 [[kv_namespaces]]
 binding = "TOKENS"

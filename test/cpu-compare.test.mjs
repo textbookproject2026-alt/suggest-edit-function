@@ -24,3 +24,20 @@ test('cpu-compare: an endpoint main answers with another status is listed, not c
   assert.equal(rows.accept.slower, false);
   assert.equal(rows.read.slower, true); // 5 -> 6, +20%, same answer: compared
 });
+
+test('cpu-compare: skipped endpoints are named in the job summary, with why', async () => {
+  const { mkdtempSync, writeFileSync, readFileSync } = await import('node:fs');
+  const { execFileSync } = await import('node:child_process');
+  const { tmpdir } = await import('node:os');
+  const dir = mkdtempSync(`${tmpdir()}/cpu-compare-`);
+  const file = (name, rows) => { writeFileSync(`${dir}/${name}`, JSON.stringify(rows)); return `${dir}/${name}`; };
+  const base = file('base.json', [{ key: 'accept', status: 503, first: 1 }, { key: 'read', status: 200, first: 5 }]);
+  const head = file('head.json', [{ key: 'accept', status: 200, first: 12 }, { key: 'read', status: 200, first: 5 }, { key: 'new', status: 200, first: 2 }]);
+  const summary = `${dir}/summary.md`;
+  execFileSync(process.execPath, ['scripts/cpu-compare.mjs', base, head], { env: { ...process.env, GITHUB_STEP_SUMMARY: summary } });
+  const md = readFileSync(summary, 'utf8');
+  assert.match(md, /Skipped, not compared \(2\)/);
+  assert.match(md, /\| `accept` \| answer differs: main 503, PR 200 \| 12\.00 \|/);
+  assert.match(md, /\| `new` \| not on main \|/);
+  assert.match(md, /None more than 15% slower than main \(1 compared\)/);
+});

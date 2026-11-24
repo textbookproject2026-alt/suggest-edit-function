@@ -13,7 +13,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { platform } from '../lib/platform.mjs';
 import { serve } from './adapter.mjs';
-import { EVERY_FIVE, backstop, health, isWrite, refreshIfStale, sweep, write, writeStatus } from './writes.mjs';
+import { CPU_LIVE, EVERY_FIVE, backstop, health, isWrite, refreshIfStale, startCpuLive, sweep, write, writeStatus } from './writes.mjs';
 
 // Every route is imported here, up front. Cloudflare evaluates this before the first
 // request and doesn't count it in any request's CPU time (measured 11 Oct: a fresh
@@ -172,6 +172,7 @@ export default {
    */
   async scheduled(event, env) {
     if (event.cron === EVERY_FIVE) return periodic(env, event.cron);
+    if (event.cron === CPU_LIVE) return recorded(env, event.cron, () => startCpuLive());
     await recorded(env, event.cron, async () => {
       // Closed windows, and any key that isn't hashed (none since 0004: lib/common.mjs hashKey).
       await env.DB.prepare("DELETE FROM hits WHERE until < ?1 OR k NOT LIKE '%:h:%'").bind(Date.now()).run();
