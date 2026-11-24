@@ -826,7 +826,7 @@ test('three-way accept: a whole-page proposal against a chapter changed since ke
   assert.deepEqual((await overlapOf(m)).map((p) => [p.base, p.current, p.suggested]), [['# Chapter 3: Cats', '# Chapter 3: Felines', '# Chapter Three']]);
 });
 
-test('on the Worker: an accept that has to merge again is left to Actions; the page\'s other proposals too', async () => {
+test('on the Worker: an accept that has to merge again runs there too; the page\'s other proposals go to Actions', async () => {
   const { platform } = await import('../lib/platform.mjs');
   resetBook();
   gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: para3(P1) });
@@ -839,17 +839,90 @@ test('on the Worker: an accept that has to merge again is left to Actions; the p
     const ra = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: a } });
     assert.equal(ra.statusCode, 200, JSON.stringify(ra.payload));
     assert.deepEqual(gh.state.dispatches.filter((d) => d.event_type === 'c4n-proposals').map((d) => d.client_payload), [{ book: BOOK.slug, path: CH3_PATH }]);
-    const head = gh.repo(REPO).refs.get('proposed-edits/wb');
+    // No 503 hand-off before starting (until 24 Nov): merged again word by word, inline.
     const rb = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: b } });
-    assert.equal(rb.statusCode, 503); // the page sends it to the fallback, which has no CPU cap
-    assert.equal(gh.repo(REPO).refs.get('proposed-edits/wb'), head); // nothing merged or written here
+    assert.equal(rb.statusCode, 200, JSON.stringify(rb.payload));
   } finally {
     platform.cpuCapped = false;
   }
-  // The fallback: the same accept, merged word by word, both fixes kept.
-  const rb = await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: b } });
-  assert.equal(rb.statusCode, 200, JSON.stringify(rb.payload));
   assert.equal(gh.textAt(REPO, gh.repo(REPO).refs.get(DRAFTS), CH3_PATH), para3('The cat sat on the mat and looked at the dog.'));
+});
+
+test('Cloudflare stops an accept part-way (1102, after the merge-again commit): the fallback runs it again and it lands once', async () => {
+  const { fakeD1 } = await import('./fake-d1.mjs');
+  const { write, writeStatus, testing, event } = await import('../worker/writes.mjs');
+  const { runOne } = await import('../scripts/fallback.mjs');
+  const { serve } = await import('../worker/adapter.mjs');
+  const { platform } = await import('../lib/platform.mjs');
+  const dispatch = testing.dispatch;
+  testing.dispatch = async () => {}; // never a real write-fallback run
+  resetBook();
+  gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: para3(P1) });
+  const from = gh.repo(REPO).refs.get(DRAFTS);
+  const a = proposal('ka', from, para3('The cat sat on the mat and looked at dog.'));
+  const b = proposal('kb', from, para3('The cat sat on mat and looked at the dog.'));
+  assert.equal((await call(act, { body: { book: BOOK.slug, action: 'change-accept', number: a } })).statusCode, 200);
+
+  const db = fakeD1();
+  const KEY = 'm'.repeat(24);
+  const body = JSON.stringify({ book: BOOK.slug, action: 'change-accept', number: b });
+  const request = (query) => {
+    const url = new URL(`https://api.confused4now.org/api/author-act?write_key=${KEY}${query}`);
+    const headers = { origin: ORIGIN, 'content-type': 'application/json', authorization: `Bearer ${tokenFor(AUTHOR, ORIGIN)}`, 'cf-connecting-ip': '203.0.113.7' };
+    return [new Request(url, { method: 'POST', headers, body }), url];
+  };
+  const merges = () => gh.state.calls.filter((c) => c.method === 'PUT' && c.url.endsWith(`/pulls/${b}/merge`)).length;
+  const branchMoves = () => gh.state.calls.filter((c) => c.method === 'PATCH' && c.url.includes('/git/refs/heads/proposed-edits/kb')).length;
+
+  // Inline on the Worker: the branch is merged again, then Cloudflare stops the request
+  // before the merge (error 1102). Nothing after that point runs, so the key stays 'running'.
+  let stopped = false;
+  gh.state.hooks[`/pulls/${b}/merge`] = ({ method }) => {
+    if (method !== 'PUT' || stopped) return undefined;
+    stopped = true;
+    throw new Error('1102: Worker exceeded CPU time limit');
+  };
+  const platformWas = platform.cpuCapped;
+  platform.cpuCapped = true;
+  try {
+    const [r, u] = request('');
+    await assert.rejects(write(r, '/api/author-act', u, db, async () => {
+      const res = await serve(act, r.clone(), u);
+      if (stopped) throw new Error('1102: the isolate is gone');
+      return res;
+    }));
+  } finally {
+    platform.cpuCapped = platformWas;
+    delete gh.state.hooks[`/pulls/${b}/merge`];
+  }
+  assert.equal(branchMoves(), 1, 'the merge-again commit went through before the stop');
+  assert.equal(gh.repo(REPO).pulls.get(b).state, 'open');
+
+  // The page saw a 503 it can't read: the same request, &fallback, is queued (twice: once).
+  const [q, uq] = request('&fallback=network');
+  assert.equal((await write(q, '/api/author-act', uq, db, async () => assert.fail('not run inline'))).status, 202);
+  const [q2, uq2] = request('&fallback=network');
+  assert.equal((await write(q2, '/api/author-act', uq2, db, async () => assert.fail('not run inline'))).status, 202);
+
+  // The fallback (scripts/fallback.mjs): the same accept from the start, as the member checked when queued.
+  const claimed = await db.prepare(`UPDATE writes SET state = 'fallback', at = ?2 WHERE key = ?1 AND state = 'queued' RETURNING key, request`).bind(KEY, Date.now()).first();
+  const route = (url) => (url.pathname === '/api/author-act' ? act : null);
+  try {
+    assert.equal(await runOne(db, claimed, { route, serve, platform, event }), 200);
+  } finally {
+    testing.dispatch = dispatch;
+  }
+  // Written once: one merge-again commit (the branch was mergeable by then), one merge, both fixes once.
+  assert.equal(branchMoves(), 1);
+  assert.equal(merges(), 2, 'the stopped try and the one that merged');
+  assert.equal(gh.repo(REPO).pulls.get(b).merged, true);
+  assert.equal(gh.textAt(REPO, gh.repo(REPO).refs.get(DRAFTS), CH3_PATH), para3('The cat sat on the mat and looked at the dog.'));
+  assert.equal((await writeStatus(new URL(`https://x/?write_key=${KEY}`), db)).status, 200);
+  // The page asks again with the same key: the fallback's answer, nothing run.
+  const [again, ua] = request('');
+  const replay = await write(again, '/api/author-act', ua, db, async () => assert.fail('not run again'));
+  assert.equal(replay.status, 200);
+  assert.equal(replay.headers.get('X-Write'), 'replayed');
 });
 
 test('a proposal\'s page is the File line propose-edit wrote, never one inside the reader\'s summary', async () => {
@@ -1248,7 +1321,7 @@ test('review: drafts moved since the view (a second tab saved): rebuilt, good ti
   assert.equal(gh.repo(REPO).pulls.get(a).state, 'open');
 });
 
-test('review: an empty batch is refused; on the Worker the batch goes to Actions before any work', async () => {
+test('review: an empty batch is refused; on the Worker a batch runs there, as anywhere', async () => {
   resetBook();
   gh.commitFiles(REPO, DRAFTS, { [CH3_PATH]: page2(Q1, Q2) });
   const from = gh.repo(REPO).refs.get(DRAFTS);
@@ -1256,12 +1329,13 @@ test('review: an empty batch is refused; on the Worker the batch goes to Actions
   assert.equal(empty.statusCode, 400);
   assert.equal(empty.payload.userMessage, 'Tick at least one change, or edit a paragraph, to save.');
   const { platform } = await import('../lib/platform.mjs');
+  const batch = { book: BOOK.slug, action: 'review-accept', path: CH3_PATH, drafts: from, hunks: ['p1-x'] };
+  const node = await call(act, { body: batch });
   platform.cpuCapped = true;
   try {
-    const before = gh.state.calls.length;
-    const r = await call(act, { body: { book: BOOK.slug, action: 'review-accept', path: CH3_PATH, drafts: from, hunks: ['p1-x'] } });
-    assert.equal(r.statusCode, 503);
-    assert.ok(!gh.state.calls.slice(before).some((x) => x.url.includes('/graphql') || x.method !== 'POST' || !x.url.includes('access_tokens')), 'no GitHub reads');
+    const r = await call(act, { body: batch });
+    assert.notEqual(r.statusCode, 503);
+    assert.equal(r.statusCode, node.statusCode, JSON.stringify(r.payload));
   } finally {
     platform.cpuCapped = false;
   }
@@ -1418,7 +1492,7 @@ test('publish a chapter linking to a concept page only in the drafts: asked firs
   assert.equal(gh.textAt(REPO, gh.repo(REPO).refs.get(openPublish().head.ref), 'chapters/Definitions/Realism.md'), '# Realism (a concept)\n\nThe view that…\n');
 });
 
-test('publish a chapter already live as the drafts have it: refused, nothing opened; on the Worker, to Actions at once', async () => {
+test('publish a chapter already live as the drafts have it: refused, nothing opened; the same on the Worker', async () => {
   resetBook();
   const r = await publishOne(CH3_PATH);
   assert.equal(r.statusCode, 409);
@@ -1426,7 +1500,7 @@ test('publish a chapter already live as the drafts have it: refused, nothing ope
   const { platform } = await import('../lib/platform.mjs');
   platform.cpuCapped = true;
   try {
-    assert.equal((await publishOne(CH3_PATH)).statusCode, 503);
+    assert.equal((await publishOne(CH3_PATH)).statusCode, 409);
   } finally {
     platform.cpuCapped = false;
   }

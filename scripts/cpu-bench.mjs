@@ -177,9 +177,9 @@ async function cases(slug) {
     out.push({ name: 'author-act[suggestion-decline]', member: true, method: 'POST', url: '/api/author-act', body: JSON.stringify({ book: slug, action: 'suggestion-decline', number: meta.suggestion, reason: 'A measured decline, never sent.' }), write: true });
   }
   if (meta.proposal) {
-    // Accepting a reader's edit the drafts have moved under: on the Worker, handed to the
-    // Actions fallback (503) before any merging, which costs more CPU than it has.
-    out.push({ name: 'author-act[change-accept]', member: true, method: 'POST', url: '/api/author-act', body: JSON.stringify({ book: slug, action: 'change-accept', number: meta.proposal }), write: true, expect: 503 });
+    // Accepting a reader's edit the drafts have moved under: merged again word by word and
+    // merged, inline (until 24 Nov a 503 to the Actions fallback, name "[change-accept]").
+    out.push({ name: 'author-act[change-accept-merge]', member: true, method: 'POST', url: '/api/author-act', body: JSON.stringify({ book: slug, action: 'change-accept', number: meta.proposal }), write: true });
   }
   if (meta.reviewProposal) {
     // The same review, one proposal of it read in full (the page asks for each on its own).

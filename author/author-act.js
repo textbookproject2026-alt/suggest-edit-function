@@ -63,7 +63,6 @@ import { lintAt, lintWords } from '../lib/lint-job.mjs';
 import { ACCEPTED_IN_PART, ACCEPTED_IN_PART_LABEL, acceptance, applyEdits, gather, rebase, viewOf } from '../lib/review.mjs';
 import { planChapter, planRest, publishChapter as openChapterPublish } from '../lib/publish-chapter.mjs';
 import { NEEDS_LOOK, markNeedsLook, readPull, reapply, startRefresh } from '../lib/reapply.mjs';
-import { platform } from '../lib/platform.mjs';
 import {
   GitHubError, SHA_RE, Refusal, appCredentials, authorise, bookFor, budget, byline, fail, gh, ghJson, graphqlRepo, isAuthorPath, limits, wrap,
 } from '../lib/author.mjs';
@@ -336,13 +335,6 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  */
 async function refreshed(book, pr, ctx, commits, partial = false) {
   const { token, left, tag } = ctx;
-  if (platform.cpuCapped) {
-    // Merging it again is more than the Worker's 10 ms of CPU allows on top of an accept:
-    // answered 503 at once, before any of it, so the page sends it to the Actions fallback
-    // ("Applying…"), which runs this same accept with no cap.
-    console.log(`draft change #${pr.number}: the drafts moved under it, left to the fallback to merge again ${tag}`);
-    throw new Refusal(503, 'reapply in actions', 'Applying… this can take up to a minute.');
-  }
   const r = await reapply(book, pr, token, left, { commits, partial });
   if (r.state === 'overlap') {
     if (!hasLook(pr)) await markNeedsLook(book, pr.number, true, token, left, tag);
@@ -393,6 +385,9 @@ async function changeAccept(book, body, ctx) {
   let sha = pr.head?.sha;
   let redone = false;
   let kept = [];
+  // On the Worker this runs inline too (24 Nov: 0 error 1102 in 3406 live requests, up to
+  // 42 ms). If Cloudflare stops it part-way, the page's fallback runs it again from the
+  // start: a branch already merged again is mergeable, a PR already merged is "already in".
   if (pr.mergeable === false) {
     ({ sha, overlaps: kept } = await refreshed(book, pr, ctx, commits, partial));
     redone = true;
@@ -502,12 +497,6 @@ async function reviewAccept(book, body, ctx) {
     throw new Refusal(400, 'validation: edits', 'Please reload the review and try again.');
   }
   if (!ids.length && !edits.length) throw new Refusal(400, 'validation: none ticked', 'Tick at least one change, or edit a paragraph, to save.');
-  if (platform.cpuCapped) {
-    // Merging every proposal again is far more than the Worker's 10 ms of CPU: answered
-    // 503 at once, before any of it, and the page sends it to the Actions fallback.
-    console.log(`review of ${path}: left to the fallback ${tag}`);
-    throw new Refusal(503, 'review in actions', 'Applying… this can take up to a minute.');
-  }
   const g = await gather(book, path, token, left);
   if (!g) throw new Refusal(409, 'page gone', 'That page isn’t in the drafts any more.');
   const view = viewOf(g, path);
@@ -636,10 +625,6 @@ async function publishChapter(book, body, ctx) {
   const path = body.path;
   if (!isAuthorPath(path) || !/\.md$/i.test(path)) throw new Refusal(400, 'validation: path', "That isn't one of the book's pages.");
   if (body.linked !== undefined && !['with', 'without'].includes(body.linked)) throw new Refusal(400, 'validation: linked', 'Please choose again.');
-  if (platform.cpuCapped) {
-    // Three trees, a three-way merge and the commit: more than the Worker's CPU. To Actions at once.
-    throw new Refusal(503, 'publish chapter in actions', 'Publishing… this can take up to a minute.');
-  }
   const plan = await planChapter(book, path, token, left, { withLinked: body.linked === 'with' });
   if (plan.linked.length && !body.linked) {
     throw new Refusal(409, 'linked pages', 'This chapter links to pages the live book hasn\'t got yet.', { linked: plan.linked });
@@ -658,7 +643,6 @@ async function publishChapter(book, body, ctx) {
 async function publishRest(book, body, ctx) {
   const { token, left, identity, tag } = ctx;
   if (body.linked !== undefined && !['with', 'without'].includes(body.linked)) throw new Refusal(400, 'validation: linked', 'Please choose again.');
-  if (platform.cpuCapped) throw new Refusal(503, 'publish rest in actions', 'Publishing… this can take up to a minute.');
   const plan = await planRest(book, token, left, { withLinked: body.linked === 'with' });
   if (plan.linked.length && !body.linked) {
     throw new Refusal(409, 'linked pages', 'These pages link to chapters the live book hasn\'t got yet.', { linked: plan.linked });

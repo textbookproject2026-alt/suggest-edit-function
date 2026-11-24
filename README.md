@@ -79,7 +79,9 @@ including the ones that commit to GitHub.
 
 **Writes: a key, and a fallback** (`worker/writes.mjs`). The Worker is on Cloudflare's
 free plan, 10 ms of CPU a request, and a commit can take more (measured 12 Oct: an
-author's save 12–35 ms; most still finish). So:
+author's save 12–35 ms; most still finish; 23 Nov: no 1102 in 3406 live requests of up
+to 42 ms). Accepts, the review's save and publishing run inline like every other write
+(until 24 Nov they handed themselves to Actions with a 503 before starting). So:
 
 - Every write (`POST` to `suggest-edit`, `propose-edit`, `request-book`, `author-send`,
   `author-import`, `author-act`, `author-people-change`) carries `?write_key=`, made by
